@@ -905,6 +905,43 @@ def create_app(
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"job": _job_response(job)}
 
+    @app.post("/api/batches/{batch_id}/retry-failed", status_code=202)
+    def retry_failed_batch(
+        batch_id: str,
+        workspace: UserWorkspace = Depends(operator_workspace),
+    ) -> dict:
+        if not batch_id or len(batch_id) > 128:
+            raise HTTPException(status_code=422, detail="批次编号无效")
+        matching = [
+            job
+            for job in workspace.store.list_jobs(limit=None)
+            if job.get("batch_id") == batch_id
+        ]
+        if not matching:
+            raise HTTPException(status_code=404, detail="批量任务不存在")
+        failed = [
+            job
+            for job in matching
+            if job.get("status") == "failed" and job.get("kind") == "publish"
+        ]
+        if not failed:
+            raise HTTPException(status_code=409, detail="该批次没有可重新执行的失败任务")
+        new_batch_id = uuid.uuid4().hex
+        try:
+            jobs = workspace.task_manager.retry_failed_batch(
+                batch_id, new_batch_id=new_batch_id
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if not jobs:
+            raise HTTPException(status_code=409, detail="该批次的失败任务状态已变化，请刷新后重试")
+        return {
+            "source_batch_id": batch_id,
+            "batch_id": new_batch_id,
+            "created_count": len(jobs),
+            "jobs": [_job_response(job) for job in jobs],
+        }
+
     @app.get("/api/jobs/{job_id}/events")
     async def job_events(
         job_id: str,

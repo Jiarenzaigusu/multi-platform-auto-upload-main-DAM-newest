@@ -807,9 +807,9 @@ def _run_status_window(
     ).pack(fill="x", ipady=5)
 
     def run_tmall_path_import() -> None:
-        """Launch the bundled Windows Tmall workbook path import utility."""
+        """Launch the bundled Windows Tmall/JD workbook path import utility."""
         if os.name != "nt":
-            messagebox.showinfo("天猫路径导入", "该工具仅支持 Windows。")
+            messagebox.showinfo("批量发布路径导入", "该工具仅支持 Windows。")
             return
         import subprocess
 
@@ -827,7 +827,7 @@ def _run_status_window(
                 / "TmallVideoPathImport.ps1"
             )
         if not script_path.is_file():
-            messagebox.showerror("天猫路径导入", "找不到路径导入脚本，请重新安装本地执行助手。")
+            messagebox.showerror("批量发布路径导入", "找不到路径导入脚本，请重新安装本地执行助手。")
             return
         try:
             powershell = (
@@ -850,7 +850,7 @@ def _run_status_window(
                 cwd=str(script_path.parent),
             )
         except OSError as exc:
-            messagebox.showerror("天猫路径导入", f"无法启动路径导入工具：{exc}")
+            messagebox.showerror("批量发布路径导入", f"无法启动路径导入工具：{exc}")
 
     theme.primary_button(
         conn_inner,

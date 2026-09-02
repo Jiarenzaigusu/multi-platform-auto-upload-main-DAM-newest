@@ -521,6 +521,9 @@ const canCancelJob = (job) => ['queued', 'running'].includes(job.status)
 const canSelectJob = (job) => canCancelJob(job) || canDeleteJob(job)
 const selectedCancelableJobs = computed(() => jobs.value.filter((job) => selectedJobIds.value.includes(job.id) && canCancelJob(job)))
 const selectedDeletableJobs = computed(() => jobs.value.filter((job) => selectedJobIds.value.includes(job.id) && canDeleteJob(job)))
+const retryableBatchIds = computed(() => [...new Set(
+  jobs.value.filter((job) => job.status === 'failed' && job.batch_id).map((job) => job.batch_id),
+)])
 const visibleAccounts = computed(() => accounts.value.filter((item) => item.platform === form.platform))
 const batchAccounts = computed(() => accounts.value.filter((item) => item.platform === batchForm.platform))
 const viewTitle = computed(() => ({
@@ -913,6 +916,19 @@ async function batchCancelJobs() {
     await refreshDashboard()
   } finally {
     batchCancelling.value = false
+  }
+}
+
+async function retryFailedBatch(batchId) {
+  if (!batchId) return
+  const failedCount = jobs.value.filter((job) => job.batch_id === batchId && job.status === 'failed').length
+  if (!failedCount || !window.confirm(`确定重新执行该批次的 ${failedCount} 条失败任务吗？已完成任务不会重复执行。`)) return
+  try {
+    const result = await request(`/api/batches/${encodeURIComponent(batchId)}/retry-failed`, { method: 'POST' })
+    showNotice(`已重新创建 ${result.created_count} 条失败任务`, 'success')
+    await refreshDashboard()
+  } catch (error) {
+    showNotice(error.message, 'error')
   }
 }
 
@@ -1647,9 +1663,10 @@ onBeforeUnmount(() => {
 
       <section v-else-if="activeView === 'jobs'" class="jobs-layout">
         <div class="jobs-card"><div class="section-heading"><span>LIVE</span><div><h2>任务记录</h2><p>每页最多 500 条并自动刷新；点击条目可查看该任务的独立日志。</p></div></div>
-          <div v-if="jobs.some(canSelectJob)" class="batch-toolbar">
+          <div v-if="jobs.some(canSelectJob) || retryableBatchIds.length" class="batch-toolbar">
             <label class="batch-toggle"><input type="checkbox" :checked="jobs.filter(canSelectJob).length > 0 && selectedJobIds.length === jobs.filter(canSelectJob).length" :indeterminate.prop="selectedJobIds.length > 0 && selectedJobIds.length < jobs.filter(canSelectJob).length" @change="toggleSelectAllJobs" /><span>当前页任务{{ selectedJobIds.length ? `已选 ${selectedJobIds.length} 条` : '全选' }}</span></label>
             <div class="batch-actions">
+              <button v-for="batchId in retryableBatchIds" :key="`retry-${batchId}`" type="button" class="quiet" @click="retryFailedBatch(batchId)">重执行批次 {{ batchId.slice(0, 6) }} 失败项</button>
               <button type="button" class="cancel-job" :disabled="!selectedCancelableJobs.length || batchCancelling" @click="batchCancelJobs">{{ batchCancelling ? '中断中…' : `批量中断${selectedCancelableJobs.length ? `（${selectedCancelableJobs.length} 条）` : ''}` }}</button>
               <button type="button" class="delete-job" :disabled="!selectedDeletableJobs.length || batchDeleting" @click="batchDeleteJobs">{{ batchDeleting ? '删除中…' : `批量删除${selectedDeletableJobs.length ? `（${selectedDeletableJobs.length} 条）` : ''}` }}</button>
             </div>

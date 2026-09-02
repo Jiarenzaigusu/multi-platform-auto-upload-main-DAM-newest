@@ -201,6 +201,39 @@ class AgentTaskManager:
         self._notify_job_available()
         return jobs
 
+    def retry_failed_batch(self, batch_id: str, *, new_batch_id: str) -> list[dict[str, Any]]:
+        """Clone failed workbook rows while retaining their local PC paths."""
+        self.start()
+        failed = sorted(
+            (
+                job
+                for job in self.store.list_jobs(limit=None)
+                if job.get("batch_id") == batch_id
+                and job.get("kind") == "publish"
+                and job.get("status") == "failed"
+            ),
+            key=lambda job: (job.get("source_row") or 0, job["id"]),
+        )
+        if not failed:
+            return []
+        jobs = self.store.create_jobs(
+            [
+                {
+                    "kind": "publish",
+                    "platform": job["platform"],
+                    "account": job["account"],
+                    "payload": job["payload"],
+                    "batch_id": new_batch_id,
+                    "source_row": job.get("source_row"),
+                    "retry_of": job["id"],
+                    "message": "失败任务已重新排队，等待用户电脑上的本地执行代理领取",
+                }
+                for job in failed
+            ]
+        )
+        self._notify_job_available()
+        return jobs
+
     def issue_local_upload_ticket(
         self,
         *,

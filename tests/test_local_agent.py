@@ -26,7 +26,12 @@ from local_agent import desktop
 from local_agent.desktop import _connect_with_status_window
 from local_agent import autostart
 from local_agent.local_upload import LocalUploadServer
-from local_agent.main import LocalAgentApplication, _agent_log, _server_url
+from local_agent.main import (
+    LocalAgentApplication,
+    _agent_log,
+    _server_url,
+    _stage_local_asset_with_original_name,
+)
 from local_agent.runner import AgentJobRunner
 from uploader.errors import PublishResultUncertainError
 from webapp.ai_copy.contracts import ProductReference
@@ -77,6 +82,23 @@ class AgentTaskManagerTests(unittest.TestCase):
             self.assertIsNone(workspace.task_manager.browser_runtime)
         finally:
             registry.close()
+
+    def test_local_asset_is_staged_with_original_filename(self):
+        source = self.paths.runtime / "assets" / f"{'c' * 32}.mp4"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"video")
+        destination_dir = self.paths.uploads / "job-test"
+        destination_dir.mkdir(parents=True)
+
+        staged = _stage_local_asset_with_original_name(
+            source,
+            destination_dir,
+            {"filename": "商品介绍.mp4"},
+            lambda value: str(value),
+        )
+
+        self.assertEqual(staged.name, "商品介绍.mp4")
+        self.assertEqual(staged.read_bytes(), b"video")
 
     def test_agent_claims_and_completes_a_queued_job(self):
         job = self.manager.submit_account_task(

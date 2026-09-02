@@ -17,6 +17,7 @@ const error = ref('')
 const copied = ref(false)
 const installerName = 'MPAU-Agent-Setup.exe'
 const installerUrl = '/downloads/MPAU-Agent-Setup.exe'
+const serverAddress = window.location.origin
 
 function compareVersions(a, b) {
   const parse = (value) => String(value || '').replace(/^v/, '').split('.').map((part) => Number.parseInt(part, 10) || 0)
@@ -126,7 +127,7 @@ function copyWithLegacyClipboard(value) {
         <small>{{ copied ? '已复制到剪贴板' : `${expiryLabel()} · 点击复制` }}</small>
       </button>
       <p v-if="error" class="agent-dialog-error" role="alert">{{ error }}</p>
-      <p class="agent-dialog-note">发布台地址填写当前网页地址，例如 <code>http://10.31.108.221:8788</code>。</p>
+      <p class="agent-dialog-note">发布台地址填写当前网页地址：<code>{{ serverAddress }}</code>。</p>
     </section>
   </div>
 </template>

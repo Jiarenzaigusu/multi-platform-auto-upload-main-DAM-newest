@@ -88,6 +88,8 @@ class JobStore:
             for field in ("started_at", "finished_at"):
                 if job.get(field) is not None and not isinstance(job[field], str):
                     raise ValueError(f"任务 {job_id} 的 {field} 无效")
+            if job.get("retry_of") is not None and not isinstance(job["retry_of"], str):
+                raise ValueError(f"任务 {job_id} 的 retry_of 无效")
         normalized = dict(state)
         normalized["accounts"] = accounts
         normalized["jobs"] = jobs
@@ -295,6 +297,7 @@ class JobStore:
                     "result": {},
                     "batch_id": definition.get("batch_id"),
                     "source_row": definition.get("source_row"),
+                    "retry_of": definition.get("retry_of"),
                     "created_at": created_at,
                     "started_at": None,
                     "finished_at": None,

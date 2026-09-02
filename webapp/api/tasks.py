@@ -254,6 +254,39 @@ class TaskManager:
                 raise
         return jobs
 
+    def retry_failed_batch(self, batch_id: str, *, new_batch_id: str) -> list[dict[str, Any]]:
+        """Clone only failed rows from a batch and enqueue them as a new batch."""
+        failed = sorted(
+            (
+                job
+                for job in self.store.list_jobs(limit=None)
+                if job.get("batch_id") == batch_id
+                and job.get("kind") == "publish"
+                and job.get("status") == "failed"
+            ),
+            key=lambda job: (job.get("source_row") or 0, job["id"]),
+        )
+        if not failed:
+            return []
+        definitions = [
+            {
+                "kind": "publish",
+                "platform": job["platform"],
+                "account": job["account"],
+                "payload": job["payload"],
+                "batch_id": new_batch_id,
+                "source_row": job.get("source_row"),
+                "retry_of": job["id"],
+            }
+            for job in failed
+        ]
+        with self._task_guard:
+            if self._shutting_down:
+                raise RuntimeError("任务管理器正在关闭，不能重新执行失败任务")
+            jobs = self.store.create_jobs(definitions)
+            self._enqueue_jobs_locked(jobs)
+        return jobs
+
     def shutdown(self) -> None:
         immediately_cancelled: list[str] = []
         with self._task_guard:

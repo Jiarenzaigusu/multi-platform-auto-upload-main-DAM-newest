@@ -708,7 +708,7 @@ class PublishRequestValidationTests(unittest.TestCase):
             if detached:
                 body.inner_text = AsyncMock(side_effect=RuntimeError("Frame was detached"))
             else:
-                body.inner_text = AsyncMock(return_value="等待视频上传")
+                body.inner_text = AsyncMock(return_value="视频已就绪")
 
             edit_button = MagicMock()
             edit_button.count = AsyncMock(return_value=1)
@@ -717,6 +717,13 @@ class PublishRequestValidationTests(unittest.TestCase):
             edit_locator = MagicMock()
             edit_locator.filter.return_value.first = edit_button
 
+            preview = MagicMock()
+            preview.count = AsyncMock(return_value=1)
+            preview.evaluate = AsyncMock(return_value=True)
+
+            preview_locator = MagicMock()
+            preview_locator.first = preview
+
             frame = MagicMock()
 
             def locator(selector):
@@ -724,6 +731,8 @@ class PublishRequestValidationTests(unittest.TestCase):
                     return body
                 if selector == ".edit-cover-btn":
                     return edit_locator
+                if selector == ".video-cover-wrapper .preview-img":
+                    return preview_locator
                 raise AssertionError(f"unexpected selector: {selector}")
 
             frame.locator.side_effect = locator
@@ -2477,6 +2486,74 @@ class ApiEndpointTests(unittest.TestCase):
                 self.assertEqual(store.get_job(completed_job["id"])["status"], "succeeded")
                 self.assertEqual(len(store.list_accounts()), 3)
             finally:
+                manager.shutdown()
+
+    def test_retry_failed_batch_creates_only_failed_rows(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            paths = AppDataPaths.create(root / "data").for_user(TEST_USER_ID)
+            store = JobStore(paths.runtime)
+            failed = store.create_job(
+                kind="publish",
+                platform="jd",
+                account="shop1",
+                payload={"content_type": "video", "video_path": "C:/video.mp4"},
+                batch_id="batch-old",
+                source_row=3,
+            )
+            succeeded = store.create_job(
+                kind="publish",
+                platform="jd",
+                account="shop1",
+                payload={"content_type": "video", "video_path": "C:/done.mp4"},
+                batch_id="batch-old",
+                source_row=4,
+            )
+            store.update_job(failed["id"], status="failed", error="封面解析超时")
+            store.update_job(succeeded["id"], status="succeeded")
+            manager = AgentTaskManager(store, user_id=TEST_USER_ID, paths=paths)
+            app = create_app(
+                WebSettings(data_dir=root / "app-data", frontend_dist_dir=root / "missing"),
+                manager,
+            )
+            endpoint = next(
+                route.endpoint
+                for route in app.routes
+                if route.path == "/api/batches/{batch_id}/retry-failed"
+            )
+            try:
+                result = endpoint("batch-old", workspace=app.state.test_workspace)
+                self.assertEqual(result["created_count"], 1)
+                retried = store.get_job(result["jobs"][0]["id"])
+                self.assertEqual(retried["source_row"], 3)
+                self.assertEqual(retried["retry_of"], failed["id"])
+                self.assertEqual(retried["payload"], failed["payload"])
+            finally:
+                manager.shutdown()
+
+    def test_local_task_manager_retries_only_failed_batch_rows(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = JobStore(Path(temp_dir) / "runtime")
+            manager = TaskManager(store, runner=lambda _job: {"message": "complete"})
+            failed = store.create_job(
+                kind="publish",
+                platform="jd",
+                account="shop1",
+                payload={"content_type": "video", "video_path": "C:/failed.mp4"},
+                batch_id="batch-old",
+                source_row=8,
+            )
+            store.update_job(failed["id"], status="failed", error="封面解析超时")
+            try:
+                retried = manager.retry_failed_batch(
+                    "batch-old", new_batch_id="batch-retry"
+                )
+                self.assertEqual(len(retried), 1)
+                self.assertEqual(retried[0]["batch_id"], "batch-retry")
+                self.assertEqual(retried[0]["retry_of"], failed["id"])
+                self.assertEqual(retried[0]["source_row"], 8)
+            finally:
+                manager.wait_for_account_idle("jd", "shop1", timeout=2)
                 manager.shutdown()
 
 

@@ -54,6 +54,21 @@ def _local_asset_path(asset_root: Path, asset: object, expected_kind: str) -> Pa
     return path
 
 
+def _stage_local_asset_with_original_name(
+    source: Path, directory: Path, asset: object, validator
+) -> Path:
+    """Expose a locally uploaded asset to the browser under its original filename."""
+    if not isinstance(asset, dict):
+        raise RuntimeError("任务中的本机素材信息无效")
+    filename = validator(asset.get("filename") or source.name)
+    destination = directory / filename
+    try:
+        os.link(source, destination)
+    except OSError:
+        shutil.copy2(source, destination)
+    return destination
+
+
 class AgentJobCancelledError(RuntimeError):
     pass
 
@@ -346,16 +361,31 @@ class LocalAgentApplication:
                             raise RuntimeError("任务中的本机图文素材数量无效")
                         resolved_assets.extend(image_paths)
                     else:
-                        video_path = _local_asset_path(
-                            asset_root, local_assets.get("video"), "video"
+                        video_asset = local_assets.get("video")
+                        stored_video_path = _local_asset_path(
+                            asset_root, video_asset, "video"
                         )
-                        resolved_assets.append(video_path)
+                        resolved_assets.append(stored_video_path)
                         local_asset_paths = tuple(resolved_assets)
+                        download_dir = secure_directory(self.runner.paths.uploads / job_id)
+                        video_path = _stage_local_asset_with_original_name(
+                            stored_video_path,
+                            download_dir,
+                            video_asset,
+                            validate_media_filename,
+                        )
                         if local_assets.get("cover"):
-                            cover_image_path = _local_asset_path(
-                                asset_root, local_assets["cover"], "cover"
+                            cover_asset = local_assets["cover"]
+                            stored_cover_path = _local_asset_path(
+                                asset_root, cover_asset, "cover"
                             )
-                            resolved_assets.append(cover_image_path)
+                            resolved_assets.append(stored_cover_path)
+                            cover_image_path = _stage_local_asset_with_original_name(
+                                stored_cover_path,
+                                download_dir,
+                                cover_asset,
+                                validate_cover_image_filename,
+                            )
                             local_asset_paths = tuple(resolved_assets)
                     local_asset_paths = tuple(resolved_assets)
                 elif payload.get("managed_upload", True):

@@ -717,13 +717,6 @@ class PublishRequestValidationTests(unittest.TestCase):
             edit_locator = MagicMock()
             edit_locator.filter.return_value.first = edit_button
 
-            preview = MagicMock()
-            preview.count = AsyncMock(return_value=1)
-            preview.evaluate = AsyncMock(return_value=True)
-
-            preview_locator = MagicMock()
-            preview_locator.first = preview
-
             frame = MagicMock()
 
             def locator(selector):
@@ -731,8 +724,6 @@ class PublishRequestValidationTests(unittest.TestCase):
                     return body
                 if selector == ".edit-cover-btn":
                     return edit_locator
-                if selector == ".video-cover-wrapper .preview-img":
-                    return preview_locator
                 raise AssertionError(f"unexpected selector: {selector}")
 
             frame.locator.side_effect = locator

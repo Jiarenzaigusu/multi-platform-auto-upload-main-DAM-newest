@@ -100,6 +100,16 @@ class AgentTaskManagerTests(unittest.TestCase):
         self.assertEqual(staged.name, "商品介绍.mp4")
         self.assertEqual(staged.read_bytes(), b"video")
 
+    def test_path_import_script_has_windows_powershell_utf8_bom(self):
+        script = (
+            Path(__file__).parents[1]
+            / "local_agent"
+            / "assets"
+            / "tmall_path_import"
+            / "TmallVideoPathImport.ps1"
+        )
+        self.assertTrue(script.read_bytes().startswith(b"\xef\xbb\xbf"))
+
     def test_agent_claims_and_completes_a_queued_job(self):
         job = self.manager.submit_account_task(
             kind="login", platform="tmall", account="shop1", headed=True

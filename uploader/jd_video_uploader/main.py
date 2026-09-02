@@ -431,7 +431,7 @@ class JDVideo(JDBaseUploader):
     ) -> Frame:
         """等视频上传完成，京麦重载发布 iframe 时自动重新绑定。
 
-        判定信号：处理提示消失，且自动生成的封面预览连续两次可用。
+        判定信号：处理提示消失，且“修改封面”入口连续两次可用。
         :param page_or_frame: 京麦发布页；兼容旧调用时也可以直接传发布 iframe
         :param frame: 发布 iframe
         :param timeout_seconds: 超时秒数（默认 600 秒 = 10 分钟）
@@ -462,17 +462,8 @@ class JDVideo(JDBaseUploader):
                     hint in body_text
                     for hint in ("等待视频上传", "视频上传中", "封面解析中", "视频解析中", "正在解析")
                 )
-                preview = current_frame.locator(".video-cover-wrapper .preview-img").first
-                preview_ready = False
-                if await preview.count():
-                    preview_ready = bool(await preview.evaluate("""
-                        element => {
-                            const src = element.currentSrc || element.getAttribute('src') || '';
-                            return Boolean(src) && (!('complete' in element) || (element.complete && element.naturalWidth > 0));
-                        }
-                    """))
                 edit_ready = bool(await edit_cover.count() and await edit_cover.is_visible())
-                stable_ready_polls = stable_ready_polls + 1 if edit_ready and preview_ready and not processing else 0
+                stable_ready_polls = stable_ready_polls + 1 if edit_ready and not processing else 0
                 if stable_ready_polls >= 2:
                     elapsed = max(0, timeout_seconds - int(deadline - loop.time()))
                     jd_logger.success(

@@ -352,6 +352,8 @@ const jobsPageSize = 500
 const accounts = ref([])
 const activeView = ref('publish')
 const selectedJob = ref(null)
+const expandedBatchIds = ref(new Set())
+const selectedBatch = ref(null)
 const jobLogs = ref([])
 const videoInput = ref(null)
 const imageInput = ref(null)
@@ -521,9 +523,42 @@ const canCancelJob = (job) => ['queued', 'running'].includes(job.status)
 const canSelectJob = (job) => canCancelJob(job) || canDeleteJob(job)
 const selectedCancelableJobs = computed(() => jobs.value.filter((job) => selectedJobIds.value.includes(job.id) && canCancelJob(job)))
 const selectedDeletableJobs = computed(() => jobs.value.filter((job) => selectedJobIds.value.includes(job.id) && canDeleteJob(job)))
-const retryableBatchIds = computed(() => [...new Set(
-  jobs.value.filter((job) => job.status === 'failed' && job.batch_id).map((job) => job.batch_id),
-)])
+function aggregateBatchStatus(batchJobs) {
+  const statuses = batchJobs.map((job) => job.status)
+  if (statuses.includes('failed')) return 'failed'
+  if (statuses.includes('uncertain')) return 'uncertain'
+  if (statuses.includes('running')) return 'running'
+  if (statuses.includes('cancelling')) return 'cancelling'
+  if (statuses.includes('queued')) return 'queued'
+  if (statuses.every((status) => status === 'cancelled')) return 'cancelled'
+  return 'succeeded'
+}
+const batchGroups = computed(() => {
+  const groups = new Map()
+  const rows = []
+  for (const job of jobs.value) {
+    if (!job.batch_id) {
+      rows.push({ type: 'job', job })
+      continue
+    }
+    let group = groups.get(job.batch_id)
+    if (!group) {
+      group = { type: 'batch', batchId: job.batch_id, jobs: [] }
+      groups.set(job.batch_id, group)
+      rows.push(group)
+    }
+    group.jobs.push(job)
+  }
+  for (const group of rows.filter((row) => row.type === 'batch')) {
+    const statuses = group.jobs.map((job) => job.status)
+    group.failedCount = statuses.filter((status) => status === 'failed').length
+    group.activeCount = statuses.filter((status) => !terminalStatuses.has(status)).length
+    group.succeededCount = statuses.filter((status) => status === 'succeeded').length
+    group.status = aggregateBatchStatus(group.jobs)
+    group.title = `${platformLabel(group.jobs[0].platform)} · ${group.jobs[0].account}`
+  }
+  return rows
+})
 const visibleAccounts = computed(() => accounts.value.filter((item) => item.platform === form.platform))
 const batchAccounts = computed(() => accounts.value.filter((item) => item.platform === batchForm.platform))
 const viewTitle = computed(() => ({
@@ -754,6 +789,11 @@ async function refreshDashboard() {
           agentStatus.unavailable = true
         }
         syncJobSelection()
+        if (selectedBatch.value) {
+          selectedBatch.value = batchGroups.value.find(
+            (row) => row.type === 'batch' && row.batchId === selectedBatch.value.batchId,
+          ) || null
+        }
         if (selectedJob.value) await loadJob(selectedJob.value.id, false)
         break
       }
@@ -775,9 +815,28 @@ async function changeJobsPage(direction) {
 
 async function loadJob(jobId, openPanel = true) {
   const result = await request(`/api/jobs/${jobId}`)
+  selectedBatch.value = null
   selectedJob.value = result.job
   jobLogs.value = result.logs
   if (openPanel) activeView.value = 'jobs'
+}
+
+function toggleBatch(group) {
+  const next = new Set(expandedBatchIds.value)
+  if (next.has(group.batchId)) next.delete(group.batchId)
+  else next.add(group.batchId)
+  expandedBatchIds.value = next
+  selectedBatch.value = group
+  selectedJob.value = null
+  jobLogs.value = []
+}
+
+function selectBatch(group) {
+  const actionable = group.jobs.filter(canSelectJob).map((job) => job.id)
+  const allSelected = actionable.length > 0 && actionable.every((id) => selectedJobIds.value.includes(id))
+  selectedJobIds.value = allSelected
+    ? selectedJobIds.value.filter((id) => !actionable.includes(id))
+    : [...new Set([...selectedJobIds.value, ...actionable])]
 }
 
 async function deleteJob(job) {
@@ -1663,24 +1722,40 @@ onBeforeUnmount(() => {
 
       <section v-else-if="activeView === 'jobs'" class="jobs-layout">
         <div class="jobs-card"><div class="section-heading"><span>LIVE</span><div><h2>任务记录</h2><p>每页最多 500 条并自动刷新；点击条目可查看该任务的独立日志。</p></div></div>
-          <div v-if="jobs.some(canSelectJob) || retryableBatchIds.length" class="batch-toolbar">
+          <div v-if="jobs.some(canSelectJob)" class="batch-toolbar">
             <label class="batch-toggle"><input type="checkbox" :checked="jobs.filter(canSelectJob).length > 0 && selectedJobIds.length === jobs.filter(canSelectJob).length" :indeterminate.prop="selectedJobIds.length > 0 && selectedJobIds.length < jobs.filter(canSelectJob).length" @change="toggleSelectAllJobs" /><span>当前页任务{{ selectedJobIds.length ? `已选 ${selectedJobIds.length} 条` : '全选' }}</span></label>
             <div class="batch-actions">
-              <button v-for="batchId in retryableBatchIds" :key="`retry-${batchId}`" type="button" class="quiet" @click="retryFailedBatch(batchId)">重执行批次 {{ batchId.slice(0, 6) }} 失败项</button>
               <button type="button" class="cancel-job" :disabled="!selectedCancelableJobs.length || batchCancelling" @click="batchCancelJobs">{{ batchCancelling ? '中断中…' : `批量中断${selectedCancelableJobs.length ? `（${selectedCancelableJobs.length} 条）` : ''}` }}</button>
               <button type="button" class="delete-job" :disabled="!selectedDeletableJobs.length || batchDeleting" @click="batchDeleteJobs">{{ batchDeleting ? '删除中…' : `批量删除${selectedDeletableJobs.length ? `（${selectedDeletableJobs.length} 条）` : ''}` }}</button>
             </div>
           </div>
-          <article v-for="job in jobs" :key="job.id" class="job-row" :class="{ selected: selectedJobIds.includes(job.id) }">
-            <input v-if="canSelectJob(job)" type="checkbox" class="job-select" :checked="selectedJobIds.includes(job.id)" @change="toggleJobSelection(job)" :aria-label="`选中任务 ${job.id}`" />
-            <span v-else class="job-select-spacer" aria-hidden="true"></span>
-            <button class="job-details" :class="{ current: selectedJob?.id === job.id }" type="button" @click="loadJob(job.id)"><span class="job-platform">{{ platformLabel(job.platform) }}</span><span class="job-title"><strong>{{ jobLabel(job.kind) }}<template v-if="job.source_row"> · Excel 第 {{ job.source_row }} 行</template> · {{ job.account }}</strong><small>{{ job.message }}</small></span><span :class="statusClass(job.status)">{{ statusLabel(job.status) }}</span></button>
-            <div v-if="canCancelJob(job) || canDeleteJob(job)" class="job-actions"><button v-if="canCancelJob(job)" class="cancel-job" type="button" @click="cancelJob(job)">中断任务</button><button v-if="canDeleteJob(job)" class="delete-job" type="button" @click="deleteJob(job)">删除</button></div>
-          </article>
+          <template v-for="row in batchGroups" :key="row.type === 'batch' ? row.batchId : row.job.id">
+            <article v-if="row.type === 'job'" class="job-row" :class="{ selected: selectedJobIds.includes(row.job.id) }">
+              <input v-if="canSelectJob(row.job)" type="checkbox" class="job-select" :checked="selectedJobIds.includes(row.job.id)" @change="toggleJobSelection(row.job)" :aria-label="`选中任务 ${row.job.id}`" />
+              <span v-else class="job-select-spacer" aria-hidden="true"></span>
+              <button class="job-details" :class="{ current: selectedJob?.id === row.job.id }" type="button" @click="loadJob(row.job.id)"><span class="job-platform">{{ platformLabel(row.job.platform) }}</span><span class="job-title"><strong>{{ jobLabel(row.job.kind) }}<template v-if="row.job.source_row"> · Excel 第 {{ row.job.source_row }} 行</template> · {{ row.job.account }}</strong><small>{{ row.job.message }}</small></span><span :class="statusClass(row.job.status)">{{ statusLabel(row.job.status) }}</span></button>
+              <div v-if="canCancelJob(row.job) || canDeleteJob(row.job)" class="job-actions"><button v-if="canCancelJob(row.job)" class="cancel-job" type="button" @click="cancelJob(row.job)">中断任务</button><button v-if="canDeleteJob(row.job)" class="delete-job" type="button" @click="deleteJob(row.job)">删除</button></div>
+            </article>
+            <template v-else>
+              <article class="job-row batch-row" :class="{ selected: row.jobs.some((job) => selectedJobIds.includes(job.id)) }">
+                <input type="checkbox" class="job-select" :disabled="!row.jobs.some(canSelectJob)" :checked="row.jobs.filter(canSelectJob).length > 0 && row.jobs.filter(canSelectJob).every((job) => selectedJobIds.includes(job.id))" @change="selectBatch(row)" :aria-label="`选中批次 ${row.batchId}`" />
+                <button class="job-details" :class="{ current: selectedBatch?.batchId === row.batchId }" type="button" @click="toggleBatch(row)"><span class="job-platform">批量发布</span><span class="job-title"><strong>{{ row.title }} · {{ row.jobs.length }} 条任务</strong><small>已完成 {{ row.succeededCount }} 条<template v-if="row.failedCount"> · 失败 {{ row.failedCount }} 条</template><template v-if="row.activeCount"> · 进行中 {{ row.activeCount }} 条</template></small></span><span :class="statusClass(row.status)">{{ statusLabel(row.status) }}</span></button>
+                <div class="job-actions"><button v-if="row.failedCount" type="button" class="quiet" @click="retryFailedBatch(row.batchId)">重执行失败项</button></div>
+              </article>
+              <div v-if="expandedBatchIds.has(row.batchId)" class="batch-children">
+                <article v-for="job in row.jobs" :key="job.id" class="job-row batch-child-row" :class="{ selected: selectedJobIds.includes(job.id) }">
+                  <input v-if="canSelectJob(job)" type="checkbox" class="job-select" :checked="selectedJobIds.includes(job.id)" @change="toggleJobSelection(job)" :aria-label="`选中任务 ${job.id}`" />
+                  <span v-else class="job-select-spacer" aria-hidden="true"></span>
+                  <button class="job-details" :class="{ current: selectedJob?.id === job.id }" type="button" @click="loadJob(job.id)"><span class="job-platform">{{ platformLabel(job.platform) }}</span><span class="job-title"><strong>{{ jobLabel(job.kind) }}<template v-if="job.source_row"> · Excel 第 {{ job.source_row }} 行</template> · {{ job.account }}</strong><small>{{ job.message }}</small></span><span :class="statusClass(job.status)">{{ statusLabel(job.status) }}</span></button>
+                  <div v-if="canCancelJob(job) || canDeleteJob(job)" class="job-actions"><button v-if="canCancelJob(job)" class="cancel-job" type="button" @click="cancelJob(job)">中断任务</button><button v-if="canDeleteJob(job)" class="delete-job" type="button" @click="deleteJob(job)">删除</button></div>
+                </article>
+              </div>
+            </template>
+          </template>
           <p v-if="!jobs.length" class="empty">还没有任务。先从“发布工作台”创建一个流程验证任务。</p>
           <div v-if="jobSummary.total" class="jobs-pagination"><span>第 {{ jobsPageStart }}-{{ jobsPageEnd }} 条，共 {{ jobSummary.total }} 条</span><div><button class="quiet" type="button" :disabled="!hasPreviousJobs" @click="changeJobsPage(-1)">上一页</button><button class="quiet" type="button" :disabled="!hasMoreJobs" @click="changeJobsPage(1)">下一页</button></div></div>
         </div>
-        <aside class="log-card"><div v-if="selectedJob"><div class="log-header"><div><p class="eyebrow">TASK DETAIL</p><h2>{{ platformLabel(selectedJob.platform) }} · {{ selectedJob.account }}</h2></div><span :class="statusClass(selectedJob.status)">{{ statusLabel(selectedJob.status) }}</span></div><p class="detail-message">{{ selectedJob.message }}</p><p v-if="selectedJob.error" class="error-message">{{ selectedJob.error }}</p><pre>{{ jobLogs.join('\n') || '暂时没有平台日志。任务启动后会在此显示最近日志。' }}</pre></div><p v-else class="empty">选择左侧任务查看详情与日志。</p></aside>
+        <aside class="log-card"><div v-if="selectedBatch"><div class="log-header"><div><p class="eyebrow">BATCH DETAIL</p><h2>{{ selectedBatch.title }}</h2></div><span :class="statusClass(selectedBatch.status)">{{ statusLabel(selectedBatch.status) }}</span></div><p class="detail-message">批次 {{ selectedBatch.batchId }} · 共 {{ selectedBatch.jobs.length }} 条，失败 {{ selectedBatch.failedCount }} 条</p><button v-if="selectedBatch.failedCount" type="button" class="quiet" @click="retryFailedBatch(selectedBatch.batchId)">一键重新执行失败任务</button><div class="batch-detail-list"><button v-for="job in selectedBatch.jobs" :key="job.id" type="button" class="batch-detail-item" @click="loadJob(job.id)"><span>Excel 第 {{ job.source_row || '-' }} 行 · {{ job.account }}</span><span :class="statusClass(job.status)">{{ statusLabel(job.status) }}</span></button></div></div><div v-else-if="selectedJob"><div class="log-header"><div><p class="eyebrow">TASK DETAIL</p><h2>{{ platformLabel(selectedJob.platform) }} · {{ selectedJob.account }}</h2></div><span :class="statusClass(selectedJob.status)">{{ statusLabel(selectedJob.status) }}</span></div><p class="detail-message">{{ selectedJob.message }}</p><p v-if="selectedJob.error" class="error-message">{{ selectedJob.error }}</p><pre>{{ jobLogs.join('\n') || '暂时没有平台日志。任务启动后会在此显示最近日志。' }}</pre></div><p v-else class="empty">选择左侧任务查看详情与日志。</p></aside>
       </section>
     </section>
   </main>

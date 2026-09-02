@@ -1239,6 +1239,46 @@ svg {
   background: #eef5e0;
 }
 
+.batch-row .job-details {
+  border-color: #ccd8c5;
+  background: #eef3e9;
+}
+
+.batch-children {
+  margin: -2px 0 10px 24px;
+  padding: 7px 0 1px 12px;
+  border-left: 2px solid #c7d6bc;
+}
+
+.batch-child-row .job-details {
+  background: #fafbf8;
+}
+
+.batch-detail-list {
+  display: grid;
+  gap: 7px;
+  margin-top: 14px;
+}
+
+.batch-detail-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid #d8e0d4;
+  border-radius: 8px;
+  color: #365146;
+  background: #f7f9f5;
+  text-align: left;
+}
+
+.batch-detail-item:hover {
+  border-color: #9fb68f;
+  background: #eef5e7;
+}
+
 .job-details {
   display: grid;
   grid-template-columns: 82px minmax(0, 1fr) auto;

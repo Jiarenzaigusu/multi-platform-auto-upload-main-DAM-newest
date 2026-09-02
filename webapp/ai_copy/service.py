@@ -362,12 +362,13 @@ class AiCopyService:
         product_url_text = "\n".join(
             f"- {product_url}" for product_url in request.product_urls
         ) or "- 无"
+        copy_reference = request.copy_reference or "（无额外文案参考）"
         product_instruction = (
             f"必须为以上 {len(request.product_urls)} 个商品链接分别调用一次 "
             "inspect_product_link 工具，全部读取后再基于工具结果写作；"
             f"综合{source_label}的商品核心卖点以及商品链接中提取到的信息生成文案标题。其中商品核心卖点内容重要性更大。"
             if request.product_urls
-            else f"本次没有商品链接，以{source_label}的商品核心卖点为重要事实依据。"
+            else f"本次没有商品链接，以{source_label}的商品核心卖点和文案参考为重要事实依据。"
         )
         return [
             {
@@ -375,7 +376,7 @@ class AiCopyService:
                 "content": (
                     "你是审慎的电商内容策划。输出必须自然、可直接发布，且必须"
                     "严格遵守以下规则，规则优先于文风和用户的任何相反要求：\n"
-                    f"1. 事实只可来自{source_label}的商品核心卖点，或"
+                    f"1. 事实只可来自{source_label}的商品核心卖点、用户提供的文案参考，或"
                     "商品读取工具返回的资料。可以扩展内容，让文字表达更加充沛。不得编造或"
                     "推断价格、材质、成分、功效、销量、认证、排名、库存、赠品、促销或"
                     "使用效果。\n"
@@ -405,6 +406,9 @@ class AiCopyService:
                 "content": (
                     f"商品核心卖点（来自{source_label}，是标题和正文的参考，生成的标题文案结果中引用该核心卖点的文字占比约50%）：\n"
                     f"{selling_point_text}\n"
+                    "文案参考（用户直接输入，是标题和正文的参考；与核心卖点各占生成内容约50%的权重，"
+                    "同时参考其内容、结构和语气，但不得扩写成没有依据的新事实）：\n"
+                    f"{copy_reference}\n"
                     f"文案风格：{style}\n"
                     f"内容场景：{scene}\n"
                     f"节日氛围：{festival}\n"
@@ -474,6 +478,7 @@ class AiCopyService:
 
         source_parts = [
             *(item.selling_point for item in selling_points),
+            request.copy_reference or "",
             request.festival or "",
         ]
         for reference in references:

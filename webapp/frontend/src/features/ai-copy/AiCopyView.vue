@@ -3,7 +3,7 @@
 
   功能：
   - 通过 Excel 匹配商品核心卖点，或直接输入核心卖点（二选一）
-  - 可选读取商品链接（最多 20 个，逐个调用商品读取工具）
+  - 可选直接输入文案参考，与核心卖点共同参与生成
   - 调用 LLM 生成标题与正文（含风格/场景/节日/目标字数）
   - 复制结果或导入发布工作台
 
@@ -59,7 +59,7 @@ const createDefaultForm = () => ({
   customStyle: '',
   customScene: '',
   customFestival: '',
-  productUrls: '',
+  copyReference: '',
 })
 const form = reactive(createDefaultForm())
 const loadingOptions = ref(true)
@@ -97,12 +97,6 @@ const productIdentifiers = computed(() => {
 })
 const manualSellingPoint = computed(() => form.manualSellingPoint.trim())
 const isManualSellingPointMode = computed(() => form.sellingPointInputMode === 'manual')
-const productUrls = computed(() => [...new Set(
-  form.productUrls
-    .split(/\s+/)
-    .map((value) => value.trim())
-    .filter(Boolean),
-)])
 const sellingPointEntryMap = computed(() => new Map(
   (sellingPointCatalog.value?.entries || []).map((entry) => [
     entry.identifier.trim().toLocaleLowerCase(),
@@ -349,7 +343,6 @@ const canGenerate = computed(() => (
       && productIdentifiers.value.length >= 1
       && productIdentifiers.value.length <= 20
       && missingProductIdentifiers.value.length === 0)
-  && productUrls.value.length <= 20
   && titleLimitValid.value
   && bodyLimitValid.value
   && titleCountValid.value
@@ -446,17 +439,6 @@ function clearSellingPointCatalog() {
   if (sellingPointFileInput.value) sellingPointFileInput.value.value = ''
 }
 
-function invalidateProductReferences() {
-  productReferences.value = []
-}
-
-function clearProductLinks() {
-  if (readingProduct.value) return
-  form.productUrls = ''
-  productReferences.value = []
-  error.value = ''
-}
-
 async function loadOptions() {
   loadingOptions.value = true
   try {
@@ -465,29 +447,6 @@ async function loadOptions() {
     error.value = `无法加载 AI 文案配置：${requestError.message}`
   } finally {
     loadingOptions.value = false
-  }
-}
-
-async function inspectProducts() {
-  clearFeedback()
-  if (!productUrls.value.length) {
-    error.value = '请至少粘贴一个商品链接'
-    return
-  }
-  if (productUrls.value.length > 20) {
-    error.value = '一次最多支持 20 个商品链接'
-    return
-  }
-  readingProduct.value = true
-  try {
-    productReferences.value = await api.inspectProducts({
-      product_urls: productUrls.value,
-    })
-  } catch (requestError) {
-    productReferences.value = []
-    error.value = requestError.message
-  } finally {
-    readingProduct.value = false
   }
 }
 
@@ -511,10 +470,6 @@ async function generateCopy() {
       error.value = '一次最多支持 20 个商品 ID 或货号'
       return
     }
-  }
-  if (productUrls.value.length > 20) {
-    error.value = '一次最多支持 20 个商品链接'
-    return
   }
   if (!isManualSellingPointMode.value && missingProductIdentifiers.value.length) {
     error.value = `Excel 中未找到：${missingProductIdentifiers.value.join('、')}`
@@ -563,7 +518,7 @@ async function generateCopy() {
       custom_style: form.customStyle.trim() || null,
       custom_scene: form.customScene.trim() || null,
       custom_festival: form.customFestival.trim() || null,
-      product_urls: productUrls.value,
+      copy_reference: form.copyReference.trim() || null,
       title_max_chars: titleLimit,
       body_max_chars: bodyLimit,
       title_count: titleCount,
@@ -582,14 +537,38 @@ async function generateCopy() {
 }
 
 async function copyText(field, value) {
+  const text = String(value ?? '')
+  if (!text) return
+  let copied = false
   try {
-    await navigator.clipboard.writeText(value)
-    copiedField.value = field
-    window.clearTimeout(copyTimer)
-    copyTimer = window.setTimeout(() => { copiedField.value = '' }, 1800)
+    if (window.isSecureContext && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+      copied = true
+    }
   } catch {
-    error.value = '浏览器未授予剪贴板权限，请手动选择文字复制'
+    // 非安全上下文或浏览器拒绝权限时，继续尝试兼容方案。
   }
+  if (!copied) {
+    const textarea = document.createElement('textarea')
+    textarea.value = text
+    textarea.setAttribute('readonly', '')
+    textarea.style.position = 'fixed'
+    textarea.style.opacity = '0'
+    document.body.appendChild(textarea)
+    textarea.select()
+    try {
+      copied = document.execCommand('copy')
+    } finally {
+      document.body.removeChild(textarea)
+    }
+  }
+  if (!copied) {
+    error.value = '浏览器未授予剪贴板权限，请手动选择文字复制'
+    return
+  }
+  copiedField.value = field
+  window.clearTimeout(copyTimer)
+  copyTimer = window.setTimeout(() => { copiedField.value = '' }, 1800)
 }
 
 function importToWorkbench() {
@@ -796,7 +775,7 @@ watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], 
       </div>
 
       <p v-if="!loadingOptions && !options.llm.ready" class="ai-copy-warning">
-        尚未激活 LLM。页面可正常填写与读取商品，生成前请前往左侧“LLM 适配器”选择模型并填写 API Key。
+        尚未激活 LLM。页面可正常填写，生成前请前往左侧“LLM 适配器”选择模型并填写 API Key。
       </p>
       <p v-if="error" class="ai-copy-error" role="alert">{{ error }}</p>
       <p v-if="success" class="ai-copy-success">{{ success }}</p>
@@ -1064,38 +1043,24 @@ watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], 
 
       <section class="ai-copy-product-panel">
         <div class="ai-copy-product-heading">
-          <div><p>PRODUCT REFERENCES</p><h3>多商品链接参考</h3></div>
-          <span>{{ productUrls.length ? `${productUrls.length} / 20` : '可选' }}</span>
+          <div><p>COPY REFERENCE</p><h3>文案参考</h3></div>
+          <span>{{ form.copyReference.trim() ? `${form.copyReference.trim().length} / 20000` : '可选' }}</span>
         </div>
-        <p class="ai-copy-product-help">每行粘贴一个天猫或京东商品链接，最多 20 个。生成时会逐条读取商品资料，再综合所有商品信息写文案。</p>
+        <p class="ai-copy-product-help">直接输入希望参考的文案内容。生成时会同时参考其内容、结构和语气，并保持与核心卖点各约一半的权重。</p>
         <div class="ai-copy-link-row">
           <textarea
-            v-model="form.productUrls"
-            rows="4"
+            v-model="form.copyReference"
+            rows="6"
             maxlength="20000"
-            spellcheck="false"
-            placeholder="每行一个天猫或京东商品链接&#10;https://detail.tmall.com/item.htm?id=...&#10;https://item.jd.com/....html"
-            @input="invalidateProductReferences"
+            placeholder="直接输入文案参考，例如喜欢的标题、正文、语气或结构……"
           />
           <button
-            :disabled="readingProduct || !productUrls.length || productUrls.length > 20"
-            type="button"
-            @click="inspectProducts"
-          >
-            {{ readingProduct ? '逐条读取中…' : productUrls.length ? `读取 ${productUrls.length} 个链接` : '读取链接' }}
-          </button>
-          <button
-            v-if="productUrls.length || productReferences.length"
+            v-if="form.copyReference.trim()"
             class="ai-copy-delete-link"
-            :disabled="readingProduct"
             type="button"
-            @click="clearProductLinks"
-          >清空链接</button>
+            @click="form.copyReference = ''; productReferences = []"
+          >清空参考</button>
         </div>
-
-        <p v-if="productUrls.length > 20" class="ai-copy-link-error">
-          一次最多支持 20 个商品链接，当前已输入 {{ productUrls.length }} 个。
-        </p>
 
         <div v-if="productReferences.length" class="ai-copy-reference-list">
           <article
@@ -1140,7 +1105,7 @@ watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], 
 
       <div v-if="generating" class="ai-copy-generating" aria-live="polite">
         <span></span><span></span><span></span>
-        <p>{{ productUrls.length ? `正在读取并综合 ${productUrls.length} 个商品资料` : '正在根据已匹配的核心卖点构思文案' }}</p>
+        <p>正在综合原参考、核心卖点与文案参考构思文案</p>
       </div>
 
       <template v-else-if="result">

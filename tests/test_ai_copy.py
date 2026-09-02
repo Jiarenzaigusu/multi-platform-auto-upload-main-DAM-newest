@@ -453,6 +453,23 @@ class AiCopyServiceTests(unittest.TestCase):
         self.assertIn("标题和正文的参考，生成的标题文案结果中引用该核心卖点的文字占比约50%", prompt)
         self.assertEqual(len(result.selling_point_references), 2)
 
+    def test_direct_copy_reference_keeps_equal_weight_with_selling_points(self):
+        provider = FakeChatProvider()
+        service = AiCopyService(provider, FakeProductTool())
+
+        service.generate(
+            self.make_request(
+                service,
+                "轻量透气，适合日常通勤",
+                copy_reference=" 松弛自然的日常穿搭叙述 ",
+            )
+        )
+
+        prompt = provider.calls[0]["messages"][1]["content"]
+        self.assertIn("文案参考（用户直接输入", prompt)
+        self.assertIn("与核心卖点各占生成内容约50%的权重", prompt)
+        self.assertIn("松弛自然的日常穿搭叙述", prompt)
+
     def test_manual_selling_point_is_used_without_excel_catalog(self):
         provider = FakeChatProvider()
         service = AiCopyService(provider, FakeProductTool())

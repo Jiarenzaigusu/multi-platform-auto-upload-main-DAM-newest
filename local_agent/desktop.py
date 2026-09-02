@@ -729,7 +729,7 @@ def _run_status_window(
     root.resizable(False, False)
     root.configure(bg=theme.CREAM)
     theme.apply_tk_scaling(root)
-    theme.center_window(root, 520, 760)
+    theme.center_window(root, 520, 800)
 
     user_label = (
         connection.user.get("display_name") or connection.user.get("username")
@@ -805,6 +805,58 @@ def _run_status_window(
         "打开商家发布台",
         lambda: open_url(connection.server_url),
     ).pack(fill="x", ipady=5)
+
+    def run_tmall_path_import() -> None:
+        """Launch the bundled Windows Tmall workbook path import utility."""
+        if os.name != "nt":
+            messagebox.showinfo("天猫路径导入", "该工具仅支持 Windows。")
+            return
+        import subprocess
+
+        if getattr(sys, "frozen", False):
+            script_path = (
+                Path(sys._MEIPASS)
+                / "tmall_path_import"
+                / "TmallVideoPathImport.ps1"
+            )
+        else:
+            script_path = (
+                Path(__file__).resolve().parent
+                / "assets"
+                / "tmall_path_import"
+                / "TmallVideoPathImport.ps1"
+            )
+        if not script_path.is_file():
+            messagebox.showerror("天猫路径导入", "找不到路径导入脚本，请重新安装本地执行助手。")
+            return
+        try:
+            powershell = (
+                Path(os.environ.get("WINDIR", r"C:\Windows"))
+                / "System32"
+                / "WindowsPowerShell"
+                / "v1.0"
+                / "powershell.exe"
+            )
+            subprocess.Popen(
+                [
+                    str(powershell),
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-STA",
+                    "-File",
+                    str(script_path),
+                ],
+                cwd=str(script_path.parent),
+            )
+        except OSError as exc:
+            messagebox.showerror("天猫路径导入", f"无法启动路径导入工具：{exc}")
+
+    theme.secondary_button(
+        conn_inner,
+        "批量发布路径导入工具",
+        run_tmall_path_import,
+    ).pack(fill="x", ipady=5, pady=(10, 0))
 
     update_card = theme.card(body)
     update_card.pack(fill="x", pady=(14, 0))

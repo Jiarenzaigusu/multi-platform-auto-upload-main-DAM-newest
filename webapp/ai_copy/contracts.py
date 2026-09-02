@@ -182,6 +182,7 @@ class GenerateCopyRequest(BaseModel):
     selling_point_catalog_id: str | None = Field(default=None, max_length=64)  # Excel 卖点目录 ID
     product_identifiers: list[str] = Field(default_factory=list, max_length=20)  # 商品 ID/货号列表
     manual_selling_point: str | None = Field(default=None, max_length=2000)  # 直接输入的核心卖点
+    copy_reference: str | None = Field(default=None, max_length=20000)  # 直接输入的文案参考
     style: CopyStyle | None = None            # 文案风格；与自定义风格二选一
     scene: ContentScene | None = None          # 内容场景；与自定义场景二选一
     festival: str | None = Field(default=None, max_length=40)  # 可选节日氛围
@@ -228,6 +229,12 @@ class GenerateCopyRequest(BaseModel):
     @classmethod
     def normalize_manual_selling_point(cls, value: str | None) -> str | None:
         """去除直接输入卖点的首尾空白。"""
+        return _trimmed(value)
+
+    @field_validator("copy_reference")
+    @classmethod
+    def normalize_copy_reference(cls, value: str | None) -> str | None:
+        """去除文案参考首尾空白。"""
         return _trimmed(value)
 
     @field_validator("product_identifiers", mode="before")

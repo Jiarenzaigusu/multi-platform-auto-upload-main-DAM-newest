@@ -26,7 +26,7 @@ DOUYIN_VIDEO_BATCH_COLUMNS = (
 )
 DOUYIN_VIDEO_SAMPLE_ROW = (
     "/Users/your-name/Videos/example.mp4",
-    "/Users/your-name/Pictures/cover.png",
+    "",
     "夏季女鞋穿搭",
     "轻盈舒适，适合通勤与日常穿搭。",
     "女鞋,夏季穿搭",

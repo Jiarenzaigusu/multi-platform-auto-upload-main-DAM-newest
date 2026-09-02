@@ -362,7 +362,7 @@ class TaskManager:
         return self.store.update_job(
             job_id,
             status="cancelling",
-            message="正在中断浏览器任务，完成后将删除该店铺账号与 Cookie",
+            message="正在中断浏览器任务，请稍候",
         )
 
     def cancel_account_tasks(self, platform: str, account: str) -> list[dict[str, Any]]:

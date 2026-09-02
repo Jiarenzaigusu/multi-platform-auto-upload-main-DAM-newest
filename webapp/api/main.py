@@ -13,7 +13,6 @@ from typing import AsyncIterator
 from urllib.parse import quote, urlsplit
 
 from fastapi import (
-    BackgroundTasks,
     Depends,
     FastAPI,
     File,
@@ -377,45 +376,6 @@ def create_app(
             raise
         return {"account": deleted_account, "cookie_deleted": cookie_deleted}
 
-    def delete_account_after_cancellation(
-        user_id: str, job_id: str, platform: str, account: str
-    ) -> None:
-        """Wait for browser cleanup so a cancelled login cannot recreate its Cookie."""
-        workspace = workspace_registry.get(user_id)
-        store = workspace.store
-        manager = workspace.task_manager
-        if not manager.wait_for_account_idle(platform, account, timeout=15 * 60):
-            job = store.get_job(job_id)
-            if job:
-                result = dict(job.get("result") or {})
-                result.update(account_deletion="failed", account_deletion_error="等待浏览器退出超时")
-                store.update_job(
-                    job_id,
-                    message="任务中断请求已发送，但等待浏览器退出超时；账号和 Cookie 未删除",
-                    result=result,
-                )
-            return
-
-        try:
-            delete_account_and_cookie(workspace, platform, account)
-        except (KeyError, ValueError, OSError) as exc:
-            job = store.get_job(job_id)
-            if job:
-                result = dict(job.get("result") or {})
-                result.update(account_deletion="failed", account_deletion_error=str(exc))
-                store.update_job(
-                    job_id,
-                    message=f"任务已中断，但删除账号失败：{exc}",
-                    result=result,
-                )
-            return
-
-        job = store.get_job(job_id)
-        if job:
-            result = dict(job.get("result") or {})
-            result.update(account_deletion="completed")
-            store.update_job(job_id, result=result)
-
     frontend_ready = (
         (settings.frontend_dist_dir / "index.html").is_file()
         and (settings.frontend_dist_dir / "assets").is_dir()
@@ -682,9 +642,9 @@ def create_app(
         try:
             selected_platform = validate_platform(platform)
             selected_account = validate_account_name(account)
+            if workspace.store.list_active_jobs(selected_platform, selected_account):
+                raise ValueError("该店铺仍有排队或运行中的任务，请先中断任务")
             if getattr(workspace.task_manager, "remote_execution", False):
-                if workspace.store.list_active_jobs(selected_platform, selected_account):
-                    raise ValueError("该店铺仍有排队或运行中的任务，请先中断任务")
                 if not any(
                     item["platform"] == selected_platform
                     and item["account"] == selected_account
@@ -901,69 +861,49 @@ def create_app(
         deleted, skipped = workspace.store.delete_jobs(unique_ids)
         return {"deleted": deleted, "skipped": skipped}
 
-    @app.post("/api/jobs/{job_id}/cancel-and-delete-account", status_code=202)
-    def cancel_job_and_delete_account(
-        job_id: str,
-        background_tasks: BackgroundTasks,
+    @app.post("/api/jobs/batch-cancel", status_code=202)
+    def batch_cancel_jobs(
+        payload: dict,
         workspace: UserWorkspace = Depends(operator_workspace),
     ) -> dict:
-        store = workspace.store
-        manager = workspace.task_manager
-        original_job = store.get_job(job_id)
-        if not original_job:
-            raise HTTPException(status_code=404, detail="任务不存在")
-        if original_job["status"] in TERMINAL_STATUSES:
-            raise HTTPException(status_code=409, detail="仅排队中或执行中的任务可以中断")
-        try:
-            affected_jobs = manager.cancel_account_tasks(
-                original_job["platform"], original_job["account"]
-            )
-        except RuntimeError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        job = store.get_job(job_id) or original_job
+        raw_ids = payload.get("job_ids") if isinstance(payload, dict) else None
+        if not isinstance(raw_ids, list) or not raw_ids:
+            raise HTTPException(status_code=422, detail="请提供需要中断的任务 ID 列表")
 
-        if getattr(manager, "remote_execution", False):
-            deletion_job = manager.submit_account_task(
-                kind="delete_account",
-                platform=job["platform"],
-                account=job["account"],
-                headed=False,
-            )
-            return {
-                "job": _job_response(job),
-                "cancelled_count": len(affected_jobs),
-                "account_deletion": "pending",
-                "deletion_job": _job_response(deletion_job),
-                "message": "已通知本地代理中断任务；浏览器停止后将在用户电脑上删除 Cookie",
-            }
+        unique_ids: list[str] = []
+        seen: set[str] = set()
+        for job_id in raw_ids:
+            if not isinstance(job_id, str) or not job_id or job_id in seen:
+                continue
+            seen.add(job_id)
+            unique_ids.append(job_id)
+        if not unique_ids:
+            raise HTTPException(status_code=422, detail="请提供需要中断的任务 ID 列表")
 
-        if not store.list_active_jobs(job["platform"], job["account"]):
+        cancelled: list[str] = []
+        skipped: list[tuple[str, str]] = []
+        for job_id in unique_ids:
             try:
-                deleted = delete_account_and_cookie(
-                    workspace, job["platform"], job["account"]
-                )
-            except (KeyError, ValueError, OSError) as exc:
-                raise HTTPException(status_code=409, detail=f"任务已中断，但删除账号失败：{exc}") from exc
-            return {
-                "job": _job_response(job),
-                "cancelled_count": len(affected_jobs),
-                "account_deletion": "completed",
-                **deleted,
-            }
+                workspace.task_manager.cancel_task(job_id)
+                cancelled.append(job_id)
+            except KeyError:
+                skipped.append((job_id, "任务不存在"))
+            except (ValueError, RuntimeError) as exc:
+                skipped.append((job_id, str(exc)))
+        return {"cancelled": cancelled, "skipped": skipped}
 
-        background_tasks.add_task(
-            delete_account_after_cancellation,
-            workspace.user_id,
-            job["id"],
-            job["platform"],
-            job["account"],
-        )
-        return {
-            "job": _job_response(job),
-            "cancelled_count": len(affected_jobs),
-            "account_deletion": "pending",
-            "message": "正在中断该账号的全部活动任务；浏览器退出后会自动删除 Cookie 和账号标识",
-        }
+    @app.post("/api/jobs/{job_id}/cancel", status_code=202)
+    def cancel_job(
+        job_id: str,
+        workspace: UserWorkspace = Depends(operator_workspace),
+    ) -> dict:
+        try:
+            job = workspace.task_manager.cancel_task(job_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="任务不存在") from exc
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"job": _job_response(job)}
 
     @app.get("/api/jobs/{job_id}/events")
     async def job_events(

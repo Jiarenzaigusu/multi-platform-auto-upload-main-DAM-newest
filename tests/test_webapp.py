@@ -14,7 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from fastapi import BackgroundTasks, HTTPException, UploadFile
+from fastapi import HTTPException, UploadFile
 from loguru import logger
 from openpyxl import Workbook, load_workbook
 
@@ -1423,6 +1423,22 @@ class TmallBatchWorkbookTests(unittest.TestCase):
         self.assertEqual(rows[0].request.cover_ratio, "original")
         self.assertTrue(rows[0].request.dry_run)
 
+    def test_video_without_cover_columns_uses_platform_generated_cover(self):
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.append(["视频路径", "标题", "创作者声明"])
+        worksheet.append([str(self.video), "夏季女鞋穿搭", "内容无需标注"])
+        output = BytesIO()
+        workbook.save(output)
+        workbook.close()
+
+        rows = parse_tmall_video_batch_workbook(
+            output.getvalue(), account="shop1", dry_run=True, headed=False
+        )
+
+        self.assertIsNone(rows[0].request.cover_image_path)
+        self.assertEqual(rows[0].request.cover_ratio, "original")
+
     def test_video_rows_map_each_selected_cover_ratio(self):
         content = self.build_workbook(
             [
@@ -1575,7 +1591,8 @@ class TmallBatchWorkbookTests(unittest.TestCase):
                     "创作者声明",
                 ],
             )
-            self.assertEqual(worksheet["C2"].value, "3:4")
+            self.assertIsNone(worksheet["B2"].value)
+            self.assertIsNone(worksheet["C2"].value)
             self.assertEqual(worksheet["I2"].value, "默契")
             self.assertFalse(list(worksheet.merged_cells.ranges))
             validations = worksheet.data_validations.dataValidation
@@ -1717,6 +1734,7 @@ class JdBatchWorkbookTests(unittest.TestCase):
         self.assertEqual(rows[0].request.video_path, self.video.resolve())
         self.assertEqual(rows[0].request.goods_id, "12345")
         self.assertTrue(rows[0].request.original)
+        self.assertIsNone(rows[0].request.cover_image_path)
 
     def test_explicit_creator_declaration_maps_to_request(self):
         workbook = Workbook()
@@ -1807,6 +1825,7 @@ class SocialBatchWorkbookTests(unittest.TestCase):
         self.assertEqual(rows[0].request.platform, "douyin")
         self.assertEqual(rows[0].request.tags, ("热点", "穿搭"))
         self.assertTrue(rows[0].request.dry_run)
+        self.assertIsNone(rows[0].request.cover_image_path)
 
         content = self.workbook(
             ["视频路径", "标题", "笔记正文", "标签"],
@@ -1817,6 +1836,7 @@ class SocialBatchWorkbookTests(unittest.TestCase):
         )
         self.assertEqual(rows[0].request.platform, "xiaohongshu")
         self.assertEqual(rows[0].request.tags, ("种草", "穿搭"))
+        self.assertIsNone(rows[0].request.cover_image_path)
 
     def test_social_article_workbooks_map_to_publish_requests(self):
         xhs_rows = parse_xiaohongshu_article_batch_workbook(
@@ -2354,7 +2374,7 @@ class ApiEndpointTests(unittest.TestCase):
             finally:
                 manager.shutdown()
 
-    def test_cancel_queued_task_then_deletes_its_account(self):
+    def test_cancel_queued_task_preserves_its_account(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             store = JobStore(root / "runtime")
@@ -2381,23 +2401,21 @@ class ApiEndpointTests(unittest.TestCase):
             endpoint = next(
                 route.endpoint
                 for route in app.routes
-                if route.path == "/api/jobs/{job_id}/cancel-and-delete-account"
+                if route.path == "/api/jobs/{job_id}/cancel"
             )
             try:
                 with patch("webapp.api.main.delete_account_cookie", return_value=True) as delete_cookie:
                     result = endpoint(
                         cancelled_job["id"],
-                        BackgroundTasks(),
                         workspace=app.state.test_workspace,
                     )
 
                 self.assertEqual(result["job"]["status"], "cancelled")
-                self.assertEqual(result["account_deletion"], "completed")
-                delete_cookie.assert_called_once_with(manager.paths, "tmall", "shop2")
+                delete_cookie.assert_not_called()
                 self.assertEqual(store.get_job(first_job["id"])["status"], "running")
                 self.assertEqual(
                     [(item["platform"], item["account"]) for item in store.list_accounts()],
-                    [("tmall", "shop1")],
+                    [("tmall", "shop1"), ("tmall", "shop2")],
                 )
             finally:
                 release_worker.set()
@@ -2406,6 +2424,59 @@ class ApiEndpointTests(unittest.TestCase):
                     if completed and completed["status"] == "succeeded":
                         break
                     time.sleep(0.02)
+                manager.shutdown()
+
+    def test_batch_cancel_interrupts_active_jobs_and_skips_other_ids(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = JobStore(root / "runtime")
+            manager = AgentTaskManager(
+                store,
+                user_id=TEST_USER_ID,
+                paths=AppDataPaths.create(root / "data").for_user(TEST_USER_ID),
+            )
+            queued_jobs = [
+                manager.submit_account_task(
+                    kind="check", platform="tmall", account=f"shop{index}", headed=False
+                )
+                for index in range(2)
+            ]
+            completed_job = store.create_job(
+                kind="check", platform="tmall", account="finished", payload={}
+            )
+            store.update_job(completed_job["id"], status="succeeded")
+            app = create_app(
+                WebSettings(data_dir=root / "app-data", frontend_dist_dir=root / "missing"),
+                manager,
+            )
+            endpoint = next(
+                route.endpoint
+                for route in app.routes
+                if route.path == "/api/jobs/batch-cancel"
+            )
+            try:
+                result = endpoint(
+                    {
+                        "job_ids": [
+                            queued_jobs[0]["id"],
+                            queued_jobs[1]["id"],
+                            completed_job["id"],
+                            "missing-job",
+                        ]
+                    },
+                    workspace=app.state.test_workspace,
+                )
+
+                self.assertEqual(
+                    result["cancelled"], [job["id"] for job in queued_jobs]
+                )
+                self.assertEqual(len(result["skipped"]), 2)
+                self.assertTrue(
+                    all(store.get_job(job["id"])["status"] == "cancelled" for job in queued_jobs)
+                )
+                self.assertEqual(store.get_job(completed_job["id"])["status"], "succeeded")
+                self.assertEqual(len(store.list_accounts()), 3)
+            finally:
                 manager.shutdown()
 
 

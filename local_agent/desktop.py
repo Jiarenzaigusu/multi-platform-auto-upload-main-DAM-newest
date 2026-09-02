@@ -852,11 +852,11 @@ def _run_status_window(
         except OSError as exc:
             messagebox.showerror("天猫路径导入", f"无法启动路径导入工具：{exc}")
 
-    theme.secondary_button(
+    theme.primary_button(
         conn_inner,
-        "批量发布路径导入工具",
+        "批量发布路径导入工具  →",
         run_tmall_path_import,
-    ).pack(fill="x", ipady=5, pady=(10, 0))
+    ).pack(fill="x", ipady=8, pady=(14, 0))
 
     update_card = theme.card(body)
     update_card.pack(fill="x", pady=(14, 0))

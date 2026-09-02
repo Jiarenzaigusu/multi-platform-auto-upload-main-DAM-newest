@@ -346,6 +346,7 @@ const jobs = ref([])
 const jobSummary = ref({ total: 0, statuses: {} })
 const jobsOffset = ref(0)
 const selectedJobIds = ref([])
+const batchCancelling = ref(false)
 const batchDeleting = ref(false)
 const jobsPageSize = 500
 const accounts = ref([])
@@ -517,6 +518,9 @@ const statusClass = (status) => `status status-${status}`
 const terminalStatuses = new Set(['succeeded', 'failed', 'cancelled', 'uncertain'])
 const canDeleteJob = (job) => terminalStatuses.has(job.status)
 const canCancelJob = (job) => ['queued', 'running'].includes(job.status)
+const canSelectJob = (job) => canCancelJob(job) || canDeleteJob(job)
+const selectedCancelableJobs = computed(() => jobs.value.filter((job) => selectedJobIds.value.includes(job.id) && canCancelJob(job)))
+const selectedDeletableJobs = computed(() => jobs.value.filter((job) => selectedJobIds.value.includes(job.id) && canDeleteJob(job)))
 const visibleAccounts = computed(() => accounts.value.filter((item) => item.platform === form.platform))
 const batchAccounts = computed(() => accounts.value.filter((item) => item.platform === batchForm.platform))
 const viewTitle = computed(() => ({
@@ -791,22 +795,22 @@ async function deleteJob(job) {
 }
 
 function toggleJobSelection(job) {
-  if (!canDeleteJob(job)) return
+  if (!canSelectJob(job)) return
   const index = selectedJobIds.value.indexOf(job.id)
   if (index >= 0) selectedJobIds.value.splice(index, 1)
   else selectedJobIds.value.push(job.id)
 }
 
 function toggleSelectAllJobs() {
-  const deletableIds = jobs.value.filter(canDeleteJob).map((job) => job.id)
-  selectedJobIds.value = selectedJobIds.value.length === deletableIds.length
+  const actionableIds = jobs.value.filter(canSelectJob).map((job) => job.id)
+  selectedJobIds.value = selectedJobIds.value.length === actionableIds.length
     ? []
-    : deletableIds
+    : actionableIds
 }
 
 function syncJobSelection() {
-  const deletableIds = new Set(jobs.value.filter(canDeleteJob).map((job) => job.id))
-  selectedJobIds.value = selectedJobIds.value.filter((id) => deletableIds.has(id))
+  const actionableIds = new Set(jobs.value.filter(canSelectJob).map((job) => job.id))
+  selectedJobIds.value = selectedJobIds.value.filter((id) => actionableIds.has(id))
 }
 
 function removeDeletedJobsFromView(deletedIds) {
@@ -833,7 +837,7 @@ function removeDeletedJobsFromView(deletedIds) {
 }
 
 async function batchDeleteJobs() {
-  const targets = jobs.value.filter((job) => selectedJobIds.value.includes(job.id))
+  const targets = selectedDeletableJobs.value
   if (!targets.length || batchDeleting.value) return
   if (!window.confirm(`确定删除已选中的 ${targets.length} 条任务记录及其独立日志吗？此操作不会删除 Cookie 或平台总日志。`)) return
   batchDeleting.value = true
@@ -845,7 +849,7 @@ async function batchDeleteJobs() {
     })
     const deletedIds = new Set(result.deleted || [])
     removeDeletedJobsFromView(deletedIds)
-    selectedJobIds.value = []
+    selectedJobIds.value = selectedJobIds.value.filter((id) => !deletedIds.has(id))
     const skipped = result.skipped || []
     if (deletedIds.size && skipped.length) showNotice(`已删除 ${deletedIds.size} 条；跳过 ${skipped.length} 条（仅已完成或失败的任务可删除）`, 'success')
     else if (deletedIds.size) showNotice(`已删除 ${deletedIds.size} 条任务记录`, 'success')
@@ -871,17 +875,44 @@ async function batchDeleteJobs() {
   }
 }
 
-async function cancelJobAndDeleteAccount(job) {
+async function cancelJob(job) {
   if (!canCancelJob(job)) return
-  if (!window.confirm(`确定中断“${jobLabel(job.kind)} · ${job.account}”任务，并在浏览器退出后删除该店铺的 Cookie 和账号建议吗？历史任务和平台日志会保留。`)) return
+  if (!window.confirm(`确定中断“${jobLabel(job.kind)} · ${job.account}”任务吗？店铺账号、Cookie、历史任务和平台日志都会保留。`)) return
 
   try {
-    const result = await request(`/api/jobs/${job.id}/cancel-and-delete-account`, { method: 'POST' })
+    const result = await request(`/api/jobs/${job.id}/cancel`, { method: 'POST' })
     if (selectedJob.value?.id === job.id) selectedJob.value = result.job
-    showNotice(result.account_deletion === 'completed' ? '任务已中断，Cookie 和店铺账号建议已删除' : '正在中断浏览器任务；停止后将自动删除 Cookie 和店铺账号建议', 'success')
+    selectedJobIds.value = selectedJobIds.value.filter((id) => id !== job.id)
+    showNotice(result.job.status === 'cancelled' ? '任务已中断，账号和 Cookie 已保留' : '正在中断浏览器任务，账号和 Cookie 将保留', 'success')
     await refreshDashboard()
   } catch (error) {
     showNotice(error.message, 'error')
+  }
+}
+
+async function batchCancelJobs() {
+  const targets = selectedCancelableJobs.value
+  if (!targets.length || batchCancelling.value) return
+  if (!window.confirm(`确定中断已选中的 ${targets.length} 条任务吗？店铺账号、Cookie、历史任务和平台日志都会保留。`)) return
+  batchCancelling.value = true
+  try {
+    const result = await request('/api/jobs/batch-cancel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ job_ids: targets.map((job) => job.id) }),
+    })
+    const cancelledIds = new Set(result.cancelled || [])
+    selectedJobIds.value = selectedJobIds.value.filter((id) => !cancelledIds.has(id))
+    const skipped = result.skipped || []
+    if (cancelledIds.size && skipped.length) showNotice(`已中断 ${cancelledIds.size} 条；跳过 ${skipped.length} 条`, 'success')
+    else if (cancelledIds.size) showNotice(`已中断 ${cancelledIds.size} 条任务，账号和 Cookie 已保留`, 'success')
+    else showNotice('所选任务均无法中断', 'error')
+    await refreshDashboard()
+  } catch (error) {
+    showNotice(error.message, 'error')
+    await refreshDashboard()
+  } finally {
+    batchCancelling.value = false
   }
 }
 
@@ -1616,15 +1647,18 @@ onBeforeUnmount(() => {
 
       <section v-else-if="activeView === 'jobs'" class="jobs-layout">
         <div class="jobs-card"><div class="section-heading"><span>LIVE</span><div><h2>任务记录</h2><p>每页最多 500 条并自动刷新；点击条目可查看该任务的独立日志。</p></div></div>
-          <div v-if="jobs.some(canDeleteJob)" class="batch-toolbar">
-            <label class="batch-toggle"><input type="checkbox" :checked="jobs.filter(canDeleteJob).length > 0 && selectedJobIds.length === jobs.filter(canDeleteJob).length" :indeterminate.prop="selectedJobIds.length > 0 && selectedJobIds.length < jobs.filter(canDeleteJob).length" @change="toggleSelectAllJobs" /><span>当前页可删除项{{ selectedJobIds.length ? `已选 ${selectedJobIds.length} 条` : '全选' }}</span></label>
-            <button type="button" class="delete-job" :disabled="!selectedJobIds.length || batchDeleting" @click="batchDeleteJobs">{{ batchDeleting ? '删除中…' : `批量删除${selectedJobIds.length ? `（${selectedJobIds.length} 条）` : ''}` }}</button>
+          <div v-if="jobs.some(canSelectJob)" class="batch-toolbar">
+            <label class="batch-toggle"><input type="checkbox" :checked="jobs.filter(canSelectJob).length > 0 && selectedJobIds.length === jobs.filter(canSelectJob).length" :indeterminate.prop="selectedJobIds.length > 0 && selectedJobIds.length < jobs.filter(canSelectJob).length" @change="toggleSelectAllJobs" /><span>当前页任务{{ selectedJobIds.length ? `已选 ${selectedJobIds.length} 条` : '全选' }}</span></label>
+            <div class="batch-actions">
+              <button type="button" class="cancel-job" :disabled="!selectedCancelableJobs.length || batchCancelling" @click="batchCancelJobs">{{ batchCancelling ? '中断中…' : `批量中断${selectedCancelableJobs.length ? `（${selectedCancelableJobs.length} 条）` : ''}` }}</button>
+              <button type="button" class="delete-job" :disabled="!selectedDeletableJobs.length || batchDeleting" @click="batchDeleteJobs">{{ batchDeleting ? '删除中…' : `批量删除${selectedDeletableJobs.length ? `（${selectedDeletableJobs.length} 条）` : ''}` }}</button>
+            </div>
           </div>
           <article v-for="job in jobs" :key="job.id" class="job-row" :class="{ selected: selectedJobIds.includes(job.id) }">
-            <input v-if="canDeleteJob(job)" type="checkbox" class="job-select" :checked="selectedJobIds.includes(job.id)" @change="toggleJobSelection(job)" :aria-label="`选中任务 ${job.id}`" />
+            <input v-if="canSelectJob(job)" type="checkbox" class="job-select" :checked="selectedJobIds.includes(job.id)" @change="toggleJobSelection(job)" :aria-label="`选中任务 ${job.id}`" />
             <span v-else class="job-select-spacer" aria-hidden="true"></span>
             <button class="job-details" :class="{ current: selectedJob?.id === job.id }" type="button" @click="loadJob(job.id)"><span class="job-platform">{{ platformLabel(job.platform) }}</span><span class="job-title"><strong>{{ jobLabel(job.kind) }}<template v-if="job.source_row"> · Excel 第 {{ job.source_row }} 行</template> · {{ job.account }}</strong><small>{{ job.message }}</small></span><span :class="statusClass(job.status)">{{ statusLabel(job.status) }}</span></button>
-            <div v-if="canCancelJob(job) || canDeleteJob(job)" class="job-actions"><button v-if="canCancelJob(job)" class="delete-job" type="button" @click="cancelJobAndDeleteAccount(job)">中断并删除账号</button><button v-if="canDeleteJob(job)" class="delete-job" type="button" @click="deleteJob(job)">删除</button></div>
+            <div v-if="canCancelJob(job) || canDeleteJob(job)" class="job-actions"><button v-if="canCancelJob(job)" class="cancel-job" type="button" @click="cancelJob(job)">中断任务</button><button v-if="canDeleteJob(job)" class="delete-job" type="button" @click="deleteJob(job)">删除</button></div>
           </article>
           <p v-if="!jobs.length" class="empty">还没有任务。先从“发布工作台”创建一个流程验证任务。</p>
           <div v-if="jobSummary.total" class="jobs-pagination"><span>第 {{ jobsPageStart }}-{{ jobsPageEnd }} 条，共 {{ jobSummary.total }} 条</span><div><button class="quiet" type="button" :disabled="!hasPreviousJobs" @click="changeJobsPage(-1)">上一页</button><button class="quiet" type="button" :disabled="!hasMoreJobs" @click="changeJobsPage(1)">下一页</button></div></div>

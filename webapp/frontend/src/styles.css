@@ -885,7 +885,8 @@ svg {
 }
 
 .clear-file,
-.delete-job {
+.delete-job,
+.cancel-job {
   padding: 7px 10px;
   border: 1px solid #d5a29a;
   border-radius: 7px;
@@ -898,6 +899,18 @@ svg {
 .clear-file:hover,
 .delete-job:hover {
   background: #fce9e2;
+}
+
+.cancel-job {
+  border-color: #d8ad55;
+  color: #76520f;
+  background: #fff8e8;
+}
+
+.cancel-job:hover {
+  border-color: #bd8831;
+  color: #604007;
+  background: #ffefc8;
 }
 
 .cover-file-picker {
@@ -1367,7 +1380,13 @@ svg {
   accent-color: #6b8a55;
 }
 
-.batch-toolbar .delete-job:disabled {
+.batch-actions {
+  display: flex;
+  gap: 7px;
+  align-items: center;
+}
+
+.batch-toolbar button:disabled {
   cursor: not-allowed;
   opacity: .5;
 }

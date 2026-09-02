@@ -29,7 +29,7 @@ def _normalize_tmall_cover_ratio(value: str) -> str:
 TMALL_VIDEO_BATCH_COLUMNS = (
     ("video_path", "视频路径", True),
     ("cover_image_path", "自定义封面", False),
-    ("cover_ratio", "封面比例", True),
+    ("cover_ratio", "封面比例", False),
     ("title", "标题", True),
     ("description", "文案", False),
     ("tags", "标签", False),
@@ -41,8 +41,8 @@ TMALL_VIDEO_BATCH_COLUMNS = (
 )
 TMALL_VIDEO_SAMPLE_ROW = (
     "/Users/your-name/Videos/example.mp4",
-    "/Users/your-name/Pictures/cover.png",
-    "3:4",
+    "",
+    "",
     "夏季女鞋穿搭",
     "轻盈舒适，适合通勤与日常穿搭。",
     "女鞋,夏季穿搭",

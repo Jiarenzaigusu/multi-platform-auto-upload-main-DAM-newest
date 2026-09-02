@@ -27,7 +27,7 @@ JD_VIDEO_BATCH_COLUMNS = (
     ("creator_declaration", "创作者声明", False),
 )
 JD_VIDEO_SAMPLE_ROW = (
-    "/Users/your-name/Videos/example.mp4", "/Users/your-name/Pictures/cover.png",
+    "/Users/your-name/Videos/example.mp4", "",
     "夏季女鞋穿搭", "123456789", "数码先锋", "2030年12月31日 14点30分", "否",
     "内容含营销广告",
 )

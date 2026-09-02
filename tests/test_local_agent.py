@@ -33,7 +33,7 @@ from local_agent.main import (
     _server_url,
     _stage_local_asset_with_original_name,
 )
-from local_agent.path_import import import_workbook
+from local_agent.path_import import _install_staged_output, import_workbook
 from local_agent.runner import AgentJobRunner
 from uploader.errors import PublishResultUncertainError
 from webapp.ai_copy.contracts import ProductReference
@@ -44,6 +44,34 @@ from webapp.workspaces import AppDataPaths, UserWorkspaceRegistry
 
 USER_ID = "a" * 32
 AGENT_ID = "b" * 32
+
+
+class PathImportTests(unittest.TestCase):
+    def test_staged_workbook_falls_back_to_copy_across_drives(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            staged = root / "staged.xlsx"
+            output = root / "output.xlsx"
+            staged.write_bytes(b"generated workbook")
+
+            cross_drive_error = OSError(18, "Invalid cross-device link")
+            with patch.object(Path, "replace", side_effect=cross_drive_error):
+                _install_staged_output(staged, output)
+
+            self.assertEqual(output.read_bytes(), b"generated workbook")
+            self.assertTrue(staged.exists())
+
+    def test_staged_workbook_uses_replace_on_the_same_drive(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            staged = root / "staged.xlsx"
+            output = root / "output.xlsx"
+            staged.write_bytes(b"generated workbook")
+
+            _install_staged_output(staged, output)
+
+            self.assertEqual(output.read_bytes(), b"generated workbook")
+            self.assertFalse(staged.exists())
 
 
 class AgentTaskManagerTests(unittest.TestCase):

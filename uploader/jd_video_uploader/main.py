@@ -334,7 +334,7 @@ class JDVideo(JDBaseUploader):
     3. 等待视频上传完成 → 设置自定义封面（可选）
     4. 填写标题 → 关联商品（可选）→ 添加话题（可选）→ 选择创作者声明 → 开启自主原创（可选）→ 设置定时（可选）
     5. dry_run 跳过发布；否则点击发布按钮 → 处理验证码（人工）→ 等待确认
-    6. 成功后保存 storage_state；页面保留供人工复核
+    6. 成功后丢弃本次发布会话，下次任务从登录时保存的 Cookie 新建会话
     """
 
     def __init__(
@@ -1133,7 +1133,7 @@ class JDVideo(JDBaseUploader):
         3. 上传视频 → 等待上传完成 → 填写标题 → 关联商品 →
            选择创作者声明 → 开启自主原创 → 设置定时
         4. dry_run 跳过发布；否则点击发布按钮 → 处理验证码 → 等待确认
-        5. 成功后保存 storage_state；页面保留供人工复核
+        5. 成功后由会话层丢弃本次发布上下文，隔离京东发布后的登录态变化
 
         :returns: 发布结果 dict（含 mode/confirmation/final_url）
         :raises JdAuthenticationError: Cookie 失效
@@ -1144,7 +1144,6 @@ class JDVideo(JDBaseUploader):
         jd_logger.info(_msg("🥳", "上传前检查通过"))
 
         page = None
-        success = False
         submitted = False
 
         try:
@@ -1182,7 +1181,6 @@ class JDVideo(JDBaseUploader):
 
             if self.dry_run:
                 jd_logger.info(_msg("🧪", "Dry run 模式：跳过发布，所有基础设置已完成"))
-                success = True
                 return {"mode": "dry_run"}
 
             # 真实发布
@@ -1245,7 +1243,6 @@ class JDVideo(JDBaseUploader):
                 )
 
             jd_logger.success(_msg("🥳", f"视频发布已确认（{confirmation}）"))
-            success = True
             return {
                 "mode": "publish",
                 "confirmation": confirmation,
@@ -1262,18 +1259,15 @@ class JDVideo(JDBaseUploader):
             jd_logger.error(_msg("❌", f"UPLOAD_FAILED: {exc}"))
             raise
         finally:
-            # 成功后保存 storage_state（更新 Cookie）
-            if success:
-                await context.storage_state(path=self.account_file)
-                jd_logger.success(_msg("🥳", "cookie 更新完毕"))
-            # 页面保留供人工复核
+            # 发布页面暂时保留到本次流程返回，随后由 upload_in_session
+            # 关闭整个京东账号会话，避免发布页状态污染后续任务。
             if page:
                 try:
                     if not page.is_closed():
                         jd_logger.info(
                             _msg(
                                 "📌",
-                                f"发布页面已保留供人工复核；当前账号共保留 {len(context.pages)} 个页面",
+                                f"发布流程结束，正在安全回收页面；当前账号共打开 {len(context.pages)} 个页面",
                             )
                         )
                 except Exception:
@@ -1282,14 +1276,14 @@ class JDVideo(JDBaseUploader):
     async def upload_in_session(self, session: JdBrowserSession) -> dict:
         """通过浏览器会话执行发布流程。
 
-        会话校验 Cookie 后调用 _upload_in_context。
-        若抛出 JdAuthenticationError 则标记会话未认证。
+        会话校验 Cookie 后调用 _upload_in_context，并在流程结束后回收本次
+        京东会话，避免发布页的短生命周期状态影响后续任务。
         """
-        context = await session.ensure_open()
         try:
-            result = await self._upload_in_context(context)
-        except JdAuthenticationError:
+            return await self._upload_in_context(await session.ensure_open())
+        finally:
+            # Never persist or reuse a context after visiting JD's publish page.
+            # Its completion/error flows may rotate short-lived credentials.
             session.mark_authenticated(False)
-            raise
-        session.mark_authenticated(True)
-        return result
+            await session.close()
+            jd_logger.info(_msg("♻️", "京东发布会话已安全回收，下次任务将自动新建"))

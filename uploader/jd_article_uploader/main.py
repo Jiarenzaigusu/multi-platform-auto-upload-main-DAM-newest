@@ -468,7 +468,6 @@ class JDArticle:
     async def _upload_in_context(self, context: BrowserContext) -> dict:
         await self.validate_upload_args()
         page = None
-        success = False
         submitted = False
         try:
             page = await context.new_page()
@@ -494,7 +493,6 @@ class JDArticle:
             await self._set_schedule(frame)
             if self.dry_run:
                 jd_logger.info("🧪 图文流程验证完成，跳过正式发布")
-                success = True
                 return {"mode": "dry_run"}
 
             publish_button = frame.locator('button[class*="publishBtn"]').filter(has_text="发布").first
@@ -518,14 +516,11 @@ class JDArticle:
                         raise RuntimeError(f"平台返回图文发布失败提示：{failure}")
                     confirmation = next((hint for hint in success_hints if hint in text and hint not in before), None)
                     if confirmation:
-                        success = True
                         return {"mode": "publish", "confirmation": f"检测到平台成功提示：{confirmation}", "final_url": page.url}
                     if page.url != initial_url and _host(page.url) not in JD_AUTH_HOSTS:
-                        success = True
                         return {"mode": "publish", "confirmation": f"页面已跳转：{page.url}", "final_url": page.url}
                 except Exception as exc:
                     if "detached" in str(exc).lower() and page.url != initial_url and _host(page.url) not in JD_AUTH_HOSTS:
-                        success = True
                         return {"mode": "publish", "confirmation": f"发布表单已关闭并跳转：{page.url}", "final_url": page.url}
                     raise
             raise PublishResultUncertainError("已点击京东图文发布按钮，但 30 秒内没有检测到明确成功或失败信号")
@@ -537,21 +532,18 @@ class JDArticle:
             jd_logger.error(f"❌ JD_ARTICLE_UPLOAD_FAILED: {exc}")
             raise
         finally:
-            if success:
-                await context.storage_state(path=self.account_file)
-                jd_logger.success("🥳 京东图文 cookie 已更新")
             if page:
                 try:
                     if not page.is_closed():
-                        jd_logger.info(f"📌 京东图文发布页面已保留供人工复核；当前账号共保留 {len(context.pages)} 个页面")
+                        jd_logger.info(f"📌 京东图文流程结束，正在安全回收页面；当前账号共打开 {len(context.pages)} 个页面")
                 except Exception:
                     pass
 
     async def upload_in_session(self, session: JdBrowserSession) -> dict:
         try:
-            result = await self._upload_in_context(await session.ensure_open())
-        except JdArticleAuthenticationError:
+            return await self._upload_in_context(await session.ensure_open())
+        finally:
+            # Do not reuse or persist state after a JD publish-page visit.
             session.mark_authenticated(False)
-            raise
-        session.mark_authenticated(True)
-        return result
+            await session.close()
+            jd_logger.info("♻️ 京东图文发布会话已安全回收，下次任务将自动新建")

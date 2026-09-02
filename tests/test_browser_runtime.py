@@ -17,6 +17,8 @@ from uploader.browser_session import (
 )
 from uploader.douyin_session import DouyinSessionPool
 from uploader.jd_session import JdSessionPool
+from uploader.jd_article_uploader.main import JDArticle
+from uploader.jd_video_uploader.main import JDVideo
 from uploader.tmall_session import TmallSessionPool
 from uploader.xiaohongshu_session import XiaohongshuSessionPool
 from webapp.api.browser_runtime import BrowserRuntime
@@ -326,6 +328,46 @@ class SocialSessionPoolTests(unittest.TestCase):
                     await douyin_pool.close()
 
         asyncio.run(scenario())
+
+
+class JdPublisherSessionLifecycleTests(unittest.TestCase):
+    def _assert_recycles_session(self, uploader_type, *, error=None):
+        async def scenario():
+            uploader = object.__new__(uploader_type)
+            context = object()
+            session = type(
+                "FakeJdSession",
+                (),
+                {
+                    "ensure_open": AsyncMock(return_value=context),
+                    "mark_authenticated": unittest.mock.Mock(),
+                    "close": AsyncMock(),
+                },
+            )()
+            uploader._upload_in_context = AsyncMock(
+                return_value={"mode": "publish"}, side_effect=error
+            )
+
+            if error is None:
+                result = await uploader.upload_in_session(session)
+                self.assertEqual(result, {"mode": "publish"})
+            else:
+                with self.assertRaises(type(error)):
+                    await uploader.upload_in_session(session)
+
+            session.mark_authenticated.assert_called_once_with(False)
+            session.close.assert_awaited_once_with()
+
+        asyncio.run(scenario())
+
+    def test_jd_video_success_recycles_post_publish_session(self):
+        self._assert_recycles_session(JDVideo)
+
+    def test_jd_article_success_recycles_post_publish_session(self):
+        self._assert_recycles_session(JDArticle)
+
+    def test_jd_video_error_also_recycles_post_publish_session(self):
+        self._assert_recycles_session(JDVideo, error=RuntimeError("publish failed"))
 
 
 class BrowserRuntimeTests(unittest.TestCase):

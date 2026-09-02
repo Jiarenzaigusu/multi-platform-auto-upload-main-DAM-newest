@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import tempfile
+import shutil
 import unicodedata
 import zipfile
 from pathlib import Path
@@ -13,6 +14,18 @@ CELL_TAG = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}c"
 ROW_TAG = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}row"
 INLINE_TAG = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}inlineStr"
 TEXT_TAG = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t"
+
+
+def _install_staged_output(staged_output: Path, output: Path) -> None:
+    """Install a generated workbook even when temp and output are on different drives."""
+    try:
+        staged_output.replace(output)
+    except OSError as exc:
+        # Windows raises WinError 17 for cross-volume rename (C: temp -> D: output).
+        # A move cannot be atomic across volumes, so copy the completed ZIP instead.
+        if getattr(exc, "winerror", None) != 17 and getattr(exc, "errno", None) != 18:
+            raise
+        shutil.copy2(staged_output, output)
 
 
 def _stem(path: Path) -> str:
@@ -104,7 +117,7 @@ def import_workbook(template: Path, source: Path, output: Path, cover: Path | No
                     )
                     result.writestr(info, content_bytes)
             output.parent.mkdir(parents=True, exist_ok=True)
-            staged_output.replace(output)
+            _install_staged_output(staged_output, output)
     return f"{platform}{content}", len(files), missing
 
 

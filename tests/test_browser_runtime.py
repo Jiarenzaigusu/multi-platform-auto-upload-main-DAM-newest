@@ -250,6 +250,41 @@ class JdSessionPoolTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_recycled_jd_session_reopens_from_saved_cookie_state(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as temp_dir:
+                account_file = Path(temp_dir) / "jd_shop1.json"
+                account_file.write_text("{}", encoding="utf-8")
+                playwright = FakePlaywright()
+                browsers = []
+
+                async def start_playwright():
+                    return playwright
+
+                async def launch_browser(_playwright, _headless):
+                    browser = FakeBrowser()
+                    browsers.append(browser)
+                    return browser
+
+                pool = JdSessionPool(
+                    playwright_starter=start_playwright,
+                    launcher=launch_browser,
+                )
+                try:
+                    async with pool.lease(account_file, headless=False) as first:
+                        await first.close()
+                    async with pool.lease(account_file, headless=False) as second:
+                        self.assertIsNot(second, first)
+                        self.assertEqual(
+                            second.browser.context_options[0]["storage_state"],
+                            str(account_file.resolve()),
+                        )
+                    self.assertEqual(len(browsers), 2)
+                finally:
+                    await pool.close()
+
+        asyncio.run(scenario())
+
 
 class SocialSessionPoolTests(unittest.TestCase):
     def test_social_pools_default_to_edge_launcher(self):
@@ -340,6 +375,7 @@ class JdPublisherSessionLifecycleTests(unittest.TestCase):
                 (),
                 {
                     "ensure_open": AsyncMock(return_value=context),
+                    "save_storage_state": AsyncMock(),
                     "mark_authenticated": unittest.mock.Mock(),
                     "close": AsyncMock(),
                 },
@@ -356,6 +392,7 @@ class JdPublisherSessionLifecycleTests(unittest.TestCase):
                     await uploader.upload_in_session(session)
 
             session.mark_authenticated.assert_called_once_with(False)
+            session.save_storage_state.assert_awaited_once_with()
             session.close.assert_awaited_once_with()
 
         asyncio.run(scenario())

@@ -1280,6 +1280,9 @@ class JDVideo(JDBaseUploader):
         京东会话，避免发布页的短生命周期状态影响后续任务。
         """
         try:
+            # jd_setup has just verified this context. Persist that stable state
+            # before the publish page can rotate upload-scoped credentials.
+            await session.save_storage_state()
             return await self._upload_in_context(await session.ensure_open())
         finally:
             # Never persist or reuse a context after visiting JD's publish page.

@@ -14,6 +14,7 @@ import time
 from types import SimpleNamespace
 import unittest
 import zipfile
+from openpyxl import load_workbook
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from datetime import datetime, timedelta, timezone
@@ -173,6 +174,19 @@ class AgentTaskManagerTests(unittest.TestCase):
         with zipfile.ZipFile(video_output) as archive:
             xml = archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
         self.assertIn(str(video.resolve()), xml)
+        video_workbook = load_workbook(video_output, read_only=True)
+        try:
+            video_sheet = video_workbook[video_workbook.sheetnames[0]]
+            self.assertEqual(video_sheet["A2"].value, str(video.resolve()))
+            self.assertEqual(video_sheet["B2"].value, str(cover.resolve()))
+        finally:
+            video_workbook.close()
+        article_workbook = load_workbook(article_output, read_only=True)
+        try:
+            article_sheet = article_workbook[article_workbook.sheetnames[0]]
+            self.assertEqual(article_sheet["A2"].value, str(article.resolve()))
+        finally:
+            article_workbook.close()
         self.assertIn(str(cover.resolve()), xml)
         with zipfile.ZipFile(article_output) as archive:
             xml = archive.read("xl/worksheets/sheet1.xml").decode("utf-8")

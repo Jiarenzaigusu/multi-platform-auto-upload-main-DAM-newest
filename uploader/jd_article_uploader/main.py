@@ -541,6 +541,7 @@ class JDArticle:
 
     async def upload_in_session(self, session: JdBrowserSession) -> dict:
         try:
+            await session.save_storage_state()
             return await self._upload_in_context(await session.ensure_open())
         finally:
             # Do not reuse or persist state after a JD publish-page visit.

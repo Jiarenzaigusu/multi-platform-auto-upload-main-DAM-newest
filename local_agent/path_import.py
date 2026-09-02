@@ -12,7 +12,8 @@ from xml.etree import ElementTree as ET
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".wmv", ".flv", ".m4v", ".webm"}
 CELL_TAG = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}c"
 ROW_TAG = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}row"
-INLINE_TAG = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}inlineStr"
+# Inline-string cells use t="inlineStr", but their value container is <is>.
+INLINE_TAG = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}is"
 TEXT_TAG = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t"
 
 

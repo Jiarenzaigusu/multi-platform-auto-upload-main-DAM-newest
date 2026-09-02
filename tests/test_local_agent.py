@@ -13,6 +13,7 @@ import threading
 import time
 from types import SimpleNamespace
 import unittest
+import zipfile
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from datetime import datetime, timedelta, timezone
@@ -32,6 +33,7 @@ from local_agent.main import (
     _server_url,
     _stage_local_asset_with_original_name,
 )
+from local_agent.path_import import import_workbook
 from local_agent.runner import AgentJobRunner
 from uploader.errors import PublishResultUncertainError
 from webapp.ai_copy.contracts import ProductReference
@@ -109,6 +111,44 @@ class AgentTaskManagerTests(unittest.TestCase):
             / "TmallVideoPathImport.ps1"
         )
         self.assertTrue(script.read_bytes().startswith(b"\xef\xbb\xbf"))
+
+    def test_native_path_import_fills_jd_video_and_article_templates(self):
+        assets = (
+            Path(__file__).parents[1]
+            / "local_agent"
+            / "assets"
+            / "tmall_path_import"
+        )
+        videos = self.root / "videos"
+        covers = self.root / "covers"
+        articles = self.root / "articles"
+        videos.mkdir()
+        covers.mkdir()
+        articles.mkdir()
+        video = videos / "商品一.mp4"
+        cover = covers / "商品一.jpg"
+        article = articles / "商品二"
+        video.write_bytes(b"video")
+        cover.write_bytes(b"cover")
+        article.mkdir()
+
+        video_output = self.root / "jd-video.xlsx"
+        article_output = self.root / "jd-article.xlsx"
+        self.assertEqual(
+            import_workbook(assets / "JdVideoTemplate.xlsx", videos, video_output, covers),
+            ("京东视频", 1, 0),
+        )
+        self.assertEqual(
+            import_workbook(assets / "JdArticleTemplate.xlsx", articles, article_output, None),
+            ("京东图文", 1, 0),
+        )
+        with zipfile.ZipFile(video_output) as archive:
+            xml = archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
+        self.assertIn(str(video.resolve()), xml)
+        self.assertIn(str(cover.resolve()), xml)
+        with zipfile.ZipFile(article_output) as archive:
+            xml = archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
+        self.assertIn(str(article.resolve()), xml)
 
     def test_agent_claims_and_completes_a_queued_job(self):
         job = self.manager.submit_account_task(

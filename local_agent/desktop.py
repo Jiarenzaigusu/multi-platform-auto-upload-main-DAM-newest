@@ -16,6 +16,7 @@ from local_agent.autostart import open_url, set_autostart
 from local_agent.client import AgentApiClient, AgentApiError
 from local_agent.credentials import AgentConnectionStore, StoredConnection
 from local_agent.main import LocalAgentApplication, _server_url
+from local_agent.path_import import run_path_import
 from local_agent.paths import default_data_root
 from local_agent import theme
 from local_agent import updater
@@ -807,50 +808,26 @@ def _run_status_window(
     ).pack(fill="x", ipady=5)
 
     def run_tmall_path_import() -> None:
-        """Launch the bundled Windows Tmall/JD workbook path import utility."""
+        """Open the native Tmall/JD workbook path import utility."""
         if os.name != "nt":
             messagebox.showinfo("批量发布路径导入", "该工具仅支持 Windows。")
             return
-        import subprocess
 
         if getattr(sys, "frozen", False):
-            script_path = (
+            asset_directory = (
                 Path(sys._MEIPASS)
                 / "tmall_path_import"
-                / "TmallVideoPathImport.ps1"
             )
         else:
-            script_path = (
+            asset_directory = (
                 Path(__file__).resolve().parent
                 / "assets"
                 / "tmall_path_import"
-                / "TmallVideoPathImport.ps1"
             )
-        if not script_path.is_file():
-            messagebox.showerror("批量发布路径导入", "找不到路径导入脚本，请重新安装本地执行助手。")
+        if not asset_directory.is_dir():
+            messagebox.showerror("批量发布路径导入", "找不到批量发布模板，请重新安装本地执行助手。")
             return
-        try:
-            powershell = (
-                Path(os.environ.get("WINDIR", r"C:\Windows"))
-                / "System32"
-                / "WindowsPowerShell"
-                / "v1.0"
-                / "powershell.exe"
-            )
-            subprocess.Popen(
-                [
-                    str(powershell),
-                    "-NoProfile",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-STA",
-                    "-File",
-                    str(script_path),
-                ],
-                cwd=str(script_path.parent),
-            )
-        except OSError as exc:
-            messagebox.showerror("批量发布路径导入", f"无法启动路径导入工具：{exc}")
+        run_path_import(asset_directory, parent=root)
 
     theme.primary_button(
         conn_inner,

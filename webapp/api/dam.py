@@ -63,7 +63,13 @@ class DamOpenApiClient:
                 "X-DAM-Open-Catalog": self.settings.catalog,
             })
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            # DAM is directly reachable from the server. Ignoring environment
+            # proxies also prevents an unrelated local SOCKS setup from
+            # breaking the integration when its optional driver is absent.
+            async with httpx.AsyncClient(
+                timeout=self.timeout,
+                trust_env=False,
+            ) as client:
                 response = await client.request(
                     method,
                     urljoin(self.base_url, path.lstrip("/")),
@@ -148,7 +154,11 @@ def validate_download_url(raw_url: str, *, label: str) -> str:
 
 async def stream_download(raw_url: str, *, max_bytes: int) -> tuple[httpx.Response, AsyncIterator[bytes]]:
     url = validate_download_url(raw_url, label="DAM 下载地址")
-    client = httpx.AsyncClient(timeout=httpx.Timeout(60, read=None), follow_redirects=False)
+    client = httpx.AsyncClient(
+        timeout=httpx.Timeout(60, read=None),
+        follow_redirects=False,
+        trust_env=False,
+    )
     try:
         request = client.build_request("GET", url)
         response = await client.send(request, stream=True)

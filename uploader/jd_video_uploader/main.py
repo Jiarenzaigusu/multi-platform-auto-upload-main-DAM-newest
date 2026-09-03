@@ -28,7 +28,12 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
-from patchright.async_api import BrowserContext, Frame, Page
+from patchright.async_api import (
+    BrowserContext,
+    Frame,
+    Page,
+    TimeoutError as PlaywrightTimeoutError,
+)
 
 from uploader.errors import PublishResultUncertainError
 from utils.config import DEBUG_MODE
@@ -54,6 +59,15 @@ JD_MAX_GOODS_IDS = 10
 # 京东视频自定义封面支持的格式与大小限制
 JD_COVER_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 JD_MAX_COVER_IMAGE_BYTES = 5 * 1024 * 1024
+# The first JD publish-page mount can expose its file input before the upload SDK
+# and cover-processing listeners are ready. Require a stable surface and recover
+# once from the known "video ID exists, cover still waits" half-finished state.
+JD_UPLOAD_READY_STABLE_POLLS = 5
+JD_VIDEO_PROCESSING_STALL_SECONDS = 60
+JD_VIDEO_UPLOAD_MAX_ATTEMPTS = 2
+JD_VIDEO_FILE_INPUT_SELECTOR = (
+    'input[type="file"][accept*=".mp4"], input[type="file"][accept*="video"]'
+)
 
 
 class JdAuthenticationError(RuntimeError):
@@ -63,6 +77,29 @@ class JdAuthenticationError(RuntimeError):
     上层会捕获此异常并将会话标记为未认证。
     """
     pass
+
+
+class JdVideoProcessingStalledError(RuntimeError):
+    """JD uploaded the video but never advanced the cover-processing UI."""
+
+    def __init__(self, video_id: str, detail: str, preview_url: str = ""):
+        if video_id:
+            uploaded_state = f"已生成视频 ID {video_id}"
+        elif preview_url:
+            uploaded_state = f"已生成 OSS 视频预览 {preview_url}"
+        else:
+            uploaded_state = "视频文件已上传"
+        super().__init__(f"京东{uploaded_state}，但封面区域持续显示等待视频上传：{detail}")
+        self.video_id = video_id
+        self.preview_url = preview_url
+
+
+class JdUploadDiagnostics:
+    """Signals emitted by Jingmai's upload SDK before the cover UI updates."""
+
+    def __init__(self) -> None:
+        self.sign_succeeded = False
+        self.preview_url = ""
 
 
 def _msg(emoji: str, text: str) -> str:
@@ -87,6 +124,72 @@ def _url_host(url: str) -> str:
         return urlparse(url).hostname or ""
     except Exception:
         return ""
+
+
+def _network_request_label(url: str) -> str:
+    """Return a diagnostic URL without query parameters or credentials."""
+    try:
+        parsed = urlparse(url)
+        return f"{parsed.scheme}://{parsed.hostname or ''}{parsed.path}"
+    except Exception:
+        return "无法解析的京东请求"
+
+
+def _is_jd_request_host(host: str) -> bool:
+    return host == "jd.com" or host.endswith((".jd.com", ".jdcloudcs.com"))
+
+
+def _attach_upload_diagnostics(page: Page, diagnostics: JdUploadDiagnostics) -> None:
+    """Capture JD upload signals and log failures without exposing query tokens."""
+    def log_response(response) -> None:
+        host = _url_host(response.url)
+        if (
+            200 <= response.status < 300
+            and host.endswith(".jdcloudcs.com")
+            and re.search(r"\.(?:mp4|mov|m4v|webm)(?:$|\?)", response.url, re.IGNORECASE)
+        ):
+            diagnostics.preview_url = _network_request_label(response.url)
+            jd_logger.info(
+                _msg("☁️", f"京东 OSS 视频上传成功: {diagnostics.preview_url}")
+            )
+        if response.status >= 400 and _is_jd_request_host(host):
+            jd_logger.warning(
+                _msg(
+                    "🌐",
+                    f"京东页面请求返回 HTTP {response.status}: "
+                    f"{_network_request_label(response.url)}",
+                )
+            )
+
+    def log_request_failure(request) -> None:
+        if _is_jd_request_host(_url_host(request.url)):
+            jd_logger.warning(
+                _msg(
+                    "🌐",
+                    f"京东页面请求失败: {_network_request_label(request.url)}；"
+                    f"{request.failure or '未知网络错误'}",
+                )
+            )
+
+    def log_console(message) -> None:
+        text = message.text
+        normalized = text.lower()
+        if "onsign" in normalized and "success" in normalized:
+            diagnostics.sign_succeeded = True
+            jd_logger.info(_msg("🔑", "京东视频上传签名获取成功"))
+        if "videouploadpreview" not in normalized:
+            return
+        match = re.search(r"https?://[^\s'\"}\])]+", text)
+        if not match:
+            return
+        diagnostics.preview_url = _network_request_label(match.group(0))
+        jd_logger.info(
+            _msg("☁️", f"京东 OSS 视频预览已生成: {diagnostics.preview_url}")
+        )
+
+    page.on("response", log_response)
+    page.on("requestfailed", log_request_failure)
+    page.on("console", log_console)
 
 
 def _is_publish_frame_reload_error(exc: Exception) -> bool:
@@ -325,6 +428,83 @@ async def _find_publish_iframe(page, timeout_seconds: int = 30) -> Frame:
     raise RuntimeError("未找到京麦视频发布 iframe")
 
 
+async def _wait_for_video_upload_surface(
+    page: Page,
+    timeout_seconds: int = 60,
+) -> Frame:
+    """Wait until JD's upload input survives several micro-frontend renders."""
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    stable_polls = 0
+
+    while asyncio.get_running_loop().time() < deadline:
+        if _url_host(page.url) in JD_AUTH_HOSTS:
+            raise JdAuthenticationError("京东 Cookie 已失效，请重新登录")
+
+        try:
+            frame = await _find_publish_iframe(page, timeout_seconds=1)
+            file_input = frame.locator(JD_VIDEO_FILE_INPUT_SELECTOR).first
+            if await file_input.count() and await file_input.is_enabled():
+                # React may replace the input while the upload SDK is hydrating.
+                # A marker surviving multiple polls proves this is the same node.
+                same_node = await file_input.evaluate(
+                    """element => {
+                        if (element.dataset.mpauUploadReadyProbe === '1') return true;
+                        element.dataset.mpauUploadReadyProbe = '1';
+                        return false;
+                    }"""
+                )
+                stable_polls = stable_polls + 1 if same_node else 0
+                if stable_polls >= JD_UPLOAD_READY_STABLE_POLLS:
+                    jd_logger.info(_msg("✅", "京东视频上传组件已稳定就绪"))
+                    return frame
+            else:
+                stable_polls = 0
+        except JdAuthenticationError:
+            raise
+        except Exception as exc:
+            if not _is_publish_frame_reload_error(exc):
+                stable_polls = 0
+
+        await asyncio.sleep(0.5)
+
+    raise RuntimeError("等待京东视频上传组件稳定就绪超时")
+
+
+async def _choose_jd_video_file(page: Page, frame: Frame, file_path: str) -> None:
+    """Select a video through JD's native chooser, with a compatibility fallback."""
+    file_input = frame.locator(JD_VIDEO_FILE_INPUT_SELECTOR).first
+    await file_input.wait_for(state="attached", timeout=10000)
+    upload_surface = file_input.locator(
+        "xpath=ancestor::*[self::label or @role='button' or contains(@class,'upload')][1]"
+    )
+    trigger = (
+        upload_surface
+        if await upload_surface.count() and await upload_surface.is_visible()
+        else file_input
+    )
+
+    chooser_triggers = [trigger]
+    if trigger is not file_input:
+        chooser_triggers.append(file_input)
+    for chooser_trigger in chooser_triggers:
+        try:
+            async with page.expect_file_chooser(timeout=5000) as chooser_info:
+                await chooser_trigger.click(force=True, timeout=5000)
+            chooser = await chooser_info.value
+            await chooser.set_files(file_path)
+            jd_logger.info(_msg("✅", "已通过京东原生文件选择流程提交视频"))
+            return
+        except PlaywrightTimeoutError:
+            continue
+
+    # Keep compatibility with accounts whose hidden input cannot open a
+    # chooser, but make the degraded path explicit in the task log.
+    jd_logger.warning(
+        _msg("⚠️", "京东上传控件未打开文件选择器，改用文件输入框兼容方式")
+    )
+    await frame.locator(JD_VIDEO_FILE_INPUT_SELECTOR).first.set_input_files(file_path)
+
+
 class JDVideo(JDBaseUploader):
     """京东京麦视频发布器。
 
@@ -428,6 +608,8 @@ class JDVideo(JDBaseUploader):
         page_or_frame: Page | Frame,
         frame: Frame | int | None = None,
         timeout_seconds: int = 600,
+        stall_seconds: int = JD_VIDEO_PROCESSING_STALL_SECONDS,
+        diagnostics: JdUploadDiagnostics | None = None,
     ) -> Frame:
         """等视频上传完成，京麦重载发布 iframe 时自动重新绑定。
 
@@ -450,6 +632,7 @@ class JDVideo(JDBaseUploader):
         reload_count = 0
         last_body_text = ""
         stable_ready_polls = 0
+        half_finished_since: float | None = None
 
         while loop.time() < deadline:
             try:
@@ -457,6 +640,20 @@ class JDVideo(JDBaseUploader):
                 last_body_text = body_text[-300:].strip()
                 if "上传失败" in body_text or "本地处理失败" in body_text:
                     raise RuntimeError(f"京东视频上传失败：{last_body_text}")
+                video_id_match = re.search(r"视频\s*ID\s*[：:]\s*(\d+)", body_text, re.IGNORECASE)
+                cover_still_waiting = "等待视频上传" in body_text
+                preview_url = diagnostics.preview_url if diagnostics else ""
+                upload_completed = bool(video_id_match or preview_url)
+                if upload_completed and cover_still_waiting:
+                    half_finished_since = half_finished_since or loop.time()
+                    if loop.time() - half_finished_since >= stall_seconds:
+                        raise JdVideoProcessingStalledError(
+                            video_id_match.group(1) if video_id_match else "",
+                            last_body_text or "页面没有更多状态信息",
+                            preview_url,
+                        )
+                else:
+                    half_finished_since = None
                 edit_cover = current_frame.locator(".edit-cover-btn").filter(has_text="修改封面").first
                 processing = any(
                     hint in body_text
@@ -1124,6 +1321,64 @@ class JDVideo(JDBaseUploader):
 
             raise RuntimeError("等待验证码超时（10 分钟），请检查浏览器并手动处理后重试")
 
+    async def _open_page_and_upload_video(
+        self,
+        context: BrowserContext,
+    ) -> tuple[Page, Frame]:
+        """Open a clean JD form and recover once from its half-finished upload state."""
+        for attempt in range(1, JD_VIDEO_UPLOAD_MAX_ATTEMPTS + 1):
+            page = await context.new_page()
+            diagnostics = JdUploadDiagnostics()
+            _attach_upload_diagnostics(page, diagnostics)
+            try:
+                await page.goto(JD_PUBLISH_VIDEO_URL, wait_until="domcontentloaded")
+                if _url_host(page.url) in JD_AUTH_HOSTS:
+                    raise JdAuthenticationError("京东 Cookie 已失效，请重新登录")
+                jd_logger.info(
+                    _msg(
+                        "🧭",
+                        f"小人正在赶往京东京麦发视频页面（第 {attempt} 次）",
+                    )
+                )
+                # A real-page refresh consistently finishes Jingmai's second
+                # micro-frontend initialization. Do it before selecting a file
+                # so the first upload does not create an orphaned video record.
+                await _wait_for_video_upload_surface(page)
+                jd_logger.info(_msg("🔄", "京东上传组件首次就绪，正在刷新页面完成二次初始化"))
+                await page.reload(wait_until="domcontentloaded")
+                if _url_host(page.url) in JD_AUTH_HOSTS:
+                    raise JdAuthenticationError("京东 Cookie 已失效，请重新登录")
+                frame = await _wait_for_video_upload_surface(page)
+
+                jd_logger.info(_msg("🏃", f"小人开始上传视频: {Path(self.file_path).name}"))
+                await _choose_jd_video_file(page, frame, self.file_path)
+                frame = await self._wait_for_video_uploaded(
+                    page,
+                    frame,
+                    diagnostics=diagnostics,
+                )
+                return page, frame
+            except JdVideoProcessingStalledError as exc:
+                if attempt >= JD_VIDEO_UPLOAD_MAX_ATTEMPTS:
+                    raise
+                jd_logger.warning(
+                    _msg(
+                        "🔁",
+                        f"检测到京东视频上传已完成"
+                        f"{f'（视频 ID {exc.video_id}）' if exc.video_id else ''}"
+                        "，但封面处理未启动，"
+                        "正在关闭当前页面并用全新发布页重试一次",
+                    )
+                )
+                if not page.is_closed():
+                    await page.close()
+            except Exception:
+                # The owning JD session is discarded by upload_in_session, so a
+                # failed page cannot leak into the next account task.
+                raise
+
+        raise RuntimeError("京东视频上传重试流程异常结束")
+
     async def _upload_in_context(self, context: BrowserContext) -> dict:
         """在指定 BrowserContext 中执行完整的发布流程。
 
@@ -1147,24 +1402,7 @@ class JDVideo(JDBaseUploader):
         submitted = False
 
         try:
-            page = await context.new_page()
-            await page.goto(JD_PUBLISH_VIDEO_URL, wait_until="domcontentloaded")
-            if _url_host(page.url) in JD_AUTH_HOSTS:
-                raise JdAuthenticationError("京东 Cookie 已失效，请重新登录")
-            jd_logger.info(_msg("🧭", "小人正在赶往京东京麦发视频页面"))
-            try:
-                frame = await _find_publish_iframe(page)
-            except RuntimeError as exc:
-                if _url_host(page.url) in JD_AUTH_HOSTS:
-                    raise JdAuthenticationError("京东 Cookie 已失效，请重新登录") from exc
-                raise
-            await asyncio.sleep(3)
-
-            # 上传视频文件
-            jd_logger.info(_msg("🏃", f"小人开始上传视频: {Path(self.file_path).name}"))
-            file_input = frame.locator('input[type="file"][accept*=".mp4"]').first
-            await file_input.set_input_files(self.file_path)
-            frame = await self._wait_for_video_uploaded(page, frame)
+            page, frame = await self._open_page_and_upload_video(context)
             frame = await self._set_custom_cover(page, frame)
 
             # 填写标题

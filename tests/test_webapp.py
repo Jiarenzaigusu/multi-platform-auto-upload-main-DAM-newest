@@ -19,7 +19,13 @@ from loguru import logger
 from openpyxl import Workbook, load_workbook
 
 from uploader.errors import PublishResultUncertainError
-from uploader.jd_video_uploader.main import JDVideo
+from uploader.jd_video_uploader.main import (
+    JDVideo,
+    JdUploadDiagnostics,
+    JdVideoProcessingStalledError,
+    _attach_upload_diagnostics,
+    _choose_jd_video_file,
+)
 from uploader.tmall_article_uploader.main import TmallArticle
 from uploader.tmall_video_uploader.main import (
     TmallVideo,
@@ -740,6 +746,161 @@ class PublishRequestValidationTests(unittest.TestCase):
             result = asyncio.run(uploader._wait_for_video_uploaded(page, first_frame, timeout_seconds=5))
 
         self.assertIs(result, second_frame)
+
+    def test_jd_wait_for_video_uploaded_detects_half_finished_video(self):
+        uploader = object.__new__(JDVideo)
+        body = MagicMock()
+        body.inner_text = AsyncMock(return_value="视频ID：4657567618\n等待视频上传")
+        frame = MagicMock()
+        frame.locator.return_value = body
+
+        with self.assertRaises(JdVideoProcessingStalledError) as raised:
+            asyncio.run(
+                uploader._wait_for_video_uploaded(
+                    frame,
+                    timeout_seconds=5,
+                    stall_seconds=0,
+                )
+            )
+
+        self.assertEqual(raised.exception.video_id, "4657567618")
+
+    def test_jd_wait_for_video_uploaded_uses_oss_preview_signal(self):
+        uploader = object.__new__(JDVideo)
+        body = MagicMock()
+        body.inner_text = AsyncMock(return_value="等待视频上传")
+        frame = MagicMock()
+        frame.locator.return_value = body
+        diagnostics = JdUploadDiagnostics()
+        diagnostics.preview_url = (
+            "https://hwgcloudoss.oss.cn-north-1.jdcloudcs.com/jdvideo.mp4"
+        )
+
+        with self.assertRaises(JdVideoProcessingStalledError) as raised:
+            asyncio.run(
+                uploader._wait_for_video_uploaded(
+                    frame,
+                    timeout_seconds=5,
+                    stall_seconds=0,
+                    diagnostics=diagnostics,
+                )
+            )
+
+        self.assertEqual(raised.exception.video_id, "")
+        self.assertEqual(raised.exception.preview_url, diagnostics.preview_url)
+
+    def test_jd_upload_diagnostics_capture_success_and_ignore_videojs_warning(self):
+        callbacks = {}
+        page = MagicMock()
+        page.on.side_effect = lambda event, callback: callbacks.__setitem__(event, callback)
+        diagnostics = JdUploadDiagnostics()
+        _attach_upload_diagnostics(page, diagnostics)
+
+        callbacks["console"](
+            SimpleNamespace(text="VIDEOJS: WARN: videojs.plugin() is deprecated")
+        )
+        self.assertFalse(diagnostics.sign_succeeded)
+        self.assertEqual(diagnostics.preview_url, "")
+
+        callbacks["console"](
+            SimpleNamespace(text="onsign {code: 0, message: 'success'}")
+        )
+        callbacks["console"](
+            SimpleNamespace(
+                text=(
+                    "VideoUploadPreview - url: "
+                    "https://hwgcloudoss.oss.cn-north-1.jdcloudcs.com/jdvideo.mp4"
+                )
+            )
+        )
+
+        self.assertTrue(diagnostics.sign_succeeded)
+        self.assertEqual(
+            diagnostics.preview_url,
+            "https://hwgcloudoss.oss.cn-north-1.jdcloudcs.com/jdvideo.mp4",
+        )
+
+    def test_jd_video_upload_uses_file_chooser_flow(self):
+        chooser = SimpleNamespace(set_files=AsyncMock())
+
+        class ChooserInfo:
+            async def __aenter__(self):
+                async def value():
+                    return chooser
+
+                self.value = value()
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+        trigger = MagicMock()
+        trigger.count = AsyncMock(return_value=1)
+        trigger.is_visible = AsyncMock(return_value=True)
+        trigger.click = AsyncMock()
+        file_input = MagicMock()
+        file_input.wait_for = AsyncMock()
+        file_input.locator.return_value = trigger
+        first = MagicMock()
+        first.first = file_input
+        frame = MagicMock()
+        frame.locator.return_value = first
+        page = MagicMock()
+        page.expect_file_chooser.return_value = ChooserInfo()
+
+        asyncio.run(_choose_jd_video_file(page, frame, "/tmp/demo.mp4"))
+
+        trigger.click.assert_awaited_once()
+        chooser.set_files.assert_awaited_once_with("/tmp/demo.mp4")
+        file_input.set_input_files.assert_not_called()
+
+    def test_jd_video_upload_reopens_page_once_after_processing_stall(self):
+        uploader = object.__new__(JDVideo)
+        uploader.file_path = "/tmp/demo.mp4"
+        first_page = MagicMock()
+        first_page.url = "https://dr.jd.com/jm/#/n/publish-video.html?platform=jm-pop"
+        first_page.goto = AsyncMock()
+        first_page.reload = AsyncMock()
+        first_page.close = AsyncMock()
+        first_page.is_closed.return_value = False
+        second_page = MagicMock()
+        second_page.url = first_page.url
+        second_page.goto = AsyncMock()
+        second_page.reload = AsyncMock()
+        context = MagicMock()
+        context.new_page = AsyncMock(side_effect=[first_page, second_page])
+        first_frame, second_frame = MagicMock(), MagicMock()
+
+        with (
+            patch(
+                "uploader.jd_video_uploader.main._wait_for_video_upload_surface",
+                new=AsyncMock(
+                    side_effect=[first_frame, first_frame, second_frame, second_frame]
+                ),
+            ),
+            patch(
+                "uploader.jd_video_uploader.main._choose_jd_video_file",
+                new=AsyncMock(),
+            ),
+            patch.object(
+                uploader,
+                "_wait_for_video_uploaded",
+                new=AsyncMock(
+                    side_effect=[
+                        JdVideoProcessingStalledError("4657567618", "等待视频上传"),
+                        second_frame,
+                    ]
+                ),
+            ),
+        ):
+            page, frame = asyncio.run(uploader._open_page_and_upload_video(context))
+
+        self.assertIs(page, second_page)
+        self.assertIs(frame, second_frame)
+        first_page.close.assert_awaited_once()
+        first_page.reload.assert_awaited_once_with(wait_until="domcontentloaded")
+        second_page.reload.assert_awaited_once_with(wait_until="domcontentloaded")
+        self.assertEqual(context.new_page.await_count, 2)
 
     def test_jd_set_custom_cover_recovers_from_iframe_reload(self):
         with tempfile.TemporaryDirectory() as temp_dir:

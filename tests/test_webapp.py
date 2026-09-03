@@ -50,7 +50,7 @@ from webapp.api.agent_tasks import AgentTaskManager
 from webapp.api.main import WebSettings
 from webapp.api.batch import resolve_local_path
 from webapp.api.main import create_app as _create_app
-from webapp.api.models import ValidationError, validate_publish_request
+from webapp.api.models import ValidationError, validate_account_name, validate_publish_request
 from webapp.api.platforms import (
     JdVideoUploadRequest,
     TmallVideoUploadRequest,
@@ -146,6 +146,19 @@ class PublishRequestValidationTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
+
+    def test_account_name_accepts_chinese_and_mixed_characters(self):
+        self.assertEqual(validate_account_name("诺诗兰"), "诺诗兰")
+        self.assertEqual(validate_account_name(" 诺诗兰_store-01 "), "诺诗兰_store-01")
+
+    def test_account_name_still_rejects_unsafe_characters(self):
+        with self.assertRaisesRegex(ValidationError, "只能包含中文"):
+            validate_account_name("诺诗兰/store")
+
+    def test_account_name_enforces_length_with_chinese(self):
+        self.assertEqual(validate_account_name("店" * 64), "店" * 64)
+        with self.assertRaisesRegex(ValidationError, "1-64"):
+            validate_account_name("店" * 65)
 
     def test_tmall_request_normalizes_tags(self):
         request = validate_publish_request(

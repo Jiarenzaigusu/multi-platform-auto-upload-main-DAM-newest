@@ -34,8 +34,8 @@ JD_ARTICLE_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 MAX_JD_ARTICLE_IMAGES = 20
 MAX_SOCIAL_ARTICLE_IMAGES = 35
 MAX_JD_ARTICLE_IMAGE_BYTES = 5 * 1024 * 1024
-# 账号名正则：字母数字下划线连字符，1-64 字符
-ACCOUNT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# 账号名正则：中文、字母、数字、下划线和连字符，1-64 字符
+ACCOUNT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_\-\u3400-\u4DBF\u4E00-\u9FFF]{1,64}$")
 # 定时发布时间标准格式
 SCHEDULE_FORMAT = "%Y-%m-%d %H:%M"
 # 定时发布时间至少晚于当前的时间（与平台要求一致）
@@ -126,7 +126,7 @@ def validate_account_name(account: str) -> str:
     """校验账号名，返回去除首尾空白后的值。"""
     normalized = account.strip()
     if not ACCOUNT_NAME_PATTERN.fullmatch(normalized):
-        raise ValidationError("账号标识只能包含字母、数字、下划线和连字符，长度为 1-64")
+        raise ValidationError("账号标识只能包含中文、字母、数字、下划线和连字符，长度为 1-64")
     return normalized
 
 

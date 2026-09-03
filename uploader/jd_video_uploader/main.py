@@ -471,16 +471,50 @@ async def _wait_for_video_upload_surface(
 
 
 async def _choose_jd_video_file(page: Page, frame: Frame, file_path: str) -> None:
-    """Select a video through JD's native chooser, with a compatibility fallback."""
+    """Click a visible JD upload surface and select the video through its chooser."""
     file_input = frame.locator(JD_VIDEO_FILE_INPUT_SELECTOR).first
     await file_input.wait_for(state="attached", timeout=10000)
-    upload_surface = file_input.locator(
-        "xpath=ancestor::*[self::label or @role='button' or contains(@class,'upload')][1]"
+
+    # Jingmai nests the hidden input inside several upload wrappers. The nearest
+    # wrapper can also be invisible, while an outer wrapper is the actual surface
+    # clicked by users. Inspect every matching ancestor instead of taking [1].
+    ancestor_surfaces = file_input.locator(
+        "xpath=ancestor::*["
+        "self::label or @role='button' or "
+        "contains(translate(@class, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', "
+        "'abcdefghijklmnopqrstuvwxyz'), 'upload')"
+        "]"
     )
-    upload_surface_visible = bool(
-        await upload_surface.count() and await upload_surface.is_visible()
+    text_surfaces = frame.get_by_text(
+        re.compile(r"^\s*(?:点击)?上传视频\s*$"),
+        exact=False,
     )
-    if upload_surface_visible:
+
+    visible_surfaces: list[tuple[float, object]] = []
+    for surfaces in (ancestor_surfaces, text_surfaces):
+        for index in range(await surfaces.count()):
+            surface = surfaces.nth(index)
+            try:
+                if not await surface.is_visible() or not await surface.is_enabled():
+                    continue
+                box = await surface.bounding_box()
+                if not box or box["width"] <= 0 or box["height"] <= 0:
+                    continue
+                visible_surfaces.append((box["width"] * box["height"], surface))
+            except PlaywrightError:
+                continue
+
+    if not visible_surfaces:
+        raise RuntimeError(
+            "京东视频上传 input 已挂载，但未找到可见的“上传视频”入口；"
+            "已停止以避免绕过页面初始化后造成封面一直等待"
+        )
+
+    # The smallest visible wrapper is normally the real upload card rather than
+    # a full-page container. Try a few candidates because account variants differ.
+    visible_surfaces.sort(key=lambda item: item[0])
+    last_error = ""
+    for _, upload_surface in visible_surfaces[:5]:
         try:
             async with page.expect_file_chooser(timeout=5000) as chooser_info:
                 await upload_surface.click(force=True, timeout=5000)
@@ -489,20 +523,12 @@ async def _choose_jd_video_file(page: Page, frame: Frame, file_path: str) -> Non
             jd_logger.info(_msg("✅", "已通过京东原生文件选择流程提交视频"))
             return
         except PlaywrightError as exc:
-            jd_logger.warning(
-                _msg(
-                    "⚠️",
-                    f"京东可见上传区域未能打开文件选择器（{exc}），"
-                    "改用文件输入框兼容方式",
-                )
-            )
+            last_error = str(exc)
 
-    # Hidden file inputs cannot be clicked, even with force=True. Setting files
-    # on the attached native input still dispatches the browser's input/change
-    # events and is the correct fallback for this Jingmai page variant.
-    if not upload_surface_visible:
-        jd_logger.info(_msg("ℹ️", "京东视频 input 为隐藏控件，直接设置本地文件"))
-    await file_input.set_input_files(file_path)
+    raise RuntimeError(
+        "已找到京东可见的“上传视频”入口，但未能打开文件选择器；"
+        f"最后错误：{last_error or '页面未触发 file chooser'}"
+    )
 
 
 class JDVideo(JDBaseUploader):

@@ -836,8 +836,12 @@ class PublishRequestValidationTests(unittest.TestCase):
 
         trigger = MagicMock()
         trigger.count = AsyncMock(return_value=1)
-        trigger.is_visible = AsyncMock(return_value=True)
-        trigger.click = AsyncMock()
+        surface = MagicMock()
+        surface.is_visible = AsyncMock(return_value=True)
+        surface.is_enabled = AsyncMock(return_value=True)
+        surface.bounding_box = AsyncMock(return_value={"width": 320, "height": 180})
+        surface.click = AsyncMock()
+        trigger.nth.return_value = surface
         file_input = MagicMock()
         file_input.wait_for = AsyncMock()
         file_input.locator.return_value = trigger
@@ -845,19 +849,66 @@ class PublishRequestValidationTests(unittest.TestCase):
         first.first = file_input
         frame = MagicMock()
         frame.locator.return_value = first
+        text_surfaces = MagicMock()
+        text_surfaces.count = AsyncMock(return_value=0)
+        frame.get_by_text.return_value = text_surfaces
         page = MagicMock()
         page.expect_file_chooser.return_value = ChooserInfo()
 
         asyncio.run(_choose_jd_video_file(page, frame, "/tmp/demo.mp4"))
 
-        trigger.click.assert_awaited_once()
+        surface.click.assert_awaited_once()
         chooser.set_files.assert_awaited_once_with("/tmp/demo.mp4")
         file_input.set_input_files.assert_not_called()
 
-    def test_jd_video_upload_sets_hidden_input_without_clicking_it(self):
+    def test_jd_video_upload_skips_hidden_nearest_wrapper(self):
+        chooser = SimpleNamespace(set_files=AsyncMock())
+
+        class ChooserInfo:
+            async def __aenter__(self):
+                async def value():
+                    return chooser
+
+                self.value = value()
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+        hidden_surface = MagicMock()
+        hidden_surface.is_visible = AsyncMock(return_value=False)
+        visible_surface = MagicMock()
+        visible_surface.is_visible = AsyncMock(return_value=True)
+        visible_surface.is_enabled = AsyncMock(return_value=True)
+        visible_surface.bounding_box = AsyncMock(
+            return_value={"width": 420, "height": 240}
+        )
+        visible_surface.click = AsyncMock()
+        ancestor_surfaces = MagicMock()
+        ancestor_surfaces.count = AsyncMock(return_value=2)
+        ancestor_surfaces.nth.side_effect = [hidden_surface, visible_surface]
+        file_input = MagicMock()
+        file_input.wait_for = AsyncMock()
+        file_input.locator.return_value = ancestor_surfaces
+        first = MagicMock()
+        first.first = file_input
+        frame = MagicMock()
+        frame.locator.return_value = first
+        text_surfaces = MagicMock()
+        text_surfaces.count = AsyncMock(return_value=0)
+        frame.get_by_text.return_value = text_surfaces
+        page = MagicMock()
+        page.expect_file_chooser.return_value = ChooserInfo()
+
+        asyncio.run(_choose_jd_video_file(page, frame, "/tmp/demo.mp4"))
+
+        hidden_surface.click.assert_not_called()
+        visible_surface.click.assert_awaited_once()
+        chooser.set_files.assert_awaited_once_with("/tmp/demo.mp4")
+
+    def test_jd_video_upload_rejects_hidden_input_without_visible_surface(self):
         upload_surface = MagicMock()
         upload_surface.count = AsyncMock(return_value=0)
-        upload_surface.is_visible = AsyncMock(return_value=False)
         file_input = MagicMock()
         file_input.wait_for = AsyncMock()
         file_input.set_input_files = AsyncMock()
@@ -866,14 +917,18 @@ class PublishRequestValidationTests(unittest.TestCase):
         first.first = file_input
         frame = MagicMock()
         frame.locator.return_value = first
+        text_surfaces = MagicMock()
+        text_surfaces.count = AsyncMock(return_value=0)
+        frame.get_by_text.return_value = text_surfaces
         page = MagicMock()
 
-        asyncio.run(_choose_jd_video_file(page, frame, "/tmp/demo.mp4"))
+        with self.assertRaisesRegex(RuntimeError, "未找到可见"):
+            asyncio.run(_choose_jd_video_file(page, frame, "/tmp/demo.mp4"))
 
         upload_surface.click.assert_not_called()
         page.expect_file_chooser.assert_not_called()
         file_input.click.assert_not_called()
-        file_input.set_input_files.assert_awaited_once_with("/tmp/demo.mp4")
+        file_input.set_input_files.assert_not_called()
 
     def test_jd_video_upload_reopens_page_once_after_processing_stall(self):
         uploader = object.__new__(JDVideo)

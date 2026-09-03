@@ -854,6 +854,27 @@ class PublishRequestValidationTests(unittest.TestCase):
         chooser.set_files.assert_awaited_once_with("/tmp/demo.mp4")
         file_input.set_input_files.assert_not_called()
 
+    def test_jd_video_upload_sets_hidden_input_without_clicking_it(self):
+        upload_surface = MagicMock()
+        upload_surface.count = AsyncMock(return_value=0)
+        upload_surface.is_visible = AsyncMock(return_value=False)
+        file_input = MagicMock()
+        file_input.wait_for = AsyncMock()
+        file_input.set_input_files = AsyncMock()
+        file_input.locator.return_value = upload_surface
+        first = MagicMock()
+        first.first = file_input
+        frame = MagicMock()
+        frame.locator.return_value = first
+        page = MagicMock()
+
+        asyncio.run(_choose_jd_video_file(page, frame, "/tmp/demo.mp4"))
+
+        upload_surface.click.assert_not_called()
+        page.expect_file_chooser.assert_not_called()
+        file_input.click.assert_not_called()
+        file_input.set_input_files.assert_awaited_once_with("/tmp/demo.mp4")
+
     def test_jd_video_upload_reopens_page_once_after_processing_stall(self):
         uploader = object.__new__(JDVideo)
         uploader.file_path = "/tmp/demo.mp4"

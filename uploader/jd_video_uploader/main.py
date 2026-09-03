@@ -30,9 +30,9 @@ from urllib.parse import urlparse
 
 from patchright.async_api import (
     BrowserContext,
+    Error as PlaywrightError,
     Frame,
     Page,
-    TimeoutError as PlaywrightTimeoutError,
 )
 
 from uploader.errors import PublishResultUncertainError
@@ -477,32 +477,32 @@ async def _choose_jd_video_file(page: Page, frame: Frame, file_path: str) -> Non
     upload_surface = file_input.locator(
         "xpath=ancestor::*[self::label or @role='button' or contains(@class,'upload')][1]"
     )
-    trigger = (
-        upload_surface
-        if await upload_surface.count() and await upload_surface.is_visible()
-        else file_input
+    upload_surface_visible = bool(
+        await upload_surface.count() and await upload_surface.is_visible()
     )
-
-    chooser_triggers = [trigger]
-    if trigger is not file_input:
-        chooser_triggers.append(file_input)
-    for chooser_trigger in chooser_triggers:
+    if upload_surface_visible:
         try:
             async with page.expect_file_chooser(timeout=5000) as chooser_info:
-                await chooser_trigger.click(force=True, timeout=5000)
+                await upload_surface.click(force=True, timeout=5000)
             chooser = await chooser_info.value
             await chooser.set_files(file_path)
             jd_logger.info(_msg("✅", "已通过京东原生文件选择流程提交视频"))
             return
-        except PlaywrightTimeoutError:
-            continue
+        except PlaywrightError as exc:
+            jd_logger.warning(
+                _msg(
+                    "⚠️",
+                    f"京东可见上传区域未能打开文件选择器（{exc}），"
+                    "改用文件输入框兼容方式",
+                )
+            )
 
-    # Keep compatibility with accounts whose hidden input cannot open a
-    # chooser, but make the degraded path explicit in the task log.
-    jd_logger.warning(
-        _msg("⚠️", "京东上传控件未打开文件选择器，改用文件输入框兼容方式")
-    )
-    await frame.locator(JD_VIDEO_FILE_INPUT_SELECTOR).first.set_input_files(file_path)
+    # Hidden file inputs cannot be clicked, even with force=True. Setting files
+    # on the attached native input still dispatches the browser's input/change
+    # events and is the correct fallback for this Jingmai page variant.
+    if not upload_surface_visible:
+        jd_logger.info(_msg("ℹ️", "京东视频 input 为隐藏控件，直接设置本地文件"))
+    await file_input.set_input_files(file_path)
 
 
 class JDVideo(JDBaseUploader):

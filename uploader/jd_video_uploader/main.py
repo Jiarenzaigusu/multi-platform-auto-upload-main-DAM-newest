@@ -540,7 +540,7 @@ class JDVideo(JDBaseUploader):
     3. 等待视频上传完成 → 设置自定义封面（可选）
     4. 填写标题 → 关联商品（可选）→ 添加话题（可选）→ 选择创作者声明 → 开启自主原创（可选）→ 设置定时（可选）
     5. dry_run 跳过发布；否则点击发布按钮 → 处理验证码（人工）→ 等待确认
-    6. 成功后丢弃本次发布会话，下次任务从登录时保存的 Cookie 新建会话
+    6. 成功后保留发布页供人工复核；失败或取消时回收会话
     """
 
     def __init__(
@@ -1414,7 +1414,7 @@ class JDVideo(JDBaseUploader):
         3. 上传视频 → 等待上传完成 → 填写标题 → 关联商品 →
            选择创作者声明 → 开启自主原创 → 设置定时
         4. dry_run 跳过发布；否则点击发布按钮 → 处理验证码 → 等待确认
-        5. 成功后由会话层丢弃本次发布上下文，隔离京东发布后的登录态变化
+        5. 成功后保留当前页面供人工复核，下次任务仍会重新校验登录态
 
         :returns: 发布结果 dict（含 mode/confirmation/final_url）
         :raises JdAuthenticationError: Cookie 失效
@@ -1522,35 +1522,28 @@ class JDVideo(JDBaseUploader):
         except Exception as exc:
             jd_logger.error(_msg("❌", f"UPLOAD_FAILED: {exc}"))
             raise
-        finally:
-            # 发布页面暂时保留到本次流程返回，随后由 upload_in_session
-            # 关闭整个京东账号会话，避免发布页状态污染后续任务。
-            if page:
-                try:
-                    if not page.is_closed():
-                        jd_logger.info(
-                            _msg(
-                                "📌",
-                                f"发布流程结束，正在安全回收页面；当前账号共打开 {len(context.pages)} 个页面",
-                            )
-                        )
-                except Exception:
-                    pass
 
     async def upload_in_session(self, session: JdBrowserSession) -> dict:
         """通过浏览器会话执行发布流程。
 
-        会话校验 Cookie 后调用 _upload_in_context，并在流程结束后回收本次
-        京东会话，避免发布页的短生命周期状态影响后续任务。
+        会话校验 Cookie 后调用 _upload_in_context。执行成功时保留京东
+        发布页供人工复核；异常或取消时关闭会话，避免留下不完整状态。
         """
         try:
             # jd_setup has just verified this context. Persist that stable state
             # before the publish page can rotate upload-scoped credentials.
             await session.save_storage_state()
-            return await self._upload_in_context(await session.ensure_open())
-        finally:
-            # Never persist or reuse a context after visiting JD's publish page.
-            # Its completion/error flows may rotate short-lived credentials.
+            result = await self._upload_in_context(await session.ensure_open())
+        except BaseException:
+            # Errors and cancellation can leave the form in a partial state.
             session.mark_authenticated(False)
             await session.close()
-            jd_logger.info(_msg("♻️", "京东发布会话已安全回收，下次任务将自动新建"))
+            jd_logger.info(_msg("♻️", "京东视频发布未完成，浏览器会话已安全回收"))
+            raise
+
+        # Do not persist upload-scoped credentials. Invalidating only the auth
+        # cache keeps the visible page open while forcing the next task to
+        # verify the account again.
+        session.mark_authenticated(False)
+        jd_logger.info(_msg("📌", "京东视频任务已完成，发布页面已保留供人工复核"))
+        return result

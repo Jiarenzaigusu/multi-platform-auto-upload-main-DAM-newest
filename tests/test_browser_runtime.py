@@ -366,7 +366,7 @@ class SocialSessionPoolTests(unittest.TestCase):
 
 
 class JdPublisherSessionLifecycleTests(unittest.TestCase):
-    def _assert_recycles_session(self, uploader_type, *, error=None):
+    def _assert_session_lifecycle(self, uploader_type, *, error=None, expect_close=True):
         async def scenario():
             uploader = object.__new__(uploader_type)
             context = object()
@@ -393,18 +393,21 @@ class JdPublisherSessionLifecycleTests(unittest.TestCase):
 
             session.mark_authenticated.assert_called_once_with(False)
             session.save_storage_state.assert_awaited_once_with()
-            session.close.assert_awaited_once_with()
+            if expect_close:
+                session.close.assert_awaited_once_with()
+            else:
+                session.close.assert_not_awaited()
 
         asyncio.run(scenario())
 
-    def test_jd_video_success_recycles_post_publish_session(self):
-        self._assert_recycles_session(JDVideo)
+    def test_jd_video_success_preserves_post_publish_session(self):
+        self._assert_session_lifecycle(JDVideo, expect_close=False)
 
     def test_jd_article_success_recycles_post_publish_session(self):
-        self._assert_recycles_session(JDArticle)
+        self._assert_session_lifecycle(JDArticle)
 
     def test_jd_video_error_also_recycles_post_publish_session(self):
-        self._assert_recycles_session(JDVideo, error=RuntimeError("publish failed"))
+        self._assert_session_lifecycle(JDVideo, error=RuntimeError("publish failed"))
 
 
 class BrowserRuntimeTests(unittest.TestCase):

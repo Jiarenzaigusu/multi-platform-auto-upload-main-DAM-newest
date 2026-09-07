@@ -563,7 +563,8 @@ class TmallArticle:
 
         tags = self._normalized_tags()
         for index, tag in enumerate(tags, start=1):
-            await focus_tmall_editor_end(frame)
+            if index > 1:
+                await focus_tmall_editor_end(frame, page)
             tmall_logger.info(_msg("🏷️", f"小人正在添加第 {index} 个内容标签: #{tag}"))
             await page.keyboard.type(f" #{tag}")
             await asyncio.sleep(1)

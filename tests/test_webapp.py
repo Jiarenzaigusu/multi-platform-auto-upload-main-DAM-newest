@@ -615,25 +615,27 @@ class PublishRequestValidationTests(unittest.TestCase):
         )
         self.assertEqual(page.keyboard.press.await_count, 2)
         page.keyboard.press.assert_awaited_with("Space")
-        self.assertEqual(focus_editor.await_count, 2)
+        self.assertEqual(focus_editor.await_count, 1)
 
     def test_tmall_editor_focus_moves_caret_to_the_end(self):
         from uploader.tmall_label_selector import focus_tmall_editor_end
 
         editor = MagicMock()
         editor.wait_for = AsyncMock()
-        editor.evaluate = AsyncMock()
+        editor.click = AsyncMock()
         editor_query = MagicMock()
         editor_query.first = editor
         frame = MagicMock()
         frame.locator.return_value = editor_query
+        page = MagicMock()
+        page.keyboard.press = AsyncMock()
 
-        result = asyncio.run(focus_tmall_editor_end(frame))
+        result = asyncio.run(focus_tmall_editor_end(frame, page))
 
         self.assertIs(result, editor)
         editor.wait_for.assert_awaited_once_with(state="visible", timeout=10000)
-        editor.evaluate.assert_awaited_once()
-        self.assertIn("range.collapse(false)", editor.evaluate.await_args.args[0])
+        editor.click.assert_awaited_once_with()
+        page.keyboard.press.assert_awaited_once_with("Control+End")
 
     def test_tmall_custom_cover_uses_the_current_two_dialog_flow(self):
         cover = Path(self.temp_dir.name) / "20260811-093942.jpeg"

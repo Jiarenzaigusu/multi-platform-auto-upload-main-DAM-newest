@@ -594,22 +594,24 @@ class PublishRequestValidationTests(unittest.TestCase):
         self.assertEqual(frame.evaluate.await_count, 2)
         self.assertEqual(editor.inner_html.await_count, 3)
 
-    def test_tmall_content_tags_use_the_content_tag_panel(self):
+    def test_tmall_content_tags_use_native_hash_input_without_candidate_lookup(self):
         uploader = object.__new__(TmallVideo)
         uploader.tags = ["新生", "穿搭"]
-        uploader._select_label_suggestion = AsyncMock(
-            side_effect=["新生", "穿搭"]
-        )
+        page = MagicMock()
+        page.keyboard.type = AsyncMock()
+        page.keyboard.press = AsyncMock()
 
-        asyncio.run(uploader._add_content_tags(MagicMock(), MagicMock()))
+        with patch(
+            "uploader.tmall_video_uploader.main.asyncio.sleep", new=AsyncMock()
+        ):
+            asyncio.run(uploader._add_content_tags(MagicMock(), page))
 
         self.assertEqual(
-            [call.kwargs for call in uploader._select_label_suggestion.await_args_list],
-            [
-                {"toolbar_label": "内容标签", "value": "新生"},
-                {"toolbar_label": "内容标签", "value": "穿搭"},
-            ],
+            [call.args for call in page.keyboard.type.await_args_list],
+            [(" #新生",), (" #穿搭",)],
         )
+        self.assertEqual(page.keyboard.press.await_count, 2)
+        page.keyboard.press.assert_awaited_with("Space")
 
     def test_tmall_custom_cover_uses_the_current_two_dialog_flow(self):
         cover = Path(self.temp_dir.name) / "20260811-093942.jpeg"

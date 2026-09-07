@@ -1042,7 +1042,7 @@ class TmallVideo(TmallBaseUploader):
     def _build_description(self) -> str:
         """返回纯描述文本。
 
-        内容标签通过工具栏的标签面板选择，不拼接到描述末尾。
+        内容标签按天猫编辑器原生的 #文本 + 空格规则输入。
         """
         return self.desc or ""
 
@@ -1056,10 +1056,10 @@ class TmallVideo(TmallBaseUploader):
         return cleaned
 
     async def _fill_title_and_desc(self, frame, page: Page):
-        """填写视频标题与描述，然后通过标签面板添加内容标签。
+        """填写视频标题与描述，然后按原生规则添加内容标签。
 
         描述区是淘宝"仓颉"富文本编辑器（contenteditable div），不是真正的 textarea。
-        标签必须通过工具栏面板选择，直接把 #文本写入编辑器只会产生普通文本。
+        天猫内容标签由仓颉编辑器识别 `#文本` 并在空格后完成转换。
         """
         # 填写标题
         title_input = frame.locator('input[placeholder="加个标题让内容更吸引人"]').first
@@ -1093,15 +1093,14 @@ class TmallVideo(TmallBaseUploader):
         )
 
     async def _add_content_tags(self, frame, page: Page) -> None:
-        """逐个打开“内容标签”面板并点击候选项。"""
+        """按天猫原生规则输入内容标签，不依赖推荐候选列表。"""
         tags = self._normalized_tags()
         for index, tag in enumerate(tags, start=1):
-            selected = await self._select_label_suggestion(
-                frame, page, toolbar_label="内容标签", value=tag
-            )
-            tmall_logger.info(
-                _msg("🏷️", f"已选择第 {index} 个内容标签: {selected}")
-            )
+            tmall_logger.info(_msg("🏷️", f"小人正在添加第 {index} 个内容标签: #{tag}"))
+            await page.keyboard.type(f" #{tag}")
+            await asyncio.sleep(1)
+            await page.keyboard.press("Space")
+            await asyncio.sleep(1)
         if tags:
             tmall_logger.success(_msg("🏷️", f"小人一共贴了 {len(tags)} 个内容标签"))
 

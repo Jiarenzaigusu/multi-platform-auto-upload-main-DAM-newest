@@ -28,25 +28,39 @@ async def _visible_toolbar_trigger(frame, toolbar_label: str):
 
 async def type_tmall_content_tag(frame, page, tag: str) -> None:
     """Enter one custom tag through Cangjie's content-label mode."""
-    editor = await focus_tmall_editor_end(frame, page)
-    before_editor_html = await editor.inner_html()
-    before_editor_text = await editor.inner_text()
-    trigger = await _visible_toolbar_trigger(frame, "内容标签")
-    # Clicking the toolbar after focusing the editor preserves the native
-    # selection and enters label mode without relying on a literal '#'.
-    await trigger.click()
-    await page.keyboard.type(tag, delay=100)
-    for _ in range(20):
-        current_html = await editor.inner_html()
-        current_text = await editor.inner_text()
-        if (
-            current_html != before_editor_html
-            and current_text.count(tag) > before_editor_text.count(tag)
-        ):
-            break
-        await asyncio.sleep(0.25)
-    else:
-        raise RuntimeError(f"进入“内容标签”后无法输入“{tag}”")
+    for attempt in range(3):
+        editor = await focus_tmall_editor_end(frame, page)
+        before_editor_html = await editor.inner_html()
+        before_editor_text = await editor.inner_text()
+        trigger = await _visible_toolbar_trigger(frame, "内容标签")
+        # The panel animation sometimes completes after the click promise. Give
+        # Cangjie time to restore the editor selection before sending text.
+        await trigger.click()
+        await asyncio.sleep(0.75)
+        await page.keyboard.type(tag, delay=150)
+
+        current_html = before_editor_html
+        current_text = before_editor_text
+        for _ in range(12):
+            current_html = await editor.inner_html()
+            current_text = await editor.inner_text()
+            if (
+                current_html != before_editor_html
+                and current_text.count(tag) > before_editor_text.count(tag)
+            ):
+                break
+            await asyncio.sleep(0.25)
+        else:
+            # Retry only when the editor is completely untouched. A partial
+            # write cannot be retried safely without risking duplicate copy.
+            if (
+                attempt < 2
+                and current_html == before_editor_html
+                and current_text == before_editor_text
+            ):
+                continue
+            raise RuntimeError(f"进入“内容标签”后无法输入“{tag}”")
+        break
 
     # Cangjie may convert the label before the next DOM sample. Space closes
     # the current label mode, so a second DOM transition is not required.

@@ -665,7 +665,43 @@ class PublishRequestValidationTests(unittest.TestCase):
         focus_editor.assert_awaited_once_with(frame, page)
         frame.get_by_text.assert_called_once_with("内容标签", exact=True)
         trigger.click.assert_awaited_once_with()
-        page.keyboard.type.assert_awaited_once_with("新生", delay=100)
+        page.keyboard.type.assert_awaited_once_with("新生", delay=150)
+        page.keyboard.press.assert_awaited_once_with("Space")
+
+    def test_tmall_content_tag_retries_when_first_input_is_dropped(self):
+        from uploader.tmall_label_selector import type_tmall_content_tag
+
+        first_editor = MagicMock()
+        first_editor.inner_html = AsyncMock(side_effect=["<p>文案</p>"] * 13)
+        first_editor.inner_text = AsyncMock(side_effect=["文案"] * 13)
+        second_editor = MagicMock()
+        second_editor.inner_html = AsyncMock(
+            side_effect=["<p>文案</p>", "<p>文案新生</p>"]
+        )
+        second_editor.inner_text = AsyncMock(side_effect=["文案", "文案新生"])
+        trigger = MagicMock()
+        trigger.click = AsyncMock()
+        trigger.is_visible = AsyncMock(return_value=True)
+        trigger_query = MagicMock()
+        trigger_query.count = AsyncMock(return_value=1)
+        trigger_query.nth.return_value = trigger
+        frame = MagicMock()
+        frame.get_by_text.return_value = trigger_query
+        page = MagicMock()
+        page.keyboard.type = AsyncMock()
+        page.keyboard.press = AsyncMock()
+
+        with patch(
+            "uploader.tmall_label_selector.focus_tmall_editor_end",
+            new=AsyncMock(side_effect=[first_editor, second_editor]),
+        ) as focus_editor, patch(
+            "uploader.tmall_label_selector.asyncio.sleep", new=AsyncMock()
+        ):
+            asyncio.run(type_tmall_content_tag(frame, page, "新生"))
+
+        self.assertEqual(focus_editor.await_count, 2)
+        self.assertEqual(trigger.click.await_count, 2)
+        self.assertEqual(page.keyboard.type.await_count, 2)
         page.keyboard.press.assert_awaited_once_with("Space")
 
     def test_tmall_custom_cover_uses_the_current_two_dialog_flow(self):

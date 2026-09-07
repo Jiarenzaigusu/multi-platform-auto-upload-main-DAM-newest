@@ -20,6 +20,7 @@ from patchright.async_api import (
 )
 
 from uploader.errors import PublishResultUncertainError
+from uploader.tmall_label_selector import select_tmall_label_suggestion
 from uploader.tmall_session import TmallBrowserSession
 from utils.config import DEBUG_MODE
 from utils.log import tmall_logger
@@ -520,8 +521,7 @@ class TmallArticle:
     def _build_description(self) -> str:
         """返回纯描述文本。
 
-        话题标签单独通过键盘输入触发平台的话题下拉建议，不再拼接到描述末尾
-        （那样只是纯文本，不会成为平台识别的话题）。
+        内容标签通过工具栏的标签面板选择，不拼接到描述末尾。
         """
         return self.desc or ""
 
@@ -535,11 +535,10 @@ class TmallArticle:
         return cleaned
 
     async def _fill_title_and_desc(self, frame, page: Page):
-        """填写内容标题与描述，并逐个输入话题标签。
+        """填写内容标题与描述，并通过标签面板选择内容标签。
 
         描述区是淘宝"仓颉"富文本编辑器（contenteditable div），不是真正的 textarea。
-        直接用 fill() 改 textarea.value 不会触发 hashtag 识别，必须 click 聚焦后
-        逐字符 type。话题标签通过 #xxx + 空格触发平台话题下拉建议并选中首项。
+        标签必须通过工具栏面板选择，直接把 #文本写入编辑器只会产生普通文本。
         """
         # 填写标题
         title_input = frame.locator('input[placeholder="加个标题让内容更吸引人"]').first
@@ -562,21 +561,16 @@ class TmallArticle:
             await page.keyboard.type(desc[:1000])
             tmall_logger.info(_msg("✍️", f"内容描述已填写: {desc[:30]}"))
 
-        # 逐个输入话题标签
         tags = self._normalized_tags()
-        if not tags:
-            return
-
-        # 描述末尾逐个敲话题。contenteditable 富文本会识别 "#xxx" 并把话题染蓝
-        # （与用户手写 #狗粮 变蓝是同一机制）。用空格分隔每个话题。
         for index, tag in enumerate(tags, start=1):
-            tmall_logger.info(_msg("🏷️", f"小人正在添加第 {index} 个话题: #{tag}"))
-            await page.keyboard.type(f" #{tag}")
-            await asyncio.sleep(1)
-            # 空格确认选中下拉建议里的第一项（若下拉未弹出则作为普通分隔符）
-            await page.keyboard.press("Space")
-            await asyncio.sleep(1)
-        tmall_logger.info(_msg("🏷️", f"小人一共贴了 {len(tags)} 个话题"))
+            selected = await select_tmall_label_suggestion(
+                frame, toolbar_label="内容标签", value=tag
+            )
+            tmall_logger.info(
+                _msg("🏷️", f"已选择第 {index} 个内容标签: {selected}")
+            )
+        if tags:
+            tmall_logger.success(_msg("🏷️", f"小人一共贴了 {len(tags)} 个内容标签"))
 
     async def _add_goods(self, frame):
         """通过商品 ID 依次关联商品。

@@ -548,40 +548,80 @@ class PublishRequestValidationTests(unittest.TestCase):
         self.assertEqual(_two_character_chunks("夏日好物"), ("夏日", "好物"))
         self.assertEqual(_two_character_chunks("abcde"), ("ab", "cd", "e"))
 
-    def test_tmall_brand_tag_opens_toolbar_search_and_accepts_first_suggestion(self):
+    def test_tmall_brand_tag_clicks_a_matching_search_suggestion(self):
         uploader = object.__new__(TmallVideo)
-        uploader.brand_tag = "耐克"
+        uploader.brand_tag = "Gap"
 
         trigger = MagicMock()
         trigger.wait_for = AsyncMock()
         trigger.click = AsyncMock()
+        trigger.is_visible = AsyncMock(return_value=True)
         trigger_query = MagicMock()
         trigger_query.first = trigger
+        trigger_query.count = AsyncMock(return_value=1)
+        trigger_query.nth.return_value = trigger
 
         search = MagicMock()
-        search.count = AsyncMock(return_value=1)
-        search.wait_for = AsyncMock()
+        search.is_visible = AsyncMock(return_value=True)
         search.click = AsyncMock()
+        search.fill = AsyncMock()
+        search.evaluate = AsyncMock(
+            side_effect=[
+                {"selection": None, "candidates": []},
+                {
+                    "selection": "Gap 官方品牌",
+                    "candidates": ["Gap 官方品牌"],
+                },
+            ]
+        )
         search_query = MagicMock()
-        search_query.first = search
+        search_query.count = AsyncMock(return_value=1)
+        search_query.nth.return_value = search
+
+        editor = MagicMock()
+        editor.inner_html = AsyncMock(
+            side_effect=["<p>123</p>", "<p>123</p>", "<p>123<span>Gap</span></p>"]
+        )
+        editor_query = MagicMock()
+        editor_query.first = editor
 
         frame = MagicMock()
         frame.get_by_text.return_value = trigger_query
-        frame.locator.return_value = search_query
+        frame.locator.side_effect = lambda selector: (
+            editor_query
+            if selector == 'div[data-cangjie-content="true"]'
+            else search_query
+        )
         page = MagicMock()
-        page.keyboard.type = AsyncMock()
-        page.keyboard.press = AsyncMock()
 
         with patch(
-            "uploader.tmall_video_uploader.main.asyncio.sleep", new=AsyncMock()
+            "uploader.tmall_label_selector.asyncio.sleep", new=AsyncMock()
         ):
             asyncio.run(uploader._add_brand_tag(frame, page))
 
         frame.get_by_text.assert_called_once_with("品牌标签", exact=True)
         trigger.click.assert_awaited_once_with()
         search.click.assert_awaited_once_with()
-        page.keyboard.type.assert_awaited_once_with("耐克")
-        page.keyboard.press.assert_awaited_once_with("Space")
+        search.fill.assert_awaited_once_with("Gap")
+        self.assertEqual(search.evaluate.await_count, 2)
+        self.assertEqual(editor.inner_html.await_count, 3)
+
+    def test_tmall_content_tags_use_the_content_tag_panel(self):
+        uploader = object.__new__(TmallVideo)
+        uploader.tags = ["新生", "穿搭"]
+        uploader._select_label_suggestion = AsyncMock(
+            side_effect=["新生", "穿搭"]
+        )
+
+        asyncio.run(uploader._add_content_tags(MagicMock(), MagicMock()))
+
+        self.assertEqual(
+            [call.kwargs for call in uploader._select_label_suggestion.await_args_list],
+            [
+                {"toolbar_label": "内容标签", "value": "新生"},
+                {"toolbar_label": "内容标签", "value": "穿搭"},
+            ],
+        )
 
     def test_tmall_custom_cover_uses_the_current_two_dialog_flow(self):
         cover = Path(self.temp_dir.name) / "20260811-093942.jpeg"

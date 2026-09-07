@@ -1089,7 +1089,7 @@ class TmallVideo(TmallBaseUploader):
     ) -> str:
         """在天猫标签面板中搜索并显式点击匹配候选。"""
         return await select_tmall_label_suggestion(
-            frame, toolbar_label=toolbar_label, value=value
+            frame, page, toolbar_label=toolbar_label, value=value
         )
 
     async def _add_content_tags(self, frame, page: Page) -> None:

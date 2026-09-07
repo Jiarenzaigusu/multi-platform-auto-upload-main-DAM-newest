@@ -5,9 +5,9 @@ import asyncio
 
 
 async def select_tmall_label_suggestion(
-    frame, *, toolbar_label: str, value: str
+    frame, page, *, toolbar_label: str, value: str
 ) -> str:
-    """Search a Tmall editor label panel and click a matching suggestion."""
+    """Enter label mode, type in the editor, and click a matching suggestion."""
     triggers = frame.get_by_text(toolbar_label, exact=True)
     trigger = None
     for _ in range(20):
@@ -21,51 +21,27 @@ async def select_tmall_label_suggestion(
         await asyncio.sleep(0.25)
     if trigger is None:
         raise RuntimeError(f"未找到可点击的“{toolbar_label}”入口")
+
     editor = frame.locator('div[data-cangjie-content="true"]').first
     before_editor_html = await editor.inner_html()
     await trigger.click()
-
-    async def visible_search_input():
-        searches = frame.locator(
-            'input:not([type="hidden"])[placeholder*="检索"], '
-            'input:not([type="hidden"])[placeholder*="搜索"], '
-            'input:not([type="hidden"])[placeholder*="输入"], '
-            'textarea[placeholder*="检索"], textarea[placeholder*="搜索"], '
-            '[contenteditable="true"][data-placeholder*="检索"], '
-            '[contenteditable="true"][aria-label*="检索"]'
-        )
-        for index in range(await searches.count()):
-            candidate = searches.nth(index)
-            if await candidate.is_visible():
-                return candidate
-        return None
-
-    selected_search = await visible_search_input()
-    if selected_search is None:
-        search_entry = frame.get_by_text("输入文本检索更多", exact=True)
-        for index in range(await search_entry.count()):
-            candidate = search_entry.nth(index)
-            if await candidate.is_visible():
-                await candidate.click()
-                break
-        else:
-            raise RuntimeError(f"打开“{toolbar_label}”后未找到标签检索入口")
-        for _ in range(20):
-            selected_search = await visible_search_input()
-            if selected_search is not None:
-                break
-            await asyncio.sleep(0.25)
-        if selected_search is None:
-            raise RuntimeError(f"点击“{toolbar_label}”检索入口后未出现搜索框")
-
-    await selected_search.click()
-    await selected_search.fill(value)
+    # The toolbar handler restores the editor selection and enters the requested
+    # label mode. Clicking the editor again would cancel that mode on Tmall.
+    await page.keyboard.type(value)
+    query_editor_html = before_editor_html
+    for _ in range(10):
+        query_editor_html = await editor.inner_html()
+        if query_editor_html != before_editor_html:
+            break
+        await asyncio.sleep(0.2)
+    else:
+        raise RuntimeError(f"进入“{toolbar_label}”后无法输入检索文本")
 
     selection = None
     visible_candidates: list[str] = []
     for _ in range(20):
-        result = await selected_search.evaluate(
-            r"""(input, expected) => {
+        result = await frame.evaluate(
+            r"""(expected) => {
               const visible = (element) => {
                 const style = getComputedStyle(element);
                 const rect = element.getBoundingClientRect();
@@ -75,46 +51,36 @@ async def select_tmall_label_suggestion(
               const textOf = (element) => (element.innerText || element.textContent || '')
                 .replace(/\s+/g, ' ').trim();
               const normalizedExpected = expected.replace(/\s+/g, '').toLocaleLowerCase();
-              const overlay = input.closest(
-                '.next-overlay-wrapper, [role="dialog"], [role="listbox"], '
-                '[class*="popover"], [class*="dropdown"]'
-              );
-              const candidatesIn = (root) => [...root.querySelectorAll('*')]
-                .filter((element) => visible(element)
-                  && !element.closest('[data-cangjie-content="true"]')
-                  && !element.matches('input, textarea, script, style, svg, path')
-                  && !element.querySelector('input, textarea'));
-              const matchesExpected = (element) => textOf(element)
-                .replace(/\s+/g, '').toLocaleLowerCase().includes(normalizedExpected);
-              let root = overlay || input.parentElement;
-              let candidates = [];
-              let matching = [];
-              while (root) {
-                candidates = candidatesIn(root);
-                matching = candidates.filter(matchesExpected);
-                if (matching.length || root === document.body || overlay) break;
-                root = root.parentElement;
-              }
-              if (!matching.length) {
-                return {
-                  selection: null,
-                  candidates: candidates.map(textOf).filter(Boolean).slice(0, 12),
-                };
-              }
-              const target = matching.sort((a, b) => {
+              const editor = document.querySelector('[data-cangjie-content="true"]');
+              const selectable = [...document.querySelectorAll('*')].filter((element) => {
+                if (!visible(element) || element === editor || editor?.contains(element)) return false;
+                if (element.matches('html, body, input, textarea, script, style, svg, path')) return false;
+                if (element.querySelector('input, textarea, [data-cangjie-content="true"]')) return false;
+                const role = element.getAttribute('role') || '';
+                const className = typeof element.className === 'string' ? element.className : '';
+                const looksSelectable = getComputedStyle(element).cursor === 'pointer'
+                  || ['option', 'button', 'menuitem'].includes(role)
+                  || ['BUTTON', 'LI', 'A'].includes(element.tagName)
+                  || /(option|item|suggest|result|tag|brand|topic)/i.test(className);
+                return looksSelectable && !!textOf(element);
+              });
+              const candidates = selectable.filter((element) => textOf(element)
+                .replace(/\s+/g, '').toLocaleLowerCase().includes(normalizedExpected));
+              const labels = selectable.map(textOf).filter(Boolean).slice(0, 20);
+              if (!candidates.length) return { selection: null, candidates: labels };
+              const target = candidates.sort((a, b) => {
                 const textA = textOf(a).replace(/\s+/g, '').toLocaleLowerCase();
                 const textB = textOf(b).replace(/\s+/g, '').toLocaleLowerCase();
                 const exactA = textA === normalizedExpected ? 0 : 1;
                 const exactB = textB === normalizedExpected ? 0 : 1;
-                return exactA - exactB
+                const pointerA = getComputedStyle(a).cursor === 'pointer' ? 0 : 1;
+                const pointerB = getComputedStyle(b).cursor === 'pointer' ? 0 : 1;
+                return pointerA - pointerB || exactA - exactB
                   || a.querySelectorAll('*').length - b.querySelectorAll('*').length;
               })[0];
               target.scrollIntoView({ block: 'center' });
               target.click();
-              return {
-                selection: textOf(target),
-                candidates: candidates.map(textOf).filter(Boolean).slice(0, 12),
-              };
+              return { selection: textOf(target), candidates: labels };
             }""",
             value,
         )
@@ -130,10 +96,10 @@ async def select_tmall_label_suggestion(
         )
 
     for _ in range(20):
-        if await editor.inner_html() != before_editor_html:
+        if await editor.inner_html() != query_editor_html:
             return selection
         await asyncio.sleep(0.25)
-    raise RuntimeError(f"已点击{toolbar_label}“{selection}”，但标签没有写入文案编辑器")
+    raise RuntimeError(f"已点击{toolbar_label}“{selection}”，但检索文本未转换为标签")
 
 
 __all__ = ["select_tmall_label_suggestion"]

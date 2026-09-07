@@ -564,7 +564,7 @@ class TmallArticle:
         tags = self._normalized_tags()
         for index, tag in enumerate(tags, start=1):
             selected = await select_tmall_label_suggestion(
-                frame, toolbar_label="内容标签", value=tag
+                frame, page, toolbar_label="内容标签", value=tag
             )
             tmall_logger.info(
                 _msg("🏷️", f"已选择第 {index} 个内容标签: {selected}")

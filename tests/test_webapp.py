@@ -561,11 +561,17 @@ class PublishRequestValidationTests(unittest.TestCase):
         trigger_query.count = AsyncMock(return_value=1)
         trigger_query.nth.return_value = trigger
 
-        search = MagicMock()
-        search.is_visible = AsyncMock(return_value=True)
-        search.click = AsyncMock()
-        search.fill = AsyncMock()
-        search.evaluate = AsyncMock(
+        editor = MagicMock()
+        editor.inner_html = AsyncMock(
+            side_effect=["<p>123</p>", "<p>123Gap</p>", "<p>123<span>Gap</span></p>"]
+        )
+        editor_query = MagicMock()
+        editor_query.first = editor
+
+        frame = MagicMock()
+        frame.get_by_text.return_value = trigger_query
+        frame.locator.return_value = editor_query
+        frame.evaluate = AsyncMock(
             side_effect=[
                 {"selection": None, "candidates": []},
                 {
@@ -574,25 +580,8 @@ class PublishRequestValidationTests(unittest.TestCase):
                 },
             ]
         )
-        search_query = MagicMock()
-        search_query.count = AsyncMock(return_value=1)
-        search_query.nth.return_value = search
-
-        editor = MagicMock()
-        editor.inner_html = AsyncMock(
-            side_effect=["<p>123</p>", "<p>123</p>", "<p>123<span>Gap</span></p>"]
-        )
-        editor_query = MagicMock()
-        editor_query.first = editor
-
-        frame = MagicMock()
-        frame.get_by_text.return_value = trigger_query
-        frame.locator.side_effect = lambda selector: (
-            editor_query
-            if selector == 'div[data-cangjie-content="true"]'
-            else search_query
-        )
         page = MagicMock()
+        page.keyboard.type = AsyncMock()
 
         with patch(
             "uploader.tmall_label_selector.asyncio.sleep", new=AsyncMock()
@@ -601,9 +590,8 @@ class PublishRequestValidationTests(unittest.TestCase):
 
         frame.get_by_text.assert_called_once_with("品牌标签", exact=True)
         trigger.click.assert_awaited_once_with()
-        search.click.assert_awaited_once_with()
-        search.fill.assert_awaited_once_with("Gap")
-        self.assertEqual(search.evaluate.await_count, 2)
+        page.keyboard.type.assert_awaited_once_with("Gap")
+        self.assertEqual(frame.evaluate.await_count, 2)
         self.assertEqual(editor.inner_html.await_count, 3)
 
     def test_tmall_content_tags_use_the_content_tag_panel(self):

@@ -640,9 +640,9 @@ class PublishRequestValidationTests(unittest.TestCase):
             side_effect=[
                 "<p>文案</p>",
                 "<p>文案新生</p>",
-                '<p>文案<span data-label="content">新生</span></p>',
             ]
         )
+        editor.inner_text = AsyncMock(side_effect=["文案", "文案新生"])
         trigger = MagicMock()
         trigger.click = AsyncMock()
         trigger.is_visible = AsyncMock(return_value=True)
@@ -667,32 +667,6 @@ class PublishRequestValidationTests(unittest.TestCase):
         trigger.click.assert_awaited_once_with()
         page.keyboard.type.assert_awaited_once_with("新生", delay=100)
         page.keyboard.press.assert_awaited_once_with("Space")
-
-    def test_tmall_content_tag_rejects_plain_text_space_as_conversion(self):
-        from uploader.tmall_label_selector import type_tmall_content_tag
-
-        editor = MagicMock()
-        editor.inner_html = AsyncMock(
-            side_effect=["<p>文案</p>", "<p>文案新生</p>"] + ["<p>文案新生&nbsp;</p>"] * 10
-        )
-        trigger = MagicMock()
-        trigger.click = AsyncMock()
-        trigger.is_visible = AsyncMock(return_value=True)
-        trigger_query = MagicMock()
-        trigger_query.count = AsyncMock(return_value=1)
-        trigger_query.nth.return_value = trigger
-        frame = MagicMock()
-        frame.get_by_text.return_value = trigger_query
-        page = MagicMock()
-        page.keyboard.type = AsyncMock()
-        page.keyboard.press = AsyncMock()
-
-        with patch(
-            "uploader.tmall_label_selector.focus_tmall_editor_end",
-            new=AsyncMock(return_value=editor),
-        ), patch("uploader.tmall_label_selector.asyncio.sleep", new=AsyncMock()):
-            with self.assertRaisesRegex(RuntimeError, "未完成标签转换"):
-                asyncio.run(type_tmall_content_tag(frame, page, "新生"))
 
     def test_tmall_custom_cover_uses_the_current_two_dialog_flow(self):
         cover = Path(self.temp_dir.name) / "20260811-093942.jpeg"

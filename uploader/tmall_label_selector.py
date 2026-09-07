@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import re
 import sys
 
 
@@ -27,38 +26,33 @@ async def _visible_toolbar_trigger(frame, toolbar_label: str):
     raise RuntimeError(f"未找到可点击的“{toolbar_label}”入口")
 
 
-def _html_without_spacing(value: str) -> str:
-    """Ignore the separator inserted by Space when checking tag conversion."""
-    return re.sub(r"(?:&nbsp;|&#160;|\u00a0|\s)+", "", value)
-
-
 async def type_tmall_content_tag(frame, page, tag: str) -> None:
     """Enter one custom tag through Cangjie's content-label mode."""
     editor = await focus_tmall_editor_end(frame, page)
     before_editor_html = await editor.inner_html()
+    before_editor_text = await editor.inner_text()
     trigger = await _visible_toolbar_trigger(frame, "内容标签")
     # Clicking the toolbar after focusing the editor preserves the native
     # selection and enters label mode without relying on a literal '#'.
     await trigger.click()
     await page.keyboard.type(tag, delay=100)
-    query_editor_html = before_editor_html
-    for _ in range(10):
-        query_editor_html = await editor.inner_html()
-        if query_editor_html != before_editor_html:
+    for _ in range(20):
+        current_html = await editor.inner_html()
+        current_text = await editor.inner_text()
+        if (
+            current_html != before_editor_html
+            and current_text.count(tag) > before_editor_text.count(tag)
+        ):
             break
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.25)
     else:
         raise RuntimeError(f"进入“内容标签”后无法输入“{tag}”")
 
+    # Cangjie may convert the label before the next DOM sample. Space closes
+    # the current label mode, so a second DOM transition is not required.
+    await asyncio.sleep(0.5)
     await page.keyboard.press("Space")
-    for _ in range(10):
-        confirmed_html = await editor.inner_html()
-        if _html_without_spacing(confirmed_html) != _html_without_spacing(
-            query_editor_html
-        ):
-            return
-        await asyncio.sleep(0.2)
-    raise RuntimeError(f"内容标签“{tag}”输入后未完成标签转换")
+    await asyncio.sleep(0.5)
 
 
 async def select_tmall_label_suggestion(

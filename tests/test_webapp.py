@@ -594,28 +594,22 @@ class PublishRequestValidationTests(unittest.TestCase):
         self.assertEqual(frame.evaluate.await_count, 2)
         self.assertEqual(editor.inner_html.await_count, 3)
 
-    def test_tmall_content_tags_use_native_hash_input_without_candidate_lookup(self):
+    def test_tmall_content_tags_use_native_toolbar_mode_without_candidate_lookup(self):
         uploader = object.__new__(TmallVideo)
         uploader.tags = ["新生", "穿搭"]
         page = MagicMock()
-        page.keyboard.type = AsyncMock()
-        page.keyboard.press = AsyncMock()
 
         with patch(
-            "uploader.tmall_video_uploader.main.asyncio.sleep", new=AsyncMock()
-        ), patch(
-            "uploader.tmall_video_uploader.main.focus_tmall_editor_end",
+            "uploader.tmall_video_uploader.main.type_tmall_content_tag",
             new=AsyncMock(),
-        ) as focus_editor:
-            asyncio.run(uploader._add_content_tags(MagicMock(), page))
+        ) as type_content_tag:
+            frame = MagicMock()
+            asyncio.run(uploader._add_content_tags(frame, page))
 
         self.assertEqual(
-            [call.args for call in page.keyboard.type.await_args_list],
-            [(" #新生",), (" #穿搭",)],
+            [call.args for call in type_content_tag.await_args_list],
+            [(frame, page, "新生"), (frame, page, "穿搭")],
         )
-        self.assertEqual(page.keyboard.press.await_count, 2)
-        page.keyboard.press.assert_awaited_with("Space")
-        self.assertEqual(focus_editor.await_count, 1)
 
     def test_tmall_editor_focus_moves_caret_to_the_end(self):
         from uploader.tmall_label_selector import focus_tmall_editor_end
@@ -630,12 +624,75 @@ class PublishRequestValidationTests(unittest.TestCase):
         page = MagicMock()
         page.keyboard.press = AsyncMock()
 
-        result = asyncio.run(focus_tmall_editor_end(frame, page))
+        with patch("uploader.tmall_label_selector.sys.platform", "win32"):
+            result = asyncio.run(focus_tmall_editor_end(frame, page))
 
         self.assertIs(result, editor)
         editor.wait_for.assert_awaited_once_with(state="visible", timeout=10000)
         editor.click.assert_awaited_once_with()
         page.keyboard.press.assert_awaited_once_with("Control+End")
+
+    def test_tmall_content_tag_enters_toolbar_mode_before_typing_value(self):
+        from uploader.tmall_label_selector import type_tmall_content_tag
+
+        editor = MagicMock()
+        editor.inner_html = AsyncMock(
+            side_effect=[
+                "<p>文案</p>",
+                "<p>文案新生</p>",
+                '<p>文案<span data-label="content">新生</span></p>',
+            ]
+        )
+        trigger = MagicMock()
+        trigger.click = AsyncMock()
+        trigger.is_visible = AsyncMock(return_value=True)
+        trigger_query = MagicMock()
+        trigger_query.count = AsyncMock(return_value=1)
+        trigger_query.nth.return_value = trigger
+        frame = MagicMock()
+        frame.get_by_text.return_value = trigger_query
+        page = MagicMock()
+        page.keyboard.type = AsyncMock()
+        page.keyboard.press = AsyncMock()
+        with patch(
+            "uploader.tmall_label_selector.focus_tmall_editor_end",
+            new=AsyncMock(return_value=editor),
+        ) as focus_editor, patch(
+            "uploader.tmall_label_selector.asyncio.sleep", new=AsyncMock()
+        ):
+            asyncio.run(type_tmall_content_tag(frame, page, "新生"))
+
+        focus_editor.assert_awaited_once_with(frame, page)
+        frame.get_by_text.assert_called_once_with("内容标签", exact=True)
+        trigger.click.assert_awaited_once_with()
+        page.keyboard.type.assert_awaited_once_with("新生", delay=100)
+        page.keyboard.press.assert_awaited_once_with("Space")
+
+    def test_tmall_content_tag_rejects_plain_text_space_as_conversion(self):
+        from uploader.tmall_label_selector import type_tmall_content_tag
+
+        editor = MagicMock()
+        editor.inner_html = AsyncMock(
+            side_effect=["<p>文案</p>", "<p>文案新生</p>"] + ["<p>文案新生&nbsp;</p>"] * 10
+        )
+        trigger = MagicMock()
+        trigger.click = AsyncMock()
+        trigger.is_visible = AsyncMock(return_value=True)
+        trigger_query = MagicMock()
+        trigger_query.count = AsyncMock(return_value=1)
+        trigger_query.nth.return_value = trigger
+        frame = MagicMock()
+        frame.get_by_text.return_value = trigger_query
+        page = MagicMock()
+        page.keyboard.type = AsyncMock()
+        page.keyboard.press = AsyncMock()
+
+        with patch(
+            "uploader.tmall_label_selector.focus_tmall_editor_end",
+            new=AsyncMock(return_value=editor),
+        ), patch("uploader.tmall_label_selector.asyncio.sleep", new=AsyncMock()):
+            with self.assertRaisesRegex(RuntimeError, "未完成标签转换"):
+                asyncio.run(type_tmall_content_tag(frame, page, "新生"))
 
     def test_tmall_custom_cover_uses_the_current_two_dialog_flow(self):
         cover = Path(self.temp_dir.name) / "20260811-093942.jpeg"

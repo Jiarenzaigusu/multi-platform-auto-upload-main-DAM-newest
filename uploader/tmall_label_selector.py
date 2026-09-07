@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import re
+import sys
 
 
 async def focus_tmall_editor_end(frame, page):
@@ -9,27 +11,61 @@ async def focus_tmall_editor_end(frame, page):
     editor = frame.locator('div[data-cangjie-content="true"]').first
     await editor.wait_for(state="visible", timeout=10000)
     await editor.click()
-    await page.keyboard.press("Control+End")
+    shortcut = "Meta+ArrowDown" if sys.platform == "darwin" else "Control+End"
+    await page.keyboard.press(shortcut)
     return editor
+
+
+async def _visible_toolbar_trigger(frame, toolbar_label: str):
+    triggers = frame.get_by_text(toolbar_label, exact=True)
+    for _ in range(20):
+        for index in range(await triggers.count()):
+            candidate = triggers.nth(index)
+            if await candidate.is_visible():
+                return candidate
+        await asyncio.sleep(0.25)
+    raise RuntimeError(f"未找到可点击的“{toolbar_label}”入口")
+
+
+def _html_without_spacing(value: str) -> str:
+    """Ignore the separator inserted by Space when checking tag conversion."""
+    return re.sub(r"(?:&nbsp;|&#160;|\u00a0|\s)+", "", value)
+
+
+async def type_tmall_content_tag(frame, page, tag: str) -> None:
+    """Enter one custom tag through Cangjie's content-label mode."""
+    editor = await focus_tmall_editor_end(frame, page)
+    before_editor_html = await editor.inner_html()
+    trigger = await _visible_toolbar_trigger(frame, "内容标签")
+    # Clicking the toolbar after focusing the editor preserves the native
+    # selection and enters label mode without relying on a literal '#'.
+    await trigger.click()
+    await page.keyboard.type(tag, delay=100)
+    query_editor_html = before_editor_html
+    for _ in range(10):
+        query_editor_html = await editor.inner_html()
+        if query_editor_html != before_editor_html:
+            break
+        await asyncio.sleep(0.2)
+    else:
+        raise RuntimeError(f"进入“内容标签”后无法输入“{tag}”")
+
+    await page.keyboard.press("Space")
+    for _ in range(10):
+        confirmed_html = await editor.inner_html()
+        if _html_without_spacing(confirmed_html) != _html_without_spacing(
+            query_editor_html
+        ):
+            return
+        await asyncio.sleep(0.2)
+    raise RuntimeError(f"内容标签“{tag}”输入后未完成标签转换")
 
 
 async def select_tmall_label_suggestion(
     frame, page, *, toolbar_label: str, value: str
 ) -> str:
     """Enter label mode, type in the editor, and click a matching suggestion."""
-    triggers = frame.get_by_text(toolbar_label, exact=True)
-    trigger = None
-    for _ in range(20):
-        for index in range(await triggers.count()):
-            candidate = triggers.nth(index)
-            if await candidate.is_visible():
-                trigger = candidate
-                break
-        if trigger is not None:
-            break
-        await asyncio.sleep(0.25)
-    if trigger is None:
-        raise RuntimeError(f"未找到可点击的“{toolbar_label}”入口")
+    trigger = await _visible_toolbar_trigger(frame, toolbar_label)
 
     editor = frame.locator('div[data-cangjie-content="true"]').first
     before_editor_html = await editor.inner_html()
@@ -111,4 +147,8 @@ async def select_tmall_label_suggestion(
     raise RuntimeError(f"已点击{toolbar_label}“{selection}”，但检索文本未转换为标签")
 
 
-__all__ = ["focus_tmall_editor_end", "select_tmall_label_suggestion"]
+__all__ = [
+    "focus_tmall_editor_end",
+    "select_tmall_label_suggestion",
+    "type_tmall_content_tag",
+]

@@ -37,8 +37,8 @@ from patchright.async_api import (
 
 from uploader.errors import PublishResultUncertainError
 from uploader.tmall_label_selector import (
-    focus_tmall_editor_end,
     select_tmall_label_suggestion,
+    type_tmall_content_tag,
 )
 from utils.config import DEBUG_MODE
 from uploader.base_video import BaseVideoUploader
@@ -1045,7 +1045,7 @@ class TmallVideo(TmallBaseUploader):
     def _build_description(self) -> str:
         """返回纯描述文本。
 
-        内容标签按天猫编辑器原生的 #文本 + 空格规则输入。
+        内容标签通过天猫编辑器的“内容标签”模式单独输入。
         """
         return self.desc or ""
 
@@ -1059,10 +1059,10 @@ class TmallVideo(TmallBaseUploader):
         return cleaned
 
     async def _fill_title_and_desc(self, frame, page: Page):
-        """填写视频标题与描述，然后按原生规则添加内容标签。
+        """填写视频标题与描述，然后通过原生标签模式添加内容标签。
 
         描述区是淘宝"仓颉"富文本编辑器（contenteditable div），不是真正的 textarea。
-        天猫内容标签由仓颉编辑器识别 `#文本` 并在空格后完成转换。
+        先点击工具栏“内容标签”让仓颉进入标签态，再输入文本并以空格确认。
         """
         # 填写标题
         title_input = frame.locator('input[placeholder="加个标题让内容更吸引人"]').first
@@ -1096,18 +1096,11 @@ class TmallVideo(TmallBaseUploader):
         )
 
     async def _add_content_tags(self, frame, page: Page) -> None:
-        """按天猫原生规则输入内容标签，不依赖推荐候选列表。"""
+        """逐个进入原生内容标签模式，不依赖推荐候选列表。"""
         tags = self._normalized_tags()
         for index, tag in enumerate(tags, start=1):
-            # Keep the first tag's proven original flow. After a tag becomes a
-            # structured node, restore a native caret only before the next one.
-            if index > 1:
-                await focus_tmall_editor_end(frame, page)
             tmall_logger.info(_msg("🏷️", f"小人正在添加第 {index} 个内容标签: #{tag}"))
-            await page.keyboard.type(f" #{tag}")
-            await asyncio.sleep(1)
-            await page.keyboard.press("Space")
-            await asyncio.sleep(1)
+            await type_tmall_content_tag(frame, page, tag)
         if tags:
             tmall_logger.success(_msg("🏷️", f"小人一共贴了 {len(tags)} 个内容标签"))
 

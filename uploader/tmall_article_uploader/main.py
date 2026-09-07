@@ -20,7 +20,7 @@ from patchright.async_api import (
 )
 
 from uploader.errors import PublishResultUncertainError
-from uploader.tmall_label_selector import focus_tmall_editor_end
+from uploader.tmall_label_selector import type_tmall_content_tag
 from uploader.tmall_session import TmallBrowserSession
 from utils.config import DEBUG_MODE
 from utils.log import tmall_logger
@@ -521,7 +521,7 @@ class TmallArticle:
     def _build_description(self) -> str:
         """返回纯描述文本。
 
-        内容标签按天猫编辑器原生的 #文本 + 空格规则输入。
+        内容标签通过天猫编辑器的“内容标签”模式单独输入。
         """
         return self.desc or ""
 
@@ -535,10 +535,10 @@ class TmallArticle:
         return cleaned
 
     async def _fill_title_and_desc(self, frame, page: Page):
-        """填写内容标题与描述，并按原生规则添加内容标签。
+        """填写内容标题与描述，并通过原生标签模式添加内容标签。
 
         描述区是淘宝"仓颉"富文本编辑器（contenteditable div），不是真正的 textarea。
-        天猫内容标签由仓颉编辑器识别 `#文本` 并在空格后完成转换。
+        先点击工具栏“内容标签”让仓颉进入标签态，再输入文本并以空格确认。
         """
         # 填写标题
         title_input = frame.locator('input[placeholder="加个标题让内容更吸引人"]').first
@@ -563,13 +563,8 @@ class TmallArticle:
 
         tags = self._normalized_tags()
         for index, tag in enumerate(tags, start=1):
-            if index > 1:
-                await focus_tmall_editor_end(frame, page)
             tmall_logger.info(_msg("🏷️", f"小人正在添加第 {index} 个内容标签: #{tag}"))
-            await page.keyboard.type(f" #{tag}")
-            await asyncio.sleep(1)
-            await page.keyboard.press("Space")
-            await asyncio.sleep(1)
+            await type_tmall_content_tag(frame, page, tag)
         if tags:
             tmall_logger.success(_msg("🏷️", f"小人一共贴了 {len(tags)} 个内容标签"))
 

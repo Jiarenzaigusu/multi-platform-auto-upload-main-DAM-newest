@@ -9,9 +9,18 @@ async def focus_tmall_editor_end(frame, page):
     """Use native pointer/key events to put the Cangjie caret at the end."""
     editor = frame.locator('div[data-cangjie-content="true"]').first
     await editor.wait_for(state="visible", timeout=10000)
+
+    # A previous label interaction can leave a text range selected (or leave
+    # the caret inside a structured label node).  Clear that state before
+    # placing the caret; otherwise Cangjie may report that there is no valid
+    # label insertion position.
+    await page.keyboard.press("Escape")
     await editor.click()
+    await page.keyboard.press("ArrowRight")
     shortcut = "Meta+ArrowDown" if sys.platform == "darwin" else "Control+End"
     await page.keyboard.press(shortcut)
+    # Move out of a possible trailing structured node into the editable tail.
+    await page.keyboard.press("ArrowRight")
     return editor
 
 
@@ -73,9 +82,12 @@ async def select_tmall_label_suggestion(
     frame, page, *, toolbar_label: str, value: str
 ) -> str:
     """Enter label mode, type in the editor, and click a matching suggestion."""
+    # Establish a fresh insertion point before opening the toolbar mode.  The
+    # toolbar click preserves the current Cangjie selection, so doing this
+    # afterwards would cancel the mode and typing would land in plain text.
+    editor = await focus_tmall_editor_end(frame, page)
     trigger = await _visible_toolbar_trigger(frame, toolbar_label)
 
-    editor = frame.locator('div[data-cangjie-content="true"]').first
     before_editor_html = await editor.inner_html()
     await trigger.click()
     # The toolbar handler restores the editor selection and enters the requested

@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 from fastapi import HTTPException, UploadFile
 from loguru import logger
@@ -581,6 +581,8 @@ class PublishRequestValidationTests(unittest.TestCase):
         trigger_query.nth.return_value = trigger
 
         editor = MagicMock()
+        editor.wait_for = AsyncMock()
+        editor.click = AsyncMock()
         editor.inner_html = AsyncMock(
             side_effect=["<p>123</p>", "<p>123Gap</p>", "<p>123<span>Gap</span></p>"]
         )
@@ -601,6 +603,7 @@ class PublishRequestValidationTests(unittest.TestCase):
         )
         page = MagicMock()
         page.keyboard.type = AsyncMock()
+        page.keyboard.press = AsyncMock()
 
         with patch(
             "uploader.tmall_label_selector.asyncio.sleep", new=AsyncMock()
@@ -610,6 +613,15 @@ class PublishRequestValidationTests(unittest.TestCase):
         frame.get_by_text.assert_called_once_with("品牌标签", exact=True)
         trigger.click.assert_awaited_once_with()
         page.keyboard.type.assert_awaited_once_with("Gap")
+        self.assertEqual(
+            page.keyboard.press.await_args_list,
+            [
+                call("Escape"),
+                call("ArrowRight"),
+                call("Meta+ArrowDown"),
+                call("ArrowRight"),
+            ],
+        )
         self.assertEqual(frame.evaluate.await_count, 2)
         self.assertEqual(editor.inner_html.await_count, 3)
 
@@ -665,7 +677,15 @@ class PublishRequestValidationTests(unittest.TestCase):
         self.assertIs(result, editor)
         editor.wait_for.assert_awaited_once_with(state="visible", timeout=10000)
         editor.click.assert_awaited_once_with()
-        page.keyboard.press.assert_awaited_once_with("Control+End")
+        self.assertEqual(
+            page.keyboard.press.await_args_list,
+            [
+                call("Escape"),
+                call("ArrowRight"),
+                call("Control+End"),
+                call("ArrowRight"),
+            ],
+        )
 
     def test_tmall_content_tag_enters_toolbar_mode_before_typing_value(self):
         from uploader.tmall_label_selector import type_tmall_content_tag

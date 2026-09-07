@@ -67,6 +67,7 @@ class TmallVideoUploadRequest:
     tags: list[str]
     cover_ratio: str
     cover_image_file: Path | None = None
+    brand_tag: str = ""
     goods_id: str = ""
     activity_topic: str = ""
     music_name: str = ""
@@ -291,6 +292,7 @@ async def upload_tmall_video(
         desc=request.description,
         account_file=str(account_file),
         tags=request.tags,
+        brand_tag=request.brand_tag,
         goods_id=request.goods_id,
         activity_topic=request.activity_topic,
         music_name=request.music_name,

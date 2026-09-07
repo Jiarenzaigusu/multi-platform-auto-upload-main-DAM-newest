@@ -175,6 +175,31 @@ class PublishRequestValidationTests(unittest.TestCase):
         self.assertEqual(request.tags, ("女鞋", "夏季穿搭"))
         self.assertFalse(request.dry_run)
 
+    def test_tmall_video_request_normalizes_brand_tag(self):
+        request = validate_publish_request(
+            platform="tmall",
+            cover_ratio="original",
+            account="shop_1",
+            video_path=self.video,
+            original_filename="demo.mp4",
+            title="夏季女鞋测评",
+            brand_tag="  耐克  ",
+        )
+
+        self.assertEqual(request.brand_tag, "耐克")
+
+    def test_brand_tag_is_rejected_outside_tmall_video(self):
+        with self.assertRaisesRegex(ValidationError, "仅支持天猫视频"):
+            validate_publish_request(
+                platform="xiaohongshu",
+                cover_ratio="original",
+                account="shop_1",
+                video_path=self.video,
+                original_filename="demo.mp4",
+                title="夏季女鞋测评",
+                brand_tag="耐克",
+            )
+
     def test_tmall_request_preserves_selected_cover_ratio(self):
         cover = Path(self.temp_dir.name) / "cover.png"
         cover.write_bytes(b"image")
@@ -522,6 +547,41 @@ class PublishRequestValidationTests(unittest.TestCase):
         self.assertEqual(_two_character_chunks("默契"), ("默契",))
         self.assertEqual(_two_character_chunks("夏日好物"), ("夏日", "好物"))
         self.assertEqual(_two_character_chunks("abcde"), ("ab", "cd", "e"))
+
+    def test_tmall_brand_tag_opens_toolbar_search_and_accepts_first_suggestion(self):
+        uploader = object.__new__(TmallVideo)
+        uploader.brand_tag = "耐克"
+
+        trigger = MagicMock()
+        trigger.wait_for = AsyncMock()
+        trigger.click = AsyncMock()
+        trigger_query = MagicMock()
+        trigger_query.first = trigger
+
+        search = MagicMock()
+        search.count = AsyncMock(return_value=1)
+        search.wait_for = AsyncMock()
+        search.click = AsyncMock()
+        search_query = MagicMock()
+        search_query.first = search
+
+        frame = MagicMock()
+        frame.get_by_text.return_value = trigger_query
+        frame.locator.return_value = search_query
+        page = MagicMock()
+        page.keyboard.type = AsyncMock()
+        page.keyboard.press = AsyncMock()
+
+        with patch(
+            "uploader.tmall_video_uploader.main.asyncio.sleep", new=AsyncMock()
+        ):
+            asyncio.run(uploader._add_brand_tag(frame, page))
+
+        frame.get_by_text.assert_called_once_with("品牌标签", exact=True)
+        trigger.click.assert_awaited_once_with()
+        search.click.assert_awaited_once_with()
+        page.keyboard.type.assert_awaited_once_with("耐克")
+        page.keyboard.press.assert_awaited_once_with("Space")
 
     def test_tmall_custom_cover_uses_the_current_two_dialog_flow(self):
         cover = Path(self.temp_dir.name) / "20260811-093942.jpeg"
@@ -1673,6 +1733,21 @@ class TmallBatchWorkbookTests(unittest.TestCase):
         self.assertEqual(rows[0].request.cover_ratio, "original")
         self.assertTrue(rows[0].request.dry_run)
 
+    def test_brand_tag_maps_to_tmall_video_batch_request(self):
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.append(["视频路径", "标题", "品牌标签", "创作者声明"])
+        worksheet.append([str(self.video), "夏季女鞋穿搭", "耐克", "内容无需标注"])
+        output = BytesIO()
+        workbook.save(output)
+        workbook.close()
+
+        rows = parse_tmall_video_batch_workbook(
+            output.getvalue(), account="shop1", dry_run=True, headed=True
+        )
+
+        self.assertEqual(rows[0].request.brand_tag, "耐克")
+
     def test_video_without_cover_columns_uses_platform_generated_cover(self):
         workbook = Workbook()
         worksheet = workbook.active
@@ -1826,7 +1901,7 @@ class TmallBatchWorkbookTests(unittest.TestCase):
         try:
             worksheet = workbook.active
             self.assertEqual(
-                [worksheet.cell(1, column).value for column in range(1, 12)],
+                [worksheet.cell(1, column).value for column in range(1, 13)],
                 [
                     "视频路径",
                     "自定义封面",
@@ -1834,6 +1909,7 @@ class TmallBatchWorkbookTests(unittest.TestCase):
                     "标题",
                     "文案",
                     "标签",
+                    "品牌标签",
                     "商品ID",
                     "活动话题",
                     "音乐名称",
@@ -1843,12 +1919,13 @@ class TmallBatchWorkbookTests(unittest.TestCase):
             )
             self.assertIsNone(worksheet["B2"].value)
             self.assertIsNone(worksheet["C2"].value)
-            self.assertEqual(worksheet["I2"].value, "默契")
+            self.assertEqual(worksheet["G2"].value, "耐克")
+            self.assertEqual(worksheet["J2"].value, "默契")
             self.assertFalse(list(worksheet.merged_cells.ranges))
             validations = worksheet.data_validations.dataValidation
             self.assertEqual(len(validations), 2)
             validations_by_range = {str(item.sqref): item for item in validations}
-            self.assertEqual(set(validations_by_range), {"C2:C201", "K2:K201"})
+            self.assertEqual(set(validations_by_range), {"C2:C201", "L2:L201"})
             ratio_formula = validations_by_range["C2:C201"].formula1
             self.assertIn('$B2<>""', ratio_formula)
             self.assertIn("BatchValidationOptions1", ratio_formula)
@@ -2907,6 +2984,7 @@ class PlatformAdapterTests(unittest.TestCase):
             title="夏季女鞋测评",
             description="轻便好穿",
             tags=["女鞋"],
+            brand_tag="耐克",
             goods_id="12345,67890",
             music_name="默契",
         )
@@ -2939,6 +3017,7 @@ class PlatformAdapterTests(unittest.TestCase):
         uploader_type.return_value.upload_in_session.assert_awaited_once_with(leased_session)
         self.assertEqual(uploader_type.call_args.kwargs["account_file"], str(account_file))
         self.assertEqual(uploader_type.call_args.kwargs["goods_id"], "12345,67890")
+        self.assertEqual(uploader_type.call_args.kwargs["brand_tag"], "耐克")
         self.assertEqual(uploader_type.call_args.kwargs["music_name"], "默契")
         self.assertNotIn("screenshot_dir", uploader_type.call_args.kwargs)
 

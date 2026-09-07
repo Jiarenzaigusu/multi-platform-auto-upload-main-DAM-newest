@@ -302,6 +302,7 @@ class AgentJobRunner:
                 title=payload["title"],
                 description=payload["description"],
                 tags=list(payload["tags"]),
+                brand_tag=payload.get("brand_tag", ""),
                 goods_id=payload["goods_id"],
                 activity_topic=payload["activity_topic"],
                 music_name=payload.get("music_name", ""),

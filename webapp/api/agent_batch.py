@@ -178,6 +178,7 @@ def _remote_video_request(
             title=values["title"],
             description=values.get("description", ""),
             raw_tags=values.get("tags", "").replace("，", ","),
+            brand_tag=values.get("brand_tag", ""),
             goods_id=values.get("goods_id", ""),
             activity_topic=values.get("activity_topic", ""),
             raw_music_name=values.get("music_name", ""),

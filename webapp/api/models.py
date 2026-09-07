@@ -42,6 +42,8 @@ SCHEDULE_FORMAT = "%Y-%m-%d %H:%M"
 MIN_SCHEDULE_LEAD_TIME = timedelta(hours=2)
 # 音乐名称最大长度
 MAX_MUSIC_NAME_LENGTH = 100
+# 天猫品牌标签搜索词最大长度
+MAX_TMALL_BRAND_TAG_LENGTH = 100
 # 天猫一次最多关联的商品 ID 数
 MAX_TMALL_GOODS_IDS = 6
 # 京东链接导入一次最多关联的商品 ID 数（平台页面显示 0/10）
@@ -95,6 +97,7 @@ class PublishRequest:
     title: str                  # 标题
     description: str            # 描述/文案（天猫有，京东无）
     tags: tuple[str, ...]       # 话题标签（天猫有，京东无）
+    brand_tag: str              # 品牌标签（仅天猫视频）
     goods_id: str               # 商品 ID 字符串（逗号分隔）
     activity_topic: str         # 参与话题（天猫活动话题 / 京东话题）
     music_name: str             # 音乐名称（天猫有，京东无）
@@ -222,6 +225,7 @@ def validate_publish_request(
     title: str,
     description: str = "",
     raw_tags: str = "",
+    brand_tag: str = "",
     goods_id: str = "",
     activity_topic: str = "",
     raw_music_name: str = "",
@@ -246,6 +250,7 @@ def validate_publish_request(
     selected_account = validate_account_name(account)
     normalized_title = title.strip()
     normalized_description = description.strip()
+    normalized_brand_tag = brand_tag.strip()
     goods_ids = parse_goods_ids(goods_id)
     normalized_activity_topic = activity_topic.strip()
     music_name = raw_music_name.strip()
@@ -360,6 +365,14 @@ def validate_publish_request(
     # 定时发布时间解析
     schedule = parse_schedule(raw_schedule)
     tags = parse_tags(raw_tags, max_tags=4 if selected_platform == "tmall" else 20)
+    if normalized_brand_tag and (
+        selected_platform != "tmall" or selected_content_type != "video"
+    ):
+        raise ValidationError("品牌标签仅支持天猫视频")
+    if len(normalized_brand_tag) > MAX_TMALL_BRAND_TAG_LENGTH:
+        raise ValidationError(
+            f"天猫品牌标签最多 {MAX_TMALL_BRAND_TAG_LENGTH} 个字符"
+        )
 
     # 平台专属校验
     if selected_platform == "tmall":
@@ -434,6 +447,7 @@ def validate_publish_request(
         title=normalized_title,
         description=normalized_description,
         tags=tags,
+        brand_tag=normalized_brand_tag,
         goods_id=",".join(goods_ids),
         activity_topic=normalized_activity_topic,
         music_name=music_name,

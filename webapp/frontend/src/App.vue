@@ -94,6 +94,7 @@ const WORKSPACE_DRAFT_KEYS = [
   'title',
   'description',
   'tags',
+  'brandTag',
   'goodsId',
   'activityTopic',
   'musicName',
@@ -109,6 +110,7 @@ function createEmptyWorkspaceDraft() {
     title: '',
     description: '',
     tags: '',
+    brandTag: '',
     goodsId: '',
     activityTopic: '',
     musicName: '',
@@ -387,6 +389,7 @@ const form = reactive({
   title: '',
   description: '',
   tags: '',
+  brandTag: '',
   goodsId: '',
   activityTopic: '',
   musicName: '',
@@ -493,7 +496,7 @@ const titlePlaceholder = computed(() => {
   return '抖音最多 30 个字符'
 })
 const workflowTip = computed(() => {
-  if (isTmall.value && isVideo.value) return '天猫视频步骤：上传视频 → 可选设置自定义封面 → 填写标题、文案和标签 → 参与话题 → 可选添加音乐 → 关联商品 → 设置定时 → 选择创作者声明 → 提交发布。'
+  if (isTmall.value && isVideo.value) return '天猫视频步骤：上传视频 → 可选设置自定义封面 → 填写标题、文案、内容标签和品牌标签 → 参与话题 → 可选添加音乐 → 关联商品 → 设置定时 → 选择创作者声明 → 提交发布。'
   if (isTmall.value) return '天猫图文步骤：按顺序上传 1-9 张图片 → 填写标题、文案和标签 → 参与话题 → 可选添加音乐 → 关联商品 → 设置定时 → 选择创作者声明 → 提交发布。'
   if (isJD.value && isVideo.value) return '京东视频步骤：上传视频 → 可选设置封面 → 填写标题 → 关联商品/参与话题 → 选择创作声明与自主原创 → 设置定时 → 提交发布。'
   if (isJD.value) return '京东图文步骤：按顺序上传 1-20 张 JPG/PNG 图片 → 填写标题与正文 → 关联商品/参与话题 → 选择创作声明与自主原创 → 设置定时 → 提交发布。'
@@ -1241,6 +1244,7 @@ async function submitPublish() {
   data.append('title', form.title)
   data.append('description', isJD.value && isVideo.value ? '' : form.description)
   data.append('tags', isJD.value ? '' : form.tags)
+  data.append('brand_tag', isTmall.value && isVideo.value ? form.brandTag : '')
   data.append('goods_id', isTmall.value || isJD.value ? form.goodsId : '')
   data.append('activity_topic', isTmall.value || isJD.value ? form.activityTopic : '')
   data.append('music_name', isTmall.value ? form.musicName : '')
@@ -1388,6 +1392,7 @@ function resetUserInterface() {
     title: '',
     description: '',
     tags: '',
+    brandTag: '',
     goodsId: '',
     activityTopic: '',
     musicName: '',
@@ -1633,10 +1638,13 @@ onBeforeUnmount(() => {
           <template v-if="isTmall">
             <label class="field"><span>发布文案 <em>可选</em></span><textarea v-model="form.description" :maxlength="descriptionLimit" placeholder="填写视频描述与种草文案" /><small class="field-hint">文案与标签会写入同一富文本字段：{{ contentTextLength }} / 1000</small></label>
             <div class="field-row">
-              <label class="field"><span>标签 <em>可选</em></span><input v-model="form.tags" placeholder="女鞋,夏季穿搭,通勤鞋" /></label>
-              <label class="field"><span>活动话题 <em>可选</em></span><input v-model="form.activityTopic" placeholder="例如：夏日上新" /></label>
+              <label class="field"><span>内容标签 <em>可选</em></span><input v-model="form.tags" placeholder="女鞋,夏季穿搭,通勤鞋" /></label>
+              <label v-if="isVideo" class="field"><span>品牌标签 <em>可选</em></span><input v-model="form.brandTag" maxlength="100" placeholder="输入品牌名称，例如：耐克" /></label>
             </div>
-            <label class="field"><span>音乐名称 <em>可选</em></span><input v-model="form.musicName" maxlength="100" placeholder="例如：默契" /></label>
+            <div class="field-row">
+              <label class="field"><span>活动话题 <em>可选</em></span><input v-model="form.activityTopic" placeholder="例如：夏日上新" /></label>
+              <label class="field"><span>音乐名称 <em>可选</em></span><input v-model="form.musicName" maxlength="100" placeholder="例如：默契" /></label>
+            </div>
           </template>
           <template v-else-if="isArticle || !isJD">
             <label class="field"><span>{{ descriptionLabel }} <em>可选</em></span><textarea v-model="form.description" :maxlength="isJD ? 1001 : 1000" :placeholder="descriptionPlaceholder" /></label>

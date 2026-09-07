@@ -1184,6 +1184,7 @@ class AgentJobRunnerTests(unittest.TestCase):
                     "title": "本地代理发布测试",
                     "description": "正文",
                     "tags": ["测试"],
+                    "brand_tag": "耐克",
                     "cover_ratio": "1:1",
                     "goods_id": "123",
                     "activity_topic": "",
@@ -1204,6 +1205,7 @@ class AgentJobRunnerTests(unittest.TestCase):
                 self.assertEqual(request.video_file, video)
                 self.assertEqual(request.cover_image_file, cover)
                 self.assertEqual(request.cover_ratio, "1:1")
+                self.assertEqual(request.brand_tag, "耐克")
                 self.assertTrue(request.dry_run)
                 self.assertFalse(request.headless)
                 self.assertEqual(upload.await_args.kwargs["session_pool"], session_pool)

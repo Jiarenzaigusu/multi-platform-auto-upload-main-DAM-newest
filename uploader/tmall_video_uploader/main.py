@@ -7,7 +7,7 @@ uploader.tmall_video_uploader.main 模块
 主要功能：
 1. Cookie 校验：访问光合首页判断是否仍处于登录态
 2. 手动登录：打开可见浏览器，等待用户完成扫码/密码/短信等验证后保存 storage_state
-3. 视频发布：上传视频 → 设置封面 → 填写标题/描述/话题 → 参与活动 → 添加音乐 →
+3. 视频发布：上传视频 → 设置封面 → 填写标题/描述/话题 → 添加品牌标签 → 参与活动 → 添加音乐 →
             关联商品 → 设置定时/立即发布 → 选择创作者声明 → 点击发布按钮 → 等待确认
 
 注意事项：
@@ -722,6 +722,7 @@ class TmallVideo(TmallBaseUploader):
         cover_ratio: str,
         cover_image_path: str | None = None,
         tags: list[str] | None = None,
+        brand_tag: str | None = None,
         goods_id: str | None = None,
         activity_topic: str | None = None,
         music_name: str | None = None,
@@ -740,6 +741,7 @@ class TmallVideo(TmallBaseUploader):
         :param cover_image_path: 自定义封面图片路径（可选）
         :param cover_ratio: 封面比例（original、3:4 或 1:1）
         :param tags: 话题标签列表（最多 4 个）
+        :param brand_tag: 品牌标签搜索词（可选）
         :param goods_id: 商品 ID 字符串（多个用逗号/空格/换行分隔，最多 6 个）
         :param activity_topic: 活动话题关键词（可选，留空表示不参加）
         :param music_name: 音乐名称（可选，留空跳过）
@@ -756,6 +758,7 @@ class TmallVideo(TmallBaseUploader):
         self.title = title
         self.desc = desc or ""
         self.tags = tags or []
+        self.brand_tag = (brand_tag or "").strip()
         # 商品 ID 解析为元组（去重保序）
         self.goods_ids = _normalized_goods_ids(goods_id or "")
         # 兼容外部读取的字符串形式
@@ -806,6 +809,8 @@ class TmallVideo(TmallBaseUploader):
         if len(self.tags) > 4:
             tmall_logger.warning(_msg("⚠️", f"话题标签最多4个，已自动截取前4个（传入了 {len(self.tags)} 个）"))
             self.tags = self.tags[:4]
+        if len(self.brand_tag) > 100:
+            raise ValueError("天猫品牌标签最多100个字符")
         # 商品 ID 校验
         if len(self.goods_ids) > TMALL_MAX_GOODS_IDS:
             raise ValueError(f"天猫一次最多关联 {TMALL_MAX_GOODS_IDS} 个商品ID")
@@ -1093,6 +1098,36 @@ class TmallVideo(TmallBaseUploader):
             await page.keyboard.press("Space")
             await asyncio.sleep(1)
         tmall_logger.info(_msg("🏷️", f"小人一共贴了 {len(tags)} 个话题"))
+
+    async def _add_brand_tag(self, frame, page: Page) -> None:
+        """打开富文本工具栏的品牌标签入口并选择搜索结果第一项。"""
+        if not self.brand_tag:
+            return
+
+        trigger = frame.get_by_text("品牌标签", exact=True).first
+        await trigger.wait_for(state="visible", timeout=10000)
+        await trigger.click()
+
+        search = frame.locator(
+            'input[placeholder*="输入文本检索更多"], '
+            'textarea[placeholder*="输入文本检索更多"], '
+            '[contenteditable="true"][data-placeholder*="输入文本检索更多"], '
+            '[contenteditable="true"][aria-label*="输入文本检索更多"]'
+        ).first
+        if await search.count() > 0:
+            await search.wait_for(state="visible", timeout=10000)
+            await search.click()
+        else:
+            placeholder = frame.get_by_text("输入文本检索更多", exact=True).first
+            await placeholder.wait_for(state="visible", timeout=10000)
+            await placeholder.click()
+
+        await page.keyboard.type(self.brand_tag)
+        await asyncio.sleep(1)
+        # 与内容标签一致，空格确认平台搜索建议中的第一项。
+        await page.keyboard.press("Space")
+        await asyncio.sleep(1)
+        tmall_logger.info(_msg("🔖", f"已添加品牌标签: {self.brand_tag}"))
 
     async def _add_goods(self, frame):
         """通过商品 ID 依次关联商品。
@@ -1887,6 +1922,7 @@ class TmallVideo(TmallBaseUploader):
             if self.cover_image_path:
                 await self._set_custom_cover(frame, page)
             await self._fill_title_and_desc(frame, page)
+            await self._add_brand_tag(frame, page)
             await self._add_activity_topic(frame, page)
             await self._add_music(frame)
             await self._add_goods(frame)

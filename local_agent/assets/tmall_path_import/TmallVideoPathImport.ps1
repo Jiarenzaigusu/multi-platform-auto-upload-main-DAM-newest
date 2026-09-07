@@ -112,7 +112,7 @@ try {
     $document.PreserveWhitespace = $true
     $document.Load($sheetPath)
     foreach ($rowNumber in 2..201) {
-        foreach ($column in @("A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K")) {
+        foreach ($column in @("A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L")) {
             SetCell $document "${column}${rowNumber}" ""
         }
     }

@@ -141,6 +141,116 @@ class AgentTaskManagerTests(unittest.TestCase):
         )
         self.assertTrue(script.read_bytes().startswith(b"\xef\xbb\xbf"))
 
+    def test_bundled_tmall_video_template_includes_brand_tag(self):
+        template = (
+            Path(__file__).parents[1]
+            / "local_agent"
+            / "assets"
+            / "tmall_path_import"
+            / "TmallVideoTemplate.xlsx"
+        )
+        workbook = load_workbook(template, read_only=True)
+        try:
+            worksheet = workbook.active
+            self.assertEqual(
+                [cell.value for cell in worksheet[1]],
+                [
+                    "视频路径",
+                    "自定义封面",
+                    "封面比例",
+                    "标题",
+                    "文案",
+                    "标签",
+                    "品牌标签",
+                    "商品ID",
+                    "活动话题",
+                    "音乐名称",
+                    "定时发布",
+                    "创作者声明",
+                ],
+            )
+            self.assertEqual(worksheet["G2"].value, "耐克")
+        finally:
+            workbook.close()
+
+    def test_bundled_tmall_article_template_includes_brand_tag(self):
+        template = (
+            Path(__file__).parents[1]
+            / "local_agent"
+            / "assets"
+            / "tmall_path_import"
+            / "TmallImageTemplate.xlsx"
+        )
+        workbook = load_workbook(template, read_only=True)
+        try:
+            worksheet = workbook.active
+            self.assertEqual(
+                [cell.value for cell in worksheet[1]],
+                [
+                    "图片文件夹路径",
+                    "封面比例",
+                    "标题",
+                    "发布文案",
+                    "标签",
+                    "品牌标签",
+                    "商品ID",
+                    "活动话题",
+                    "音乐名称",
+                    "定时发布",
+                    "创作者声明",
+                ],
+            )
+            self.assertEqual(worksheet["F2"].value, "耐克")
+        finally:
+            workbook.close()
+
+    def test_path_import_clears_bundled_tmall_brand_tag_samples(self):
+        assets = (
+            Path(__file__).parents[1]
+            / "local_agent"
+            / "assets"
+            / "tmall_path_import"
+        )
+        videos = self.root / "tmall-videos"
+        videos.mkdir()
+        video = videos / "商品.mp4"
+        video.write_bytes(b"video")
+        output = self.root / "tmall-video.xlsx"
+
+        self.assertEqual(
+            import_workbook(
+                assets / "TmallVideoTemplate.xlsx", videos, output, None
+            ),
+            ("天猫视频", 1, 0),
+        )
+        workbook = load_workbook(output, read_only=True)
+        try:
+            worksheet = workbook.active
+            self.assertEqual(worksheet["A2"].value, str(video.resolve()))
+            self.assertIsNone(worksheet["G2"].value)
+            self.assertIsNone(worksheet["L2"].value)
+        finally:
+            workbook.close()
+
+        articles = self.root / "tmall-articles"
+        article = articles / "商品图文"
+        article.mkdir(parents=True)
+        article_output = self.root / "tmall-article.xlsx"
+        self.assertEqual(
+            import_workbook(
+                assets / "TmallImageTemplate.xlsx", articles, article_output, None
+            ),
+            ("天猫图文", 1, 0),
+        )
+        workbook = load_workbook(article_output, read_only=True)
+        try:
+            worksheet = workbook.active
+            self.assertEqual(worksheet["A2"].value, str(article.resolve()))
+            self.assertIsNone(worksheet["F2"].value)
+            self.assertIsNone(worksheet["K2"].value)
+        finally:
+            workbook.close()
+
     def test_native_path_import_fills_jd_video_and_article_templates(self):
         assets = (
             Path(__file__).parents[1]
@@ -1244,6 +1354,48 @@ class AgentJobRunnerTests(unittest.TestCase):
                 self.assertFalse(request.headless)
                 self.assertEqual(upload.await_args.kwargs["session_pool"], session_pool)
                 self.assertIn("用户电脑", result["message"])
+            finally:
+                runner.shutdown()
+
+    def test_tmall_article_maps_brand_tag_to_local_uploader(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = AppDataPaths.create(Path(temp_dir) / "agent-data").for_user(USER_ID)
+            image = paths.uploads / "article.jpg"
+            image.write_bytes(b"image")
+            runner = AgentJobRunner(USER_ID, paths)
+            session_pool = object()
+            runner.runtime.tmall_sessions = lambda: session_pool
+            job = {
+                "id": "e" * 32,
+                "kind": "publish",
+                "platform": "tmall",
+                "account": "shop1",
+                "payload": {
+                    "content_type": "article",
+                    "headed": True,
+                    "schedule": None,
+                    "title": "本地代理图文发布测试",
+                    "description": "正文",
+                    "tags": ["测试"],
+                    "brand_tag": "耐克",
+                    "cover_ratio": "3:4",
+                    "goods_id": "123",
+                    "activity_topic": "",
+                    "music_name": "",
+                    "creator_declaration": "内容无需标注",
+                    "dry_run": True,
+                },
+            }
+            try:
+                with patch(
+                    "local_agent.runner.upload_tmall_article",
+                    new=AsyncMock(return_value={"mode": "dry_run"}),
+                ) as upload:
+                    asyncio.run(runner._run_job(job, None, image_paths=(image,)))
+                request = upload.await_args.args[0]
+                self.assertEqual(request.image_files, (image,))
+                self.assertEqual(request.brand_tag, "耐克")
+                self.assertEqual(upload.await_args.kwargs["session_pool"], session_pool)
             finally:
                 runner.shutdown()
 

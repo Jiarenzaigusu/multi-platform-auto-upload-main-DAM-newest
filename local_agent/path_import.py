@@ -92,7 +92,7 @@ def import_workbook(template: Path, source: Path, output: Path, cover: Path | No
                 if item.is_file():
                     cover_map.setdefault(_stem(item), item.resolve())
 
-        columns = "ABCDEFGHIJK"
+        columns = "ABCDEFGHIJKL"
         for row in range(2, 202):
             for column in columns:
                 _set_cell(root, f"{column}{row}", "")

@@ -47,17 +47,20 @@ from webapp.api.batch_templates import build_batch_template
 from webapp.api.batch_xiaohongshu_article import parse_xiaohongshu_article_batch_workbook
 from webapp.api.batch_xiaohongshu_video import parse_xiaohongshu_video_batch_workbook
 from webapp.api.agent_tasks import AgentTaskManager
+from webapp.api.agent_batch import parse_remote_tmall_article_batch_workbook
 from webapp.api.main import WebSettings
 from webapp.api.batch import resolve_local_path
 from webapp.api.main import create_app as _create_app
 from webapp.api.models import ValidationError, validate_account_name, validate_publish_request
 from webapp.api.platforms import (
     JdVideoUploadRequest,
+    TmallArticleUploadRequest,
     TmallVideoUploadRequest,
     delete_account_cookie,
     resolve_account_file,
     secure_account_file,
     upload_jd_video,
+    upload_tmall_article,
     upload_tmall_video,
 )
 from webapp.api.store import JobStore
@@ -188,8 +191,24 @@ class PublishRequestValidationTests(unittest.TestCase):
 
         self.assertEqual(request.brand_tag, "耐克")
 
-    def test_brand_tag_is_rejected_outside_tmall_video(self):
-        with self.assertRaisesRegex(ValidationError, "仅支持天猫视频"):
+    def test_tmall_article_request_normalizes_brand_tag(self):
+        image = Path(self.temp_dir.name) / "article.jpg"
+        image.write_bytes(b"image")
+        request = validate_publish_request(
+            platform="tmall",
+            content_type="article",
+            account="shop_1",
+            image_paths=(image,),
+            cover_ratio="3:4",
+            original_filename=image.name,
+            title="夏季女鞋图文",
+            brand_tag="  耐克  ",
+        )
+
+        self.assertEqual(request.brand_tag, "耐克")
+
+    def test_brand_tag_is_rejected_outside_tmall(self):
+        with self.assertRaisesRegex(ValidationError, "仅支持天猫"):
             validate_publish_request(
                 platform="xiaohongshu",
                 cover_ratio="original",
@@ -593,6 +612,22 @@ class PublishRequestValidationTests(unittest.TestCase):
         page.keyboard.type.assert_awaited_once_with("Gap")
         self.assertEqual(frame.evaluate.await_count, 2)
         self.assertEqual(editor.inner_html.await_count, 3)
+
+    def test_tmall_article_brand_tag_uses_matching_search_suggestion(self):
+        uploader = object.__new__(TmallArticle)
+        uploader.brand_tag = "Gap"
+        frame = MagicMock()
+        page = MagicMock()
+
+        with patch(
+            "uploader.tmall_article_uploader.main.select_tmall_label_suggestion",
+            new=AsyncMock(return_value="Gap 官方品牌"),
+        ) as select_label:
+            asyncio.run(uploader._add_brand_tag(frame, page))
+
+        select_label.assert_awaited_once_with(
+            frame, page, toolbar_label="品牌标签", value="Gap"
+        )
 
     def test_tmall_content_tags_use_native_toolbar_mode_without_candidate_lookup(self):
         uploader = object.__new__(TmallVideo)
@@ -1979,6 +2014,47 @@ class TmallBatchWorkbookTests(unittest.TestCase):
 
         self.assertEqual(rows[0].request.tags, ("女鞋", "夏季穿搭", "通勤鞋"))
 
+    def test_brand_tag_maps_to_tmall_article_batch_request(self):
+        image = self.base_dir / "photos" / "001.jpg"
+        image.write_bytes(b"image")
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.append(
+            ["图片文件夹路径", "封面比例", "标题", "品牌标签"]
+        )
+        worksheet.append(
+            [str(self.base_dir / "photos"), "3:4", "夏季女鞋图文", "耐克"]
+        )
+        output = BytesIO()
+        workbook.save(output)
+        workbook.close()
+
+        rows = parse_tmall_article_batch_workbook(
+            output.getvalue(), account="shop1", dry_run=True, headed=True
+        )
+
+        self.assertEqual(rows[0].request.brand_tag, "耐克")
+
+    def test_brand_tag_maps_to_remote_tmall_article_batch_request(self):
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.append(
+            ["图片文件夹路径", "封面比例", "标题", "品牌标签"]
+        )
+        worksheet.append(
+            [str(self.base_dir / "agent-photos"), "3:4", "夏季女鞋图文", "耐克"]
+        )
+        output = BytesIO()
+        workbook.save(output)
+        workbook.close()
+
+        rows = parse_remote_tmall_article_batch_workbook(
+            output.getvalue(), account="shop1", dry_run=True, headed=True
+        )
+
+        self.assertEqual(rows[0].request.brand_tag, "耐克")
+        self.assertEqual(rows[0].image_folder_path, self.base_dir / "agent-photos")
+
     def test_tmall_article_rows_map_each_selected_cover_ratio(self):
         workbook = Workbook()
         worksheet = workbook.active
@@ -2095,9 +2171,25 @@ class TmallBatchWorkbookTests(unittest.TestCase):
         workbook = load_workbook(BytesIO(build_batch_template("tmall", "article")))
         try:
             worksheet = workbook.active
-            self.assertEqual(worksheet["A1"].value, "图片文件夹路径")
+            self.assertEqual(
+                [cell.value for cell in worksheet[1]],
+                [
+                    "图片文件夹路径",
+                    "封面比例",
+                    "标题",
+                    "发布文案",
+                    "标签",
+                    "品牌标签",
+                    "商品ID",
+                    "活动话题",
+                    "音乐名称",
+                    "定时发布",
+                    "创作者声明",
+                ],
+            )
             self.assertEqual(worksheet["B1"].value, "封面比例")
             self.assertEqual(worksheet["B2"].value, "3:4")
+            self.assertEqual(worksheet["F2"].value, "耐克")
             validations = {
                 str(item.sqref): item for item in worksheet.data_validations.dataValidation
             }
@@ -3199,6 +3291,45 @@ class PlatformAdapterTests(unittest.TestCase):
         self.assertEqual(uploader_type.call_args.kwargs["brand_tag"], "耐克")
         self.assertEqual(uploader_type.call_args.kwargs["music_name"], "默契")
         self.assertNotIn("screenshot_dir", uploader_type.call_args.kwargs)
+
+    def test_tmall_article_adapter_passes_brand_tag_to_uploader(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        paths = AppDataPaths.create(Path(temp_dir.name) / "data").for_user(
+            TEST_USER_ID
+        )
+        request = TmallArticleUploadRequest(
+            account_name="shop1",
+            image_files=(Path("/tmp/article.jpg"),),
+            cover_ratio="3:4",
+            title="夏季女鞋图文",
+            description="轻便好穿",
+            tags=["女鞋"],
+            brand_tag="耐克",
+        )
+        account_file = Path("/tmp/tmall_shop1.json")
+        leased_session = object()
+
+        class Lease:
+            async def __aenter__(self):
+                return leased_session
+
+            async def __aexit__(self, _exc_type, _exc, _traceback):
+                return False
+
+        class Pool:
+            def lease(self, _path, *, headless):
+                return Lease()
+
+        with patch(
+            "webapp.api.platforms.resolve_account_file", return_value=account_file
+        ), patch(
+            "webapp.api.platforms.tmall_setup", new=AsyncMock(return_value=True)
+        ), patch("webapp.api.platforms.TmallArticle") as uploader_type:
+            uploader_type.return_value.upload_in_session = AsyncMock()
+            asyncio.run(upload_tmall_article(request, paths=paths, session_pool=Pool()))
+
+        self.assertEqual(uploader_type.call_args.kwargs["brand_tag"], "耐克")
 
     def test_tmall_publish_adapter_passes_optional_cover_to_uploader(self):
         temp_dir = tempfile.TemporaryDirectory()

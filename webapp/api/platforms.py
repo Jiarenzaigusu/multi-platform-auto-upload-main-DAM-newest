@@ -89,6 +89,7 @@ class TmallArticleUploadRequest:
     description: str
     tags: list[str]
     cover_ratio: str
+    brand_tag: str = ""
     goods_id: str = ""
     activity_topic: str = ""
     music_name: str = ""
@@ -336,6 +337,7 @@ async def upload_tmall_article(
         account_file=str(account_file),
         tags=request.tags,
         cover_ratio=request.cover_ratio,
+        brand_tag=request.brand_tag,
         goods_id=request.goods_id,
         activity_topic=request.activity_topic,
         music_name=request.music_name,

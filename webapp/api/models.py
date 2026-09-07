@@ -97,7 +97,7 @@ class PublishRequest:
     title: str                  # 标题
     description: str            # 描述/文案（天猫有，京东无）
     tags: tuple[str, ...]       # 话题标签（天猫有，京东无）
-    brand_tag: str              # 品牌标签（仅天猫视频）
+    brand_tag: str              # 品牌标签（仅天猫视频/图文）
     goods_id: str               # 商品 ID 字符串（逗号分隔）
     activity_topic: str         # 参与话题（天猫活动话题 / 京东话题）
     music_name: str             # 音乐名称（天猫有，京东无）
@@ -365,10 +365,8 @@ def validate_publish_request(
     # 定时发布时间解析
     schedule = parse_schedule(raw_schedule)
     tags = parse_tags(raw_tags, max_tags=4 if selected_platform == "tmall" else 20)
-    if normalized_brand_tag and (
-        selected_platform != "tmall" or selected_content_type != "video"
-    ):
-        raise ValidationError("品牌标签仅支持天猫视频")
+    if normalized_brand_tag and selected_platform != "tmall":
+        raise ValidationError("品牌标签仅支持天猫")
     if len(normalized_brand_tag) > MAX_TMALL_BRAND_TAG_LENGTH:
         raise ValidationError(
             f"天猫品牌标签最多 {MAX_TMALL_BRAND_TAG_LENGTH} 个字符"

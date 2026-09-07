@@ -257,6 +257,7 @@ def parse_remote_tmall_article_batch_workbook(
                 title=values["title"],
                 description=values["description"],
                 raw_tags=values["tags"].replace("，", ","),
+                brand_tag=values["brand_tag"],
                 goods_id=values["goods_id"],
                 activity_topic=values["activity_topic"],
                 raw_music_name=values["music_name"],

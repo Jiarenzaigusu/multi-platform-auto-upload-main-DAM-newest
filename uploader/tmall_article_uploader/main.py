@@ -20,7 +20,10 @@ from patchright.async_api import (
 )
 
 from uploader.errors import PublishResultUncertainError
-from uploader.tmall_label_selector import type_tmall_content_tag
+from uploader.tmall_label_selector import (
+    select_tmall_label_suggestion,
+    type_tmall_content_tag,
+)
 from uploader.tmall_session import TmallBrowserSession
 from utils.config import DEBUG_MODE
 from utils.log import tmall_logger
@@ -438,6 +441,7 @@ class TmallArticle:
         *,
         cover_ratio: str,
         tags: list[str] | None = None,
+        brand_tag: str | None = None,
         goods_id: str | None = None,
         activity_topic: str | None = None,
         music_name: str | None = None,
@@ -452,6 +456,7 @@ class TmallArticle:
         self.desc = desc or ""
         self.account_file = account_file
         self.tags = tags or []
+        self.brand_tag = (brand_tag or "").strip()
         self.cover_ratio = cover_ratio
         self.goods_ids = _normalized_goods_ids(goods_id or "")
         self.goods_id = ",".join(self.goods_ids)
@@ -506,6 +511,8 @@ class TmallArticle:
         tag_text = "".join(f" #{tag}" for tag in self._normalized_tags())
         if len(self.desc + tag_text) > 1000:
             raise ValueError("天猫光合图文描述不能超过1000字")
+        if len(self.brand_tag) > 100:
+            raise ValueError("天猫品牌标签最多100个字符")
         if len(self.goods_ids) > TMALL_MAX_GOODS_IDS:
             raise ValueError(f"天猫一次最多关联 {TMALL_MAX_GOODS_IDS} 个商品ID")
         if any(not goods_id.isdigit() for goods_id in self.goods_ids):
@@ -567,6 +574,15 @@ class TmallArticle:
             await type_tmall_content_tag(frame, page, tag)
         if tags:
             tmall_logger.success(_msg("🏷️", f"小人一共贴了 {len(tags)} 个内容标签"))
+
+    async def _add_brand_tag(self, frame, page: Page) -> None:
+        """搜索并点击与输入文本匹配的平台品牌候选。"""
+        if not self.brand_tag:
+            return
+        selected = await select_tmall_label_suggestion(
+            frame, page, toolbar_label="品牌标签", value=self.brand_tag
+        )
+        tmall_logger.info(_msg("🔖", f"已添加品牌标签: {selected}"))
 
     async def _add_goods(self, frame):
         """通过商品 ID 依次关联商品。
@@ -1548,6 +1564,7 @@ class TmallArticle:
             await self._upload_images(frame, page)
             await self._crop_images_if_requested(frame)
             await self._fill_title_and_desc(frame, page)
+            await self._add_brand_tag(frame, page)
             await self._add_activity_topic(frame, page)
             await self._add_music(frame)
             await self._add_goods(frame)

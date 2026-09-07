@@ -36,7 +36,10 @@ from patchright.async_api import (
 )
 
 from uploader.errors import PublishResultUncertainError
-from uploader.tmall_label_selector import select_tmall_label_suggestion
+from uploader.tmall_label_selector import (
+    focus_tmall_editor_end,
+    select_tmall_label_suggestion,
+)
 from utils.config import DEBUG_MODE
 from uploader.base_video import BaseVideoUploader
 from uploader.tmall_session import TmallBrowserSession
@@ -1096,6 +1099,7 @@ class TmallVideo(TmallBaseUploader):
         """按天猫原生规则输入内容标签，不依赖推荐候选列表。"""
         tags = self._normalized_tags()
         for index, tag in enumerate(tags, start=1):
+            await focus_tmall_editor_end(frame)
             tmall_logger.info(_msg("🏷️", f"小人正在添加第 {index} 个内容标签: #{tag}"))
             await page.keyboard.type(f" #{tag}")
             await asyncio.sleep(1)

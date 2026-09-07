@@ -4,6 +4,24 @@ from __future__ import annotations
 import asyncio
 
 
+async def focus_tmall_editor_end(frame):
+    """Focus the Cangjie editor and place its caret after the last label node."""
+    editor = frame.locator('div[data-cangjie-content="true"]').first
+    await editor.wait_for(state="visible", timeout=10000)
+    await editor.evaluate(
+        """(element) => {
+          element.focus();
+          const selection = element.ownerDocument.getSelection();
+          const range = element.ownerDocument.createRange();
+          range.selectNodeContents(element);
+          range.collapse(false);
+          selection.removeAllRanges();
+          selection.addRange(range);
+        }"""
+    )
+    return editor
+
+
 async def select_tmall_label_suggestion(
     frame, page, *, toolbar_label: str, value: str
 ) -> str:
@@ -102,4 +120,4 @@ async def select_tmall_label_suggestion(
     raise RuntimeError(f"已点击{toolbar_label}“{selection}”，但检索文本未转换为标签")
 
 
-__all__ = ["select_tmall_label_suggestion"]
+__all__ = ["focus_tmall_editor_end", "select_tmall_label_suggestion"]

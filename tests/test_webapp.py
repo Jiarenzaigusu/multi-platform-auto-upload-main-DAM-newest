@@ -1309,6 +1309,39 @@ class TaskManagerTests(unittest.TestCase):
             finally:
                 manager.shutdown()
 
+    def test_batch_publish_executes_in_excel_row_order(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            video = Path(temp_dir) / "ordered.mp4"
+            video.write_bytes(b"video")
+            request = validate_publish_request(
+                platform="tmall",
+                cover_ratio="original",
+                account="shop1",
+                video_path=video,
+                original_filename=video.name,
+                title="批量顺序测试",
+            )
+            store = JobStore(Path(temp_dir) / "state")
+            execution_order = []
+            manager = TaskManager(
+                store,
+                runner=lambda job: execution_order.append(job["source_row"])
+                or {"message": "complete"},
+                max_workers=1,
+            )
+            try:
+                jobs = manager.submit_publish_tasks(
+                    [(request, row) for row in (5, 2, 4)],
+                    batch_id="ordered-batch",
+                )
+                for job in jobs:
+                    self.wait_for_status(store, job["id"], "succeeded")
+
+                self.assertEqual([job["source_row"] for job in jobs], [2, 4, 5])
+                self.assertEqual(execution_order, [2, 4, 5])
+            finally:
+                manager.shutdown()
+
     def test_running_browser_task_can_be_cancelled(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = JobStore(Path(temp_dir))
@@ -2597,6 +2630,31 @@ class JobStoreTests(unittest.TestCase):
             recovered = store.recover_interrupted_jobs()
 
             self.assertEqual(recovered, [job["id"] for job in expected])
+
+    def test_recovery_preserves_atomic_batch_definition_order(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = JobStore(Path(temp_dir))
+            jobs = store.create_jobs(
+                [
+                    {
+                        "kind": "publish",
+                        "platform": "tmall",
+                        "account": "shop1",
+                        "payload": {"title": f"row-{row}"},
+                        "batch_id": "batch-1",
+                        "source_row": row,
+                    }
+                    for row in (2, 4, 5)
+                ]
+            )
+
+            recovered = store.recover_interrupted_jobs()
+
+            self.assertEqual(recovered, [job["id"] for job in jobs])
+            self.assertEqual(
+                [store.get_job(job_id)["source_row"] for job_id in recovered],
+                [2, 4, 5],
+            )
 
     def test_batch_is_persisted_with_one_atomic_state_write(self):
         with tempfile.TemporaryDirectory() as temp_dir:

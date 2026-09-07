@@ -373,6 +373,40 @@ class AgentTaskManagerTests(unittest.TestCase):
         self.assertEqual(len(jobs), 200)
         self.assertEqual(write.call_count, 1)
 
+    def test_batch_publish_is_claimed_in_excel_row_order(self):
+        video = self.paths.media / "ordered.mp4"
+        video.write_bytes(b"video")
+        request = validate_publish_request(
+            platform="tmall",
+            cover_ratio="original",
+            account="shop1",
+            video_path=video,
+            original_filename=video.name,
+            title="批量顺序测试",
+        )
+        jobs = self.manager.submit_publish_tasks(
+            [(request, row) for row in (5, 2, 4)], batch_id="ordered-batch"
+        )
+        self.assertEqual([job["source_row"] for job in jobs], [2, 4, 5])
+
+        self.connect()
+        claimed_rows = []
+        for _ in jobs:
+            claimed = self.manager.claim_next_job(AGENT_ID)
+            self.assertIsNotNone(claimed)
+            claimed_rows.append(claimed["source_row"])
+            self.manager.complete_agent_job(
+                claimed["id"],
+                AGENT_ID,
+                status="succeeded",
+                message="complete",
+                error="",
+                result={},
+                logs=[],
+            )
+
+        self.assertEqual(claimed_rows, [2, 4, 5])
+
     def test_browser_direct_asset_job_persists_ids_without_local_paths_or_ticket(self):
         self.connect()
         ticket = self.manager.issue_local_upload_ticket(

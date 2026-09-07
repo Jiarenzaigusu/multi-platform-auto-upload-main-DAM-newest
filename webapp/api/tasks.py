@@ -215,7 +215,18 @@ class TaskManager:
             return []
         self.start()
         definitions: list[dict[str, Any]] = []
-        for request, source_row in requests:
+        ordered_requests = (
+            sorted(
+                requests,
+                key=lambda item: (
+                    item[1] is None,
+                    item[1] if item[1] is not None else 0,
+                ),
+            )
+            if batch_id
+            else requests
+        )
+        for request, source_row in ordered_requests:
             payload = asdict(request)
             payload["video_path"] = str(request.video_path) if request.video_path else None
             payload["image_paths"] = [str(path) for path in request.image_paths]

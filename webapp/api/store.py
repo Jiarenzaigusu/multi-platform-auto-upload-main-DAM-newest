@@ -27,6 +27,17 @@ def utc_now() -> str:
 _DEFAULT_STATE: dict[str, Any] = {"accounts": [], "jobs": {}}
 
 
+def job_queue_order(job: dict[str, Any]) -> int:
+    """Return FIFO position, including for state created before this field existed."""
+    queue_order = job.get("queue_order")
+    if isinstance(queue_order, int) and not isinstance(queue_order, bool):
+        return queue_order
+    source_row = job.get("source_row")
+    if isinstance(source_row, int) and not isinstance(source_row, bool):
+        return source_row
+    return 0
+
+
 class JobStore:
     """Small JSON-backed store for a single-machine publishing console."""
 
@@ -85,6 +96,13 @@ class JobStore:
                 raise ValueError(f"任务 {job_id} 的 result 无效")
             if not isinstance(job.get("created_at"), str):
                 raise ValueError(f"任务 {job_id} 的 created_at 无效")
+            queue_order = job.get("queue_order")
+            if queue_order is not None and (
+                not isinstance(queue_order, int)
+                or isinstance(queue_order, bool)
+                or queue_order < 0
+            ):
+                raise ValueError(f"任务 {job_id} 的 queue_order 无效")
             for field in ("started_at", "finished_at"):
                 if job.get(field) is not None and not isinstance(job[field], str):
                     raise ValueError(f"任务 {job_id} 的 {field} 无效")
@@ -305,6 +323,18 @@ class JobStore:
             )
         with self._lock:
             state = self._read()
+            existing_orders = [
+                job.get("queue_order")
+                for job in state["jobs"].values()
+                if isinstance(job.get("queue_order"), int)
+                and not isinstance(job.get("queue_order"), bool)
+            ]
+            next_queue_order = max(existing_orders, default=-1) + 1
+            for offset, job in enumerate(jobs):
+                # A single Excel upload gets one atomic timestamp, so persist a
+                # separate monotonic position to retain its row order everywhere
+                # jobs are later sorted (including agent claims and restarts).
+                job["queue_order"] = next_queue_order + offset
             for platform, account in accounts_to_remember:
                 existing = next(
                     (
@@ -373,6 +403,9 @@ class JobStore:
     def list_jobs(self, limit: int | None = 100, offset: int = 0) -> list[dict[str, Any]]:
         with self._lock:
             jobs = list(self._read()["jobs"].values())
+            # Keep the newest task groups first while preserving the submitted
+            # order within an atomic batch.
+            jobs.sort(key=job_queue_order)
             jobs.sort(key=lambda item: item["created_at"], reverse=True)
             if limit is None:
                 return jobs[offset:]
@@ -428,7 +461,13 @@ class JobStore:
                     changed = True
             if changed:
                 self._write(state)
-        resumable.sort(key=lambda job: (job.get("created_at", ""), job["id"]))
+        resumable.sort(
+            key=lambda job: (
+                job.get("created_at", ""),
+                job_queue_order(job),
+                job["id"],
+            )
+        )
         return [job["id"] for job in resumable]
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:

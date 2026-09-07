@@ -16,7 +16,7 @@ from utils.files import cleanup_old_files
 from webapp.ai_copy.contracts import ProductReference
 from webapp.ai_copy.errors import ProductLookupError
 from webapp.api.models import PublishRequest
-from webapp.api.store import TERMINAL_STATUSES, JobStore, utc_now
+from webapp.api.store import TERMINAL_STATUSES, JobStore, job_queue_order, utc_now
 from webapp.api.tasks import RuntimeInstanceLock
 from webapp.workspaces.paths import UserDataPaths
 
@@ -161,7 +161,18 @@ class AgentTaskManager:
             return []
         self.start()
         definitions: list[dict[str, Any]] = []
-        for item in requests:
+        ordered_requests = (
+            sorted(
+                requests,
+                key=lambda item: (
+                    item[1] is None,
+                    item[1] if item[1] is not None else 0,
+                ),
+            )
+            if batch_id
+            else requests
+        )
+        for item in ordered_requests:
             request, source_row, image_folder_path = (
                 (*item, None) if len(item) == 2 else item
             )
@@ -581,7 +592,11 @@ class AgentTaskManager:
             }
             queued = sorted(
                 (job for job in active_jobs if job["status"] == "queued"),
-                key=lambda item: (item["created_at"], item["id"]),
+                key=lambda item: (
+                    item["created_at"],
+                    job_queue_order(item),
+                    item["id"],
+                ),
             )
             job = next(
                 (

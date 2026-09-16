@@ -9,10 +9,16 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+<<<<<<< HEAD
 
     steps:
       - uses: actions/checkout@v7
 
+=======
+    steps:
+      - uses: actions/checkout@v7
+
+>>>>>>> a2b8811 (11)
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"

@@ -29,6 +29,9 @@ SUPPORTED_CONTENT_TYPES = {"video", "article"}
 SUPPORTED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".m4v", ".avi", ".webm"}
 # 支持的封面图片扩展名
 SUPPORTED_COVER_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+# 京东视频封面规则独立于其他平台，避免把通用 WebP/20 MiB 规则误用到京麦。
+JD_VIDEO_COVER_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
+MAX_JD_VIDEO_COVER_IMAGE_BYTES = 5 * 1024 * 1024
 TMALL_COVER_RATIOS = ("original", "3:4", "1:1")
 JD_ARTICLE_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 MAX_JD_ARTICLE_IMAGES = 20
@@ -313,7 +316,7 @@ def validate_publish_request(
             normalized_paths.append(image_path.resolve())
         normalized_image_paths = tuple(normalized_paths)
 
-    # 视频自定义封面校验（天猫与京东均支持）
+    # 视频自定义封面校验（按平台执行独立规则）
     if cover_image_path is not None:
         if selected_content_type != "video":
             raise ValidationError("自定义封面图片仅支持视频发布")
@@ -324,8 +327,22 @@ def validate_publish_request(
                 raise ValidationError("封面图片为空")
         except OSError as exc:
             raise ValidationError("无法读取封面图片") from exc
-        if cover_image_path.suffix.lower() not in SUPPORTED_COVER_IMAGE_EXTENSIONS:
-            raise ValidationError("封面图片仅支持 JPG、PNG 或 WebP 格式")
+        allowed_cover_extensions = (
+            JD_VIDEO_COVER_IMAGE_EXTENSIONS
+            if selected_platform == "jd"
+            else SUPPORTED_COVER_IMAGE_EXTENSIONS
+        )
+        if cover_image_path.suffix.lower() not in allowed_cover_extensions:
+            raise ValidationError(
+                "京东视频封面仅支持 JPG 或 PNG 格式"
+                if selected_platform == "jd"
+                else "封面图片仅支持 JPG、PNG 或 WebP 格式"
+            )
+        if (
+            selected_platform == "jd"
+            and cover_image_path.stat().st_size > MAX_JD_VIDEO_COVER_IMAGE_BYTES
+        ):
+            raise ValidationError("京东视频封面图片不能超过 5 MiB")
 
     if (
         selected_platform == "tmall"

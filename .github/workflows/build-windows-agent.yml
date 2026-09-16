@@ -9,10 +9,11 @@ on:
 jobs:
   build:
     runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4.2.2 
-      - uses: actions/setup-python@v5.4.0
 
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -29,22 +30,27 @@ jobs:
         run: |
           $installer = "deploy/windows/output/MPAU-Agent-Setup.exe"
           $manifestPath = "deploy/windows/output/agent-installer.json"
+
           if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
             throw "Release manifest was not generated: $manifestPath"
           }
+
           $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer).Hash.ToLowerInvariant()
           $size = (Get-Item -LiteralPath $installer).Length
+
           if ($manifest.sha256 -ne $hash) {
             throw "Manifest SHA-256 does not match the installer."
           }
+
           if ([int64]$manifest.size -ne [int64]$size) {
             throw "Manifest size does not match the installer."
           }
+
           Write-Host "Verified agent release v$($manifest.version): $size bytes, $hash"
 
       - name: Upload installer
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: MPAU-Agent-Setup
           path: |

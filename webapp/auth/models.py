@@ -12,6 +12,8 @@ class User:
     display_name: str
     role: str
     status: str
+    brand_name: str = ""
+    brand_key: str = ""
 
     @property
     def can_operate(self) -> bool:

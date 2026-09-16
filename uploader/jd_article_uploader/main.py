@@ -535,16 +535,27 @@ class JDArticle:
             if page:
                 try:
                     if not page.is_closed():
-                        jd_logger.info(f"📌 京东图文流程结束，正在安全回收页面；当前账号共打开 {len(context.pages)} 个页面")
+                        jd_logger.info(f"📌 京东图文流程结束，发布页面已保留供人工复核；当前账号共打开 {len(context.pages)} 个页面")
                 except Exception:
                     pass
 
     async def upload_in_session(self, session: JdBrowserSession) -> dict:
+        """在共享京东会话中执行图文发布并保留任务页面。"""
         try:
             await session.save_storage_state()
-            return await self._upload_in_context(await session.ensure_open())
-        finally:
-            # Do not reuse or persist state after a JD publish-page visit.
+            result = await self._upload_in_context(await session.ensure_open())
+        except PublishResultUncertainError:
             session.mark_authenticated(False)
-            await session.close()
-            jd_logger.info("♻️ 京东图文发布会话已安全回收，下次任务将自动新建")
+            jd_logger.warning("🔎 京东图文发布结果不确定，保留页面供人工核对")
+            raise
+        except BaseException:
+            # A single Excel row must not close the shared context and the
+            # completed pages from earlier rows. The next row opens a fresh
+            # Page; the pool can rebuild the browser lazily if it disconnected.
+            session.mark_authenticated(False)
+            jd_logger.warning("📌 京东图文任务失败，保留浏览器会话和已有窗口供复核")
+            raise
+
+        session.mark_authenticated(False)
+        jd_logger.info("📌 京东图文任务已完成，发布页面已保留供人工复核")
+        return result

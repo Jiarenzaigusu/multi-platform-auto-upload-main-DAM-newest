@@ -56,8 +56,10 @@ JD_PUBLISH_STRATEGY_IMMEDIATE = "immediate"
 JD_PUBLISH_STRATEGY_SCHEDULED = "scheduled"
 # 京东链接导入一次最多关联的商品数（平台页面显示 0/10）
 JD_MAX_GOODS_IDS = 10
-# 京东视频自定义封面支持的格式与大小限制
-JD_COVER_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+# 京东视频自定义封面支持的格式与大小限制。
+# 京东视频页的封面上传组件目前只稳定接受 JPG/PNG；WebP 虽然会被浏览器
+# 的通用 image input 接受，但在京麦侧可能不会进入封面处理流程。
+JD_COVER_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 JD_MAX_COVER_IMAGE_BYTES = 5 * 1024 * 1024
 # The first JD publish-page mount can expose its file input before the upload SDK
 # and cover-processing listeners are ready. Require a stable surface and recover
@@ -65,6 +67,8 @@ JD_MAX_COVER_IMAGE_BYTES = 5 * 1024 * 1024
 JD_UPLOAD_READY_STABLE_POLLS = 5
 JD_VIDEO_PROCESSING_STALL_SECONDS = 60
 JD_VIDEO_UPLOAD_MAX_ATTEMPTS = 2
+JD_COVER_UPLOAD_MAX_ATTEMPTS = 2
+JD_PUBLISH_CONFIRMATION_TIMEOUT_SECONDS = 60
 JD_VIDEO_FILE_INPUT_SELECTOR = (
     'input[type="file"][accept*=".mp4"], input[type="file"][accept*="video"]'
 )
@@ -207,6 +211,114 @@ def _is_publish_frame_reload_error(exc: Exception) -> bool:
             "most likely because of a navigation",
         )
     )
+
+
+async def _visible_text(target: Page | Frame) -> str:
+    """Return visible text only, excluding hidden React templates and portals.
+
+    Jingmai keeps several status strings mounted in hidden nodes while the
+    micro-frontend transitions between upload states. Reading body.inner_text
+    therefore produces false states such as "等待视频上传" after the video
+    has already been accepted. Keep the inner_text fallback for older page
+    variants and for small test doubles.
+    """
+    body = target.locator("body")
+    try:
+        value = await body.evaluate(
+            """
+            body => {
+                const visible = element => {
+                    if (!element) return false;
+                    let node = element;
+                    while (node && node.nodeType === Node.ELEMENT_NODE) {
+                        const style = window.getComputedStyle(node);
+                        if (
+                            style.display === 'none' ||
+                            style.visibility === 'hidden' ||
+                            style.opacity === '0'
+                        ) return false;
+                        node = node.parentElement;
+                    }
+                    const rect = element.getBoundingClientRect();
+                    return rect.width > 0 && rect.height > 0;
+                };
+                const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+                const chunks = [];
+                let current = walker.nextNode();
+                while (current) {
+                    const text = (current.nodeValue || '').replace(/\\s+/g, ' ').trim();
+                    if (text && visible(current.parentElement)) chunks.push(text);
+                    current = walker.nextNode();
+                }
+                return chunks.join('\\n');
+            }
+            """
+        )
+        if isinstance(value, str):
+            return value.strip()
+    except Exception as exc:
+        if _is_publish_frame_reload_error(exc):
+            raise
+        pass
+    try:
+        value = await body.inner_text(timeout=3000)
+        return value.strip() if isinstance(value, str) else ""
+    except Exception as exc:
+        if _is_publish_frame_reload_error(exc):
+            raise
+        return ""
+
+
+async def _pick_locator(
+    locator,
+    *,
+    prefer_last: bool = False,
+    require_visible: bool = True,
+):
+    """Pick a live locator candidate without relying on a global first/last."""
+    try:
+        count = await locator.count()
+    except (AttributeError, TypeError):
+        return locator.last if prefer_last else locator.first
+    if not count:
+        return None
+    indexes = range(count - 1, -1, -1) if prefer_last else range(count)
+    for index in indexes:
+        candidate = locator.first if count == 1 else locator.nth(index)
+        if not require_visible:
+            return candidate
+        try:
+            if await candidate.is_visible():
+                return candidate
+        except (AttributeError, TypeError):
+            # Small test doubles and older Patchright wrappers may not expose
+            # is_visible on a detached candidate. Let wait_for do the final
+            # visibility check in that case.
+            return candidate
+    return None
+
+
+async def _wait_locator_enabled(locator, timeout_seconds: float = 10) -> None:
+    """Wait for a visible action control to become enabled."""
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    while asyncio.get_running_loop().time() < deadline:
+        try:
+            if await locator.is_enabled():
+                return
+        except (AttributeError, TypeError):
+            # Keep compatibility with locator-like test doubles.
+            return
+        await asyncio.sleep(0.25)
+    raise RuntimeError("京东封面确认按钮仍不可用")
+
+
+def _is_known_publish_success_url(url: str) -> bool:
+    """Only treat known Jingmai success destinations as publish success."""
+    parsed = urlparse(url)
+    if parsed.hostname != JD_LOGIN_SUCCESS_HOST:
+        return False
+    route = f"{parsed.path}#{parsed.fragment}".lower()
+    return any(marker in route for marker in ("post-center.html", "publish-success"))
 
 
 async def _is_logged_in(page) -> bool:
@@ -471,7 +583,12 @@ async def _wait_for_video_upload_surface(
 
 
 async def _choose_jd_video_file(page: Page, frame: Frame, file_path: str) -> None:
-    """Click a visible JD upload surface and select the video through its chooser."""
+    """Select a video through the visible chooser or the native file input.
+
+    Jingmai account variants do not all expose the same clickable wrapper. The
+    native input remains the reliable fallback, provided it is attached and
+    enabled; after either path we keep the normal upload-state verification.
+    """
     file_input = frame.locator(JD_VIDEO_FILE_INPUT_SELECTOR).first
     await file_input.wait_for(state="attached", timeout=10000)
 
@@ -505,10 +622,9 @@ async def _choose_jd_video_file(page: Page, frame: Frame, file_path: str) -> Non
                 continue
 
     if not visible_surfaces:
-        raise RuntimeError(
-            "京东视频上传 input 已挂载，但未找到可见的“上传视频”入口；"
-            "已停止以避免绕过页面初始化后造成封面一直等待"
-        )
+        jd_logger.warning(_msg("⚠️", "未找到京东可见上传卡片，改用原生视频 input"))
+        await file_input.set_input_files(file_path)
+        return
 
     # The smallest visible wrapper is normally the real upload card rather than
     # a full-page container. Try a few candidates because account variants differ.
@@ -525,10 +641,18 @@ async def _choose_jd_video_file(page: Page, frame: Frame, file_path: str) -> Non
         except PlaywrightError as exc:
             last_error = str(exc)
 
-    raise RuntimeError(
-        "已找到京东可见的“上传视频”入口，但未能打开文件选择器；"
-        f"最后错误：{last_error or '页面未触发 file chooser'}"
+    # Some versions render a visible card but do not wire its click handler
+    # until a later React render. Setting files on the attached input still
+    # dispatches the browser input/change events and is safer than abandoning
+    # an otherwise usable publish form.
+    jd_logger.warning(
+        _msg(
+            "⚠️",
+            "京东可见上传入口未打开文件选择器，改用原生视频 input；"
+            f"最后错误：{last_error or '页面未触发 file chooser'}",
+        )
     )
+    await file_input.set_input_files(file_path)
 
 
 class JDVideo(JDBaseUploader):
@@ -593,7 +717,7 @@ class JDVideo(JDBaseUploader):
             if not cover_path.is_file():
                 raise ValueError("京东封面图片不存在或上传未完成")
             if cover_path.suffix.lower() not in JD_COVER_IMAGE_EXTENSIONS:
-                raise ValueError("京东封面图片仅支持 JPG、PNG 或 WebP 格式")
+                raise ValueError("京东封面图片仅支持 JPG 或 PNG 格式")
             try:
                 cover_size = cover_path.stat().st_size
             except OSError as exc:
@@ -662,7 +786,7 @@ class JDVideo(JDBaseUploader):
 
         while loop.time() < deadline:
             try:
-                body_text = await current_frame.locator("body").inner_text(timeout=3000)
+                body_text = await _visible_text(current_frame)
                 last_body_text = body_text[-300:].strip()
                 if "上传失败" in body_text or "本地处理失败" in body_text:
                     raise RuntimeError(f"京东视频上传失败：{last_body_text}")
@@ -670,22 +794,18 @@ class JDVideo(JDBaseUploader):
                 cover_still_waiting = "等待视频上传" in body_text
                 preview_url = diagnostics.preview_url if diagnostics else ""
                 upload_completed = bool(video_id_match or preview_url)
-                if upload_completed and cover_still_waiting:
-                    half_finished_since = half_finished_since or loop.time()
-                    if loop.time() - half_finished_since >= stall_seconds:
-                        raise JdVideoProcessingStalledError(
-                            video_id_match.group(1) if video_id_match else "",
-                            last_body_text or "页面没有更多状态信息",
-                            preview_url,
-                        )
-                else:
-                    half_finished_since = None
-                edit_cover = current_frame.locator(".edit-cover-btn").filter(has_text="修改封面").first
+                edit_cover = await _pick_locator(
+                    current_frame.locator(".edit-cover-btn").filter(has_text="修改封面")
+                )
                 processing = any(
                     hint in body_text
                     for hint in ("等待视频上传", "视频上传中", "封面解析中", "视频解析中", "正在解析")
                 )
-                edit_ready = bool(await edit_cover.count() and await edit_cover.is_visible())
+                edit_ready = edit_cover is not None
+
+                # The visible edit-cover control is the strongest UI signal.
+                # Evaluate it before the text-based stall detector so a hidden
+                # template string cannot override a ready cover editor.
                 stable_ready_polls = stable_ready_polls + 1 if edit_ready and not processing else 0
                 if stable_ready_polls >= 2:
                     elapsed = max(0, timeout_seconds - int(deadline - loop.time()))
@@ -696,6 +816,17 @@ class JDVideo(JDBaseUploader):
                         )
                     )
                     return current_frame
+
+                if upload_completed and cover_still_waiting:
+                    half_finished_since = half_finished_since or loop.time()
+                    if loop.time() - half_finished_since >= stall_seconds:
+                        raise JdVideoProcessingStalledError(
+                            video_id_match.group(1) if video_id_match else "",
+                            last_body_text or "页面没有更多状态信息",
+                            preview_url,
+                        )
+                else:
+                    half_finished_since = None
             except Exception as exc:
                 if not _is_publish_frame_reload_error(exc):
                     raise
@@ -748,37 +879,69 @@ class JDVideo(JDBaseUploader):
         jd_logger.info(_msg("🖼️", f"准备设置京东自定义封面: {cover_path.name}"))
 
         reload_count = 0
-        while True:
+        image_input_selector = (
+            'input[type="file"][accept*="image"], '
+            'input[type="file"][accept*=".jpg"], '
+            'input[type="file"][accept*=".jpeg"], '
+            'input[type="file"][accept*=".png"]'
+        )
+        for attempt in range(1, JD_COVER_UPLOAD_MAX_ATTEMPTS + 1):
             try:
-                edit_button = current_frame.locator('[data-spm-click="openVideoCoverModal"]').first
-                if not await edit_button.count():
-                    edit_button = current_frame.locator(".edit-cover-btn").filter(has_text="修改封面").first
+                edit_button = None
+                for selector, use_text_filter in (
+                    ('[data-spm-click="openVideoCoverModal"]', False),
+                    (".edit-cover-btn", True),
+                ):
+                    candidate_locator = current_frame.locator(selector)
+                    if use_text_filter:
+                        candidate_locator = candidate_locator.filter(has_text="修改封面")
+                    edit_button = await _pick_locator(candidate_locator)
+                    if edit_button is not None:
+                        break
+                if edit_button is None:
+                    raise RuntimeError("未找到京东“修改封面”入口")
                 await edit_button.wait_for(state="visible", timeout=120000)
                 preview = current_frame.locator(".video-cover-wrapper .preview-img").first
                 previous_src = await preview.get_attribute("src") if await preview.count() else None
                 await edit_button.click()
 
-                # 弹窗外层 class 在不同版本中会变化；“手动上传”区域由一个透明的
-                # file input 覆盖，直接向该原生控件设置文件即等同用户在该区域选图。
-                # 文件控件只有封面编辑器打开时才出现；以它为就绪信号，规避 modal
-                # 容器在动画期间尚未写入 class/role 的竞态。
-                # 京东弹窗只有一个本地图片 input；使用 first 避免 Patchright 在
-                # 动画挂载阶段对 .last 的延迟定位问题。
-                file_input = current_frame.locator('input[type="file"][accept*="image"]').first
+                # 先锁定当前可见弹窗，再在弹窗内部找 input。封面 input 通常
+                # 本身是透明/隐藏的，因此只要求 attached，不要求 input 可见。
+                modal = None
+                file_input = None
+                input_root = current_frame
+                # The modal is mounted asynchronously after the click. Poll a
+                # bounded number of times so a normal React render does not
+                # become a false cover-upload failure.
                 for _ in range(30):
-                    if await file_input.count():
+                    modal = await _pick_locator(
+                        current_frame.locator(".jd-modal-wrap"), prefer_last=True
+                    )
+                    if modal is None:
+                        modal = await _pick_locator(
+                            current_frame.locator('[role="dialog"]'), prefer_last=True
+                        )
+                    input_root = modal if modal is not None else current_frame
+                    file_input = await _pick_locator(
+                        input_root.locator(image_input_selector),
+                        prefer_last=True,
+                        require_visible=False,
+                    )
+                    if file_input is not None:
                         break
                     await asyncio.sleep(0.5)
-                else:
+                if file_input is None:
                     raise RuntimeError("点击京东“修改封面”后未找到本地图片上传控件")
-                modal = current_frame.locator(".jd-modal-wrap").last
+                await file_input.wait_for(state="attached", timeout=15000)
 
                 # 不点击文字节点：它会被上述 input 拦截而导致自动化卡住。
-                await current_frame.locator('input[type="file"][accept*="image"]').first.set_input_files(
-                    str(cover_path)
-                )
+                await file_input.set_input_files(str(cover_path))
 
-                crop_preview = modal.locator("img.reactEasyCrop_Image").last
+                crop_preview = (
+                    modal.locator("img.reactEasyCrop_Image").last
+                    if modal is not None
+                    else current_frame.locator("img.reactEasyCrop_Image").last
+                )
                 if await crop_preview.count():
                     await crop_preview.wait_for(state="visible", timeout=15000)
                     for _ in range(30):
@@ -787,31 +950,63 @@ class JDVideo(JDBaseUploader):
                             break
                         await asyncio.sleep(0.2)
 
-                # 选择图片后京麦会重挂载弹窗内容，wrapper locator 可能短暂失效；
-                # “确定”按钮在当前发布 iframe 内唯一，使用稳定的按钮属性定位。
-                confirm_button = current_frame.locator('button[data-component-label="确定"]').first
+                # 选择图片后京麦会重挂载弹窗内容；优先在弹窗内找确认按钮，
+                # 找不到时才退回当前 iframe，避免误点页面其它“确定”。
+                confirm_button = None
+                for _ in range(20):
+                    confirm_roots = [input_root]
+                    if modal is not None:
+                        confirm_roots.append(current_frame)
+                    for confirm_root in confirm_roots:
+                        confirm_button = await _pick_locator(
+                            confirm_root.locator(
+                                'button[data-component-label="确定"]'
+                            )
+                        )
+                        if confirm_button is not None:
+                            break
+                    if confirm_button is not None:
+                        break
+                    await asyncio.sleep(0.5)
+                if confirm_button is None:
+                    raise RuntimeError("京东封面弹窗未找到“确定”按钮")
                 await confirm_button.wait_for(state="visible", timeout=10000)
+                await _wait_locator_enabled(confirm_button)
                 await confirm_button.click()
-                try:
-                    await modal.wait_for(state="hidden", timeout=15000)
-                except Exception:
-                    # 某些版本卸载 wrapper 较慢，但确认按钮已触发即可继续校验预览。
-                    await asyncio.sleep(1)
 
+                modal_closed = modal is None
+                if modal is not None:
+                    try:
+                        await modal.wait_for(state="hidden", timeout=15000)
+                        modal_closed = True
+                    except Exception:
+                        try:
+                            modal_closed = not await modal.is_visible()
+                        except (AttributeError, TypeError):
+                            modal_closed = True
+                        if not modal_closed:
+                            raise RuntimeError("京东封面确认后弹窗仍未关闭")
+
+                preview_changed = False
                 if await preview.count():
                     for _ in range(30):
                         current_src = await preview.get_attribute("src")
                         if current_src and current_src != previous_src:
+                            preview_changed = True
                             break
                         await asyncio.sleep(0.5)
-                    else:
-                        raise RuntimeError("京东封面已确认，但主表单预览图未更新")
+                if not preview_changed and not modal_closed:
+                    raise RuntimeError("京东封面已确认，但封面弹窗和主表单预览均未完成")
                 jd_logger.success(_msg("🖼️", f"京东自定义封面已设置: {cover_path.name}"))
                 return current_frame
             except Exception as exc:
                 if not _is_publish_frame_reload_error(exc):
                     raise
                 reload_count += 1
+                if attempt >= JD_COVER_UPLOAD_MAX_ATTEMPTS:
+                    raise RuntimeError(
+                        f"京东设置封面时 iframe 连续重载，已达到 {JD_COVER_UPLOAD_MAX_ATTEMPTS} 次重试上限"
+                    ) from exc
                 if page is None:
                     raise RuntimeError("设置封面时检测到京东发布 iframe 重载，但缺少页面对象，无法重新定位 iframe") from exc
                 if page.is_closed():
@@ -826,6 +1021,8 @@ class JDVideo(JDBaseUploader):
                 )
                 current_frame = await _find_publish_iframe(page)
                 await asyncio.sleep(1)
+
+        raise RuntimeError("京东封面设置流程异常结束")
 
     async def _add_goods(self, page, frame: Frame):
         """通过「链接导入」一次关联多个商品 ID。
@@ -1366,18 +1563,30 @@ class JDVideo(JDBaseUploader):
                         f"小人正在赶往京东京麦发视频页面（第 {attempt} 次）",
                     )
                 )
-                # A real-page refresh consistently finishes Jingmai's second
-                # micro-frontend initialization. Do it before selecting a file
-                # so the first upload does not create an orphaned video record.
-                await _wait_for_video_upload_surface(page)
-                jd_logger.info(_msg("🔄", "京东上传组件首次就绪，正在刷新页面完成二次初始化"))
-                await page.reload(wait_until="domcontentloaded")
-                if _url_host(page.url) in JD_AUTH_HOSTS:
-                    raise JdAuthenticationError("京东 Cookie 已失效，请重新登录")
-                frame = await _wait_for_video_upload_surface(page)
-
-                jd_logger.info(_msg("🏃", f"小人开始上传视频: {Path(self.file_path).name}"))
-                await _choose_jd_video_file(page, frame, self.file_path)
+                # Use the first stable mount directly. A reload is only a
+                # compatibility fallback when the account variant exposes an
+                # upload card that does not yet dispatch its file chooser.
+                for mount_attempt in range(1, 3):
+                    frame = await _wait_for_video_upload_surface(page)
+                    try:
+                        jd_logger.info(
+                            _msg(
+                                "🏃",
+                                f"小人开始上传视频: {Path(self.file_path).name}"
+                                f"（组件挂载第 {mount_attempt} 次）",
+                            )
+                        )
+                        await _choose_jd_video_file(page, frame, self.file_path)
+                        break
+                    except RuntimeError:
+                        if mount_attempt >= 2:
+                            raise
+                        jd_logger.warning(
+                            _msg("🔄", "京东上传入口未响应，刷新页面后重新绑定上传组件")
+                        )
+                        await page.reload(wait_until="domcontentloaded")
+                        if _url_host(page.url) in JD_AUTH_HOSTS:
+                            raise JdAuthenticationError("京东 Cookie 已失效，请重新登录")
                 frame = await self._wait_for_video_uploaded(
                     page,
                     frame,
@@ -1399,8 +1608,8 @@ class JDVideo(JDBaseUploader):
                 if not page.is_closed():
                     await page.close()
             except Exception:
-                # The owning JD session is discarded by upload_in_session, so a
-                # failed page cannot leak into the next account task.
+                # Non-submit failures are handled by upload_in_session, which
+                # closes the session after capturing the task error.
                 raise
 
         raise RuntimeError("京东视频上传重试流程异常结束")
@@ -1449,8 +1658,17 @@ class JDVideo(JDBaseUploader):
 
             # 真实发布
             publish_btn = frame.locator('button[class*="publishBtn"]').filter(has_text="发布").first
+            await publish_btn.wait_for(state="visible", timeout=10000)
+            await _wait_locator_enabled(publish_btn)
             jd_logger.info(_msg("🚀", "点击发布按钮"))
-            before_submit_text = await frame.locator("body").inner_text(timeout=3000)
+            before_submit_text = "\n".join(
+                text
+                for text in (
+                    await _visible_text(frame),
+                    await _visible_text(page),
+                )
+                if text
+            )
             initial_url = page.url
             await publish_btn.click()
             submitted = True
@@ -1463,10 +1681,17 @@ class JDVideo(JDBaseUploader):
             confirmation = ""
             success_hints = ("发布成功", "提交成功", "已提交审核", "审核中", "发布完成")
             failure_hints = ("发布失败", "提交失败", "发布出错", "请修改后重试")
-            for _ in range(30):
+            for _ in range(JD_PUBLISH_CONFIRMATION_TIMEOUT_SECONDS):
                 await asyncio.sleep(1)
                 try:
-                    current_text = await frame.locator("body").inner_text(timeout=3000)
+                    current_text = "\n".join(
+                        text
+                        for text in (
+                            await _visible_text(frame),
+                            await _visible_text(page),
+                        )
+                        if text
+                    )
                     # 先检测失败
                     for hint in failure_hints:
                         if hint in current_text and hint not in before_submit_text:
@@ -1484,15 +1709,17 @@ class JDVideo(JDBaseUploader):
                         published = True
                         confirmation = f"检测到平台成功提示：{matched_success}"
                         break
-                    # 检测页面跳转
-                    if page.url != initial_url and _url_host(page.url) not in JD_AUTH_HOSTS:
+                    # 只接受已知的京麦成功目的地，普通跳转不能代表发布成功。
+                    if page.url != initial_url and _url_host(page.url) in JD_AUTH_HOSTS:
+                        raise JdAuthenticationError("点击发布后京东 Cookie 失效，请人工核对发布结果")
+                    if page.url != initial_url and _is_known_publish_success_url(page.url):
                         published = True
                         confirmation = f"页面已跳转：{page.url}"
                         break
                 except Exception as e:
                     # frame 可能因页面跳转而 detach
                     if "detached" in str(e).lower():
-                        if page.url != initial_url and _url_host(page.url) not in JD_AUTH_HOSTS:
+                        if page.url != initial_url and _is_known_publish_success_url(page.url):
                             published = True
                             confirmation = f"发布表单已关闭并跳转：{page.url}"
                             break
@@ -1503,7 +1730,8 @@ class JDVideo(JDBaseUploader):
 
             if not published:
                 raise PublishResultUncertainError(
-                    "已点击京东发布按钮，但 30 秒内没有检测到明确成功或失败信号"
+                    f"已点击京东发布按钮，但 {JD_PUBLISH_CONFIRMATION_TIMEOUT_SECONDS} 秒内没有检测到明确成功或失败信号；"
+                    "请在保留的京麦页面中人工核对，勿直接重复发布"
                 )
 
             jd_logger.success(_msg("🥳", f"视频发布已确认（{confirmation}）"))
@@ -1526,19 +1754,29 @@ class JDVideo(JDBaseUploader):
     async def upload_in_session(self, session: JdBrowserSession) -> dict:
         """通过浏览器会话执行发布流程。
 
-        会话校验 Cookie 后调用 _upload_in_context。执行成功时保留京东
-        发布页供人工复核；异常或取消时关闭会话，避免留下不完整状态。
+        会话校验 Cookie 后调用 _upload_in_context。执行成功或失败时都保留
+        京东浏览器会话和已有页面，避免批量任务中的单条异常误伤其它窗口。
         """
         try:
             # jd_setup has just verified this context. Persist that stable state
             # before the publish page can rotate upload-scoped credentials.
             await session.save_storage_state()
             result = await self._upload_in_context(await session.ensure_open())
-        except BaseException:
-            # Errors and cancellation can leave the form in a partial state.
+        except PublishResultUncertainError:
+            # The publish button was already clicked. Keep the visible page and
+            # browser context so an operator can inspect Jingmai manually; the
+            # task layer marks this terminal state as uncertain and must not
+            # silently create a second publish attempt.
             session.mark_authenticated(False)
-            await session.close()
-            jd_logger.info(_msg("♻️", "京东视频发布未完成，浏览器会话已安全回收"))
+            jd_logger.warning(_msg("🔎", "京东发布结果不确定，保留页面供人工核对"))
+            raise
+        except BaseException:
+            # Keep the account BrowserContext alive. A single batch row must
+            # not close the previously completed pages or pages being reviewed
+            # by the operator. The next row gets a fresh Page; if the browser
+            # itself is disconnected, the session pool will rebuild it lazily.
+            session.mark_authenticated(False)
+            jd_logger.warning(_msg("📌", "京东视频任务失败，保留浏览器会话和已有窗口供复核"))
             raise
 
         # Do not persist upload-scoped credentials. Invalidating only the auth

@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from webapp.api.models import (
+    JD_VIDEO_COVER_IMAGE_EXTENSIONS,
+    MAX_JD_VIDEO_COVER_IMAGE_BYTES,
     SUPPORTED_COVER_IMAGE_EXTENSIONS,
     SUPPORTED_VIDEO_EXTENSIONS,
 )
@@ -62,6 +64,22 @@ def validate_cover_image_filename(filename: str) -> str:
     if Path(value).suffix.lower() not in SUPPORTED_COVER_IMAGE_EXTENSIONS:
         raise ValueError(f"不支持的封面图片格式：{value}")
     return value
+
+
+def validate_jd_cover_image_filename(filename: str) -> str:
+    """Validate a JD video cover filename before it reaches the browser."""
+    value = validate_cover_image_filename(filename)
+    if Path(value).suffix.lower() not in JD_VIDEO_COVER_IMAGE_EXTENSIONS:
+        raise ValueError("京东视频封面仅支持 JPG 或 PNG 格式")
+    return value
+
+
+def validate_jd_cover_image_file(path: Path) -> Path:
+    """Validate the local JD cover path and its platform size limit."""
+    validate_jd_cover_image_filename(path.name)
+    if path.stat().st_size > MAX_JD_VIDEO_COVER_IMAGE_BYTES:
+        raise ValueError("京东视频封面图片不能超过 5 MiB")
+    return path
 
 
 def cleanup_old_files(

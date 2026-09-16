@@ -28,7 +28,12 @@ from local_agent.paths import (
 )
 from local_agent.runner import AgentJobRunner
 from uploader.errors import PublishResultUncertainError
-from utils.files import validate_cover_image_filename, validate_media_filename
+from utils.files import (
+    validate_cover_image_filename,
+    validate_jd_cover_image_file,
+    validate_jd_cover_image_filename,
+    validate_media_filename,
+)
 from utils.log import logger
 from webapp.api.models import JD_ARTICLE_IMAGE_EXTENSIONS, MAX_SOCIAL_ARTICLE_IMAGES, SUPPORTED_COVER_IMAGE_EXTENSIONS
 
@@ -384,8 +389,14 @@ class LocalAgentApplication:
                                 stored_cover_path,
                                 download_dir,
                                 cover_asset,
-                                validate_cover_image_filename,
+                                (
+                                    validate_jd_cover_image_filename
+                                    if job["platform"] == "jd"
+                                    else validate_cover_image_filename
+                                ),
                             )
+                            if job["platform"] == "jd":
+                                validate_jd_cover_image_file(cover_image_path)
                             local_asset_paths = tuple(resolved_assets)
                     local_asset_paths = tuple(resolved_assets)
                 elif payload.get("managed_upload", True):
@@ -428,7 +439,11 @@ class LocalAgentApplication:
                             raise RuntimeError("任务视频下载为空")
                         raw_cover_name = payload.get("cover_image_filename")
                         if raw_cover_name:
-                            cover_name = validate_cover_image_filename(raw_cover_name)
+                            cover_name = (
+                                validate_jd_cover_image_filename(raw_cover_name)
+                                if job["platform"] == "jd"
+                                else validate_cover_image_filename(raw_cover_name)
+                            )
                             cover_image_path = download_dir / cover_name
                             _agent_log(f"正在下载自定义封面：{cover_name}")
                             self.client.download_cover_image(
@@ -443,6 +458,8 @@ class LocalAgentApplication:
                                 or cover_image_path.stat().st_size == 0
                             ):
                                 raise RuntimeError("任务封面图片下载为空")
+                            if job["platform"] == "jd":
+                                validate_jd_cover_image_file(cover_image_path)
                 else:
                     if content_type == "article":
                         image_folder_path = payload.get("image_folder_path")
@@ -468,6 +485,8 @@ class LocalAgentApplication:
                             cover_image_path = Path(str(raw_cover_path)).expanduser()
                             if not cover_image_path.is_file() or cover_image_path.stat().st_size == 0:
                                 raise RuntimeError("Excel 中的自定义封面不存在、为空或无法读取")
+                            if job["platform"] == "jd":
+                                validate_jd_cover_image_file(cover_image_path)
 
             future = (
                 self.runner.submit(job, video_path, cover_image_path, image_paths)

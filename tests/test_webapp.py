@@ -339,6 +339,36 @@ class PublishRequestValidationTests(unittest.TestCase):
                 title="夏季女鞋测评",
             )
 
+    def test_jd_rejects_webp_cover_image(self):
+        cover = Path(self.temp_dir.name) / "cover.webp"
+        cover.write_bytes(b"image")
+
+        with self.assertRaisesRegex(ValidationError, "京东视频封面仅支持 JPG 或 PNG"):
+            validate_publish_request(
+                platform="jd",
+                account="shop1",
+                video_path=self.video,
+                cover_image_path=cover,
+                original_filename="demo.mp4",
+                title="京东视频标题示例",
+            )
+
+    def test_jd_rejects_cover_image_over_five_mib(self):
+        cover = Path(self.temp_dir.name) / "cover.jpg"
+        cover.write_bytes(b"image")
+        with cover.open("ab") as stream:
+            stream.truncate(5 * 1024 * 1024 + 1)
+
+        with self.assertRaisesRegex(ValidationError, "京东视频封面图片不能超过 5 MiB"):
+            validate_publish_request(
+                platform="jd",
+                account="shop1",
+                video_path=self.video,
+                cover_image_path=cover,
+                original_filename="demo.mp4",
+                title="京东视频标题示例",
+            )
+
     def test_jd_rejects_description_and_invalid_title_length(self):
         with self.assertRaisesRegex(ValidationError, "独立文案"):
             validate_publish_request(
@@ -1000,8 +1030,21 @@ class PublishRequestValidationTests(unittest.TestCase):
         uploader = object.__new__(JDVideo)
         body = MagicMock()
         body.inner_text = AsyncMock(return_value="视频ID：4657567618\n等待视频上传")
+        edit_button = MagicMock()
+        edit_button.count = AsyncMock(return_value=0)
+        edit_locator = MagicMock()
+        edit_locator.filter.return_value = edit_locator
+        edit_locator.first = edit_button
         frame = MagicMock()
-        frame.locator.return_value = body
+
+        def locator(selector):
+            if selector == "body":
+                return body
+            if selector == ".edit-cover-btn":
+                return edit_locator
+            raise AssertionError(f"unexpected selector: {selector}")
+
+        frame.locator.side_effect = locator
 
         with self.assertRaises(JdVideoProcessingStalledError) as raised:
             asyncio.run(
@@ -1018,8 +1061,21 @@ class PublishRequestValidationTests(unittest.TestCase):
         uploader = object.__new__(JDVideo)
         body = MagicMock()
         body.inner_text = AsyncMock(return_value="等待视频上传")
+        edit_button = MagicMock()
+        edit_button.count = AsyncMock(return_value=0)
+        edit_locator = MagicMock()
+        edit_locator.filter.return_value = edit_locator
+        edit_locator.first = edit_button
         frame = MagicMock()
-        frame.locator.return_value = body
+
+        def locator(selector):
+            if selector == "body":
+                return body
+            if selector == ".edit-cover-btn":
+                return edit_locator
+            raise AssertionError(f"unexpected selector: {selector}")
+
+        frame.locator.side_effect = locator
         diagnostics = JdUploadDiagnostics()
         diagnostics.preview_url = (
             "https://hwgcloudoss.oss.cn-north-1.jdcloudcs.com/jdvideo.mp4"
@@ -1155,7 +1211,7 @@ class PublishRequestValidationTests(unittest.TestCase):
         visible_surface.click.assert_awaited_once()
         chooser.set_files.assert_awaited_once_with("/tmp/demo.mp4")
 
-    def test_jd_video_upload_rejects_hidden_input_without_visible_surface(self):
+    def test_jd_video_upload_falls_back_to_hidden_input_without_visible_surface(self):
         upload_surface = MagicMock()
         upload_surface.count = AsyncMock(return_value=0)
         file_input = MagicMock()
@@ -1171,13 +1227,12 @@ class PublishRequestValidationTests(unittest.TestCase):
         frame.get_by_text.return_value = text_surfaces
         page = MagicMock()
 
-        with self.assertRaisesRegex(RuntimeError, "未找到可见"):
-            asyncio.run(_choose_jd_video_file(page, frame, "/tmp/demo.mp4"))
+        asyncio.run(_choose_jd_video_file(page, frame, "/tmp/demo.mp4"))
 
         upload_surface.click.assert_not_called()
         page.expect_file_chooser.assert_not_called()
         file_input.click.assert_not_called()
-        file_input.set_input_files.assert_not_called()
+        file_input.set_input_files.assert_awaited_once_with("/tmp/demo.mp4")
 
     def test_jd_video_upload_reopens_page_once_after_processing_stall(self):
         uploader = object.__new__(JDVideo)
@@ -1223,8 +1278,8 @@ class PublishRequestValidationTests(unittest.TestCase):
         self.assertIs(page, second_page)
         self.assertIs(frame, second_frame)
         first_page.close.assert_awaited_once()
-        first_page.reload.assert_awaited_once_with(wait_until="domcontentloaded")
-        second_page.reload.assert_awaited_once_with(wait_until="domcontentloaded")
+        first_page.reload.assert_not_awaited()
+        second_page.reload.assert_not_awaited()
         self.assertEqual(context.new_page.await_count, 2)
 
     def test_jd_set_custom_cover_recovers_from_iframe_reload(self):
@@ -1238,6 +1293,7 @@ class PublishRequestValidationTests(unittest.TestCase):
                 def first_locator(target):
                     outer = MagicMock()
                     outer.first = target
+                    outer.last = target
                     return outer
 
                 edit_button = MagicMock()
@@ -1252,17 +1308,41 @@ class PublishRequestValidationTests(unittest.TestCase):
 
                 file_input = MagicMock()
                 file_input.count = AsyncMock(return_value=1)
+                file_input.wait_for = AsyncMock()
                 file_input.set_input_files = AsyncMock()
 
                 confirm_button = MagicMock()
                 confirm_button.wait_for = AsyncMock()
+                confirm_button.is_enabled = AsyncMock(return_value=True)
                 confirm_button.click = AsyncMock()
 
                 modal = MagicMock()
                 modal.wait_for = AsyncMock()
+                modal.is_visible = AsyncMock(return_value=True)
                 crop_preview = MagicMock()
                 crop_preview.count = AsyncMock(return_value=0)
-                modal.locator.return_value.last = crop_preview
+                modal_image_inputs = MagicMock()
+                modal_image_inputs.count = AsyncMock(return_value=1)
+                modal_image_inputs.first = file_input
+                modal_image_inputs.last = file_input
+                modal_confirm_buttons = MagicMock()
+                modal_confirm_buttons.count = AsyncMock(return_value=1)
+                modal_confirm_buttons.first = confirm_button
+                modal_confirm_buttons.last = confirm_button
+
+                def modal_locator(selector):
+                    if selector.startswith("input[type=\"file\"]"):
+                        return modal_image_inputs
+                    if selector == "img.reactEasyCrop_Image":
+                        outer = MagicMock()
+                        outer.count = AsyncMock(return_value=0)
+                        outer.last = crop_preview
+                        return outer
+                    if selector == 'button[data-component-label="确定"]':
+                        return modal_confirm_buttons
+                    raise AssertionError(f"unexpected modal selector: {selector}")
+
+                modal.locator.side_effect = modal_locator
 
                 frame = MagicMock()
 
@@ -1274,14 +1354,18 @@ class PublishRequestValidationTests(unittest.TestCase):
                         return first_locator(edit_button)
                     if selector == ".video-cover-wrapper .preview-img":
                         return first_locator(preview)
-                    if selector == 'input[type="file"][accept*="image"]':
-                        return first_locator(file_input)
                     if selector == ".jd-modal-wrap":
                         outer = MagicMock()
+                        outer.count = AsyncMock(return_value=1)
+                        outer.first = modal
                         outer.last = modal
                         return outer
-                    if selector == 'button[data-component-label="确定"]':
-                        return first_locator(confirm_button)
+                    if selector == '[role="dialog"]':
+                        outer = MagicMock()
+                        outer.count = AsyncMock(return_value=0)
+                        return outer
+                    if selector.startswith("input[type=\"file\"]"):
+                        return first_locator(file_input)
                     raise AssertionError(f"unexpected selector: {selector}")
 
                 frame.locator.side_effect = locator
@@ -1388,6 +1472,38 @@ class TaskManagerTests(unittest.TestCase):
                 jobs = manager.submit_publish_tasks(
                     [(request, row) for row in (5, 2, 4)],
                     batch_id="ordered-batch",
+                )
+                for job in jobs:
+                    self.wait_for_status(store, job["id"], "succeeded")
+
+                self.assertEqual([job["source_row"] for job in jobs], [2, 4, 5])
+                self.assertEqual(execution_order, [2, 4, 5])
+            finally:
+                manager.shutdown()
+
+    def test_jd_batch_publish_executes_in_excel_row_order(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            video = Path(temp_dir) / "ordered-jd.mp4"
+            video.write_bytes(b"video")
+            request = validate_publish_request(
+                platform="jd",
+                account="shop1",
+                video_path=video,
+                original_filename=video.name,
+                title="京东批量顺序测试",
+            )
+            store = JobStore(Path(temp_dir) / "state")
+            execution_order = []
+            manager = TaskManager(
+                store,
+                runner=lambda job: execution_order.append(job["source_row"])
+                or {"message": "complete"},
+                max_workers=2,
+            )
+            try:
+                jobs = manager.submit_publish_tasks(
+                    [(request, row) for row in (5, 2, 4)],
+                    batch_id="jd-ordered-batch",
                 )
                 for job in jobs:
                     self.wait_for_status(store, job["id"], "succeeded")

@@ -403,11 +403,18 @@ class JdPublisherSessionLifecycleTests(unittest.TestCase):
     def test_jd_video_success_preserves_post_publish_session(self):
         self._assert_session_lifecycle(JDVideo, expect_close=False)
 
-    def test_jd_article_success_recycles_post_publish_session(self):
-        self._assert_session_lifecycle(JDArticle)
+    def test_jd_article_success_preserves_post_publish_session(self):
+        self._assert_session_lifecycle(JDArticle, expect_close=False)
 
-    def test_jd_video_error_also_recycles_post_publish_session(self):
-        self._assert_session_lifecycle(JDVideo, error=RuntimeError("publish failed"))
+    def test_jd_article_error_preserves_post_publish_session(self):
+        self._assert_session_lifecycle(
+            JDArticle, error=RuntimeError("publish failed"), expect_close=False
+        )
+
+    def test_jd_video_error_preserves_post_publish_session(self):
+        self._assert_session_lifecycle(
+            JDVideo, error=RuntimeError("publish failed"), expect_close=False
+        )
 
 
 class BrowserRuntimeTests(unittest.TestCase):

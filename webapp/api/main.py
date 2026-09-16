@@ -6,7 +6,7 @@ import os
 import uuid
 from threading import Lock
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import AsyncIterator
@@ -63,6 +63,7 @@ from webapp.api.media import (
 )
 from webapp.api.models import (
     MAX_JD_ARTICLE_IMAGE_BYTES,
+    MAX_JD_VIDEO_COVER_IMAGE_BYTES,
     MAX_SOCIAL_ARTICLE_IMAGES,
     PublishRequest,
     SUPPORTED_COVER_IMAGE_EXTENSIONS,
@@ -76,9 +77,16 @@ from webapp.api.platforms import delete_account_cookie
 from webapp.api.store import TERMINAL_STATUSES
 from webapp.api.tasks import TaskManager
 from webapp.auth import AuthService, AuthStore, create_auth_router
-from webapp.auth.dependencies import require_operator, require_session, require_user
+from webapp.auth.dependencies import require_admin, require_operator, require_session, require_user
 from webapp.auth.middleware import AuthenticationMiddleware
+from webapp.dashboard import DashboardRepository
 from webapp.llm_adapter import create_llm_adapter_router
+from webapp.mysql_demo import (
+    MySQLDatabase,
+    MySQLDemoError,
+    MySQLSettings,
+    prompt_for_mysql_password,
+)
 from webapp.workspaces import AppDataPaths, UserWorkspace, UserWorkspaceRegistry
 
 
@@ -108,6 +116,7 @@ class WebSettings:
         "http://localhost:8788",
         "http://127.0.0.1:8788",
     )
+    mysql: MySQLSettings = MySQLSettings()
 
     @classmethod
     def from_environment(cls) -> "WebSettings":
@@ -168,6 +177,7 @@ class WebSettings:
             in {"1", "true", "yes", "on"},
             allowed_hosts=allowed_hosts,
             allowed_origins=allowed_origins,
+            mysql=MySQLSettings.from_environment(),
         )
 
 
@@ -281,12 +291,17 @@ def create_app(
         AuthStore(data_paths.auth_database),
         session_seconds=settings.session_seconds,
     )
+    mysql_database = MySQLDatabase(settings.mysql)
+    dashboard_repository = DashboardRepository(mysql_database)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         try:
+            if mysql_database.configured:
+                mysql_database.check()
             yield
         finally:
+            mysql_database.close()
             workspace_registry.close()
 
     app = FastAPI(title="MPAU Commerce Console", version="0.1.0", lifespan=lifespan)
@@ -294,6 +309,8 @@ def create_app(
     app.state.data_paths = data_paths
     app.state.workspace_registry = workspace_registry
     app.state.auth_service = auth_service
+    app.state.mysql_database = mysql_database
+    app.state.dashboard_repository = dashboard_repository
     dam_sessions: dict[str, DamSettings] = {}
     dam_sessions_lock = Lock()
     trusted_browser_origins = set(settings.allowed_origins)
@@ -411,6 +428,45 @@ def create_app(
             "execution_mode": "local_agent",
             "platforms": ["tmall", "jd", "xiaohongshu", "douyin"],
         }
+
+    @app.get("/api/mysql/demo")
+    def mysql_demo(request: Request, _: object = Depends(require_admin)) -> dict:
+        """Let an administrator verify the optional MySQL connection."""
+        if not settings.mysql.configured:
+            return {
+                "configured": False,
+                "connected": False,
+                "missing_settings": list(
+                    settings.mysql.missing_environment_variables
+                ),
+            }
+        try:
+            return request.app.state.mysql_database.check()
+        except MySQLDemoError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    @app.get("/api/dashboard")
+    def dashboard_data(
+        request: Request,
+        period: str = Query(default="week"),
+        _: object = Depends(require_user),
+    ) -> dict:
+        """Return normalized Movado metrics for the authenticated dashboard."""
+        if not settings.mysql.configured:
+            return {
+                "configured": False,
+                "connected": False,
+                "empty": True,
+                "missing_settings": list(
+                    settings.mysql.missing_environment_variables
+                ),
+            }
+        try:
+            return request.app.state.dashboard_repository.load(period)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except MySQLDemoError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     @app.get("/api/dam/status")
     async def dam_status(request: Request, _: UserWorkspace = Depends(current_workspace)) -> dict:
@@ -1061,7 +1117,7 @@ def create_app(
                 if any(item["size"] > MAX_JD_ARTICLE_IMAGE_BYTES for item in image_assets):
                     raise ValidationError("京东图文单张图片不能超过 5 MiB")
             if selected_platform == "jd" and selected_content_type == "video" and cover_asset:
-                if cover_asset["size"] > 5 * 1024 * 1024:
+                if cover_asset["size"] > MAX_JD_VIDEO_COVER_IMAGE_BYTES:
                     raise ValidationError("京东封面图片不能超过 5 MiB")
             request = _agent_asset_request(
                 platform=selected_platform,
@@ -1377,4 +1433,14 @@ def run() -> None:
     import uvicorn
 
     host, port = server_bind_address()
-    uvicorn.run("webapp.api.main:app", host=host, port=port, reload=False)
+    settings = WebSettings.from_environment()
+    if settings.mysql.host or settings.mysql.database or settings.mysql.user:
+        settings = replace(
+            settings,
+            mysql=prompt_for_mysql_password(settings.mysql),
+        )
+    uvicorn.run(create_app(settings), host=host, port=port, reload=False)
+
+
+if __name__ == "__main__":
+    run()

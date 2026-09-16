@@ -13,6 +13,7 @@ class LoginRequest(BaseModel):
 class BootstrapAdminRequest(BaseModel):
     username: str = Field(min_length=3, max_length=64)
     display_name: str = Field(default="", max_length=80)
+    brand_name: str = Field(default="", max_length=120)
     password: str = Field(min_length=10, max_length=256)
 
 
@@ -23,6 +24,7 @@ class RegisterUserRequest(BaseModel):
 
     username: str = Field(min_length=3, max_length=64)
     display_name: str = Field(default="", max_length=80)
+    brand_name: str = Field(default="", max_length=120)
     password: str = Field(min_length=10, max_length=256)
 
 
@@ -31,6 +33,8 @@ class UserResponse(BaseModel):
     username: str
     display_name: str
     role: str
+    brand_name: str = ""
+    brand_key: str = ""
 
 
 class AdminUserResponse(UserResponse):
@@ -44,6 +48,7 @@ class CreateUserRequest(BaseModel):
 
     username: str = Field(min_length=3, max_length=64)
     display_name: str = Field(default="", max_length=80)
+    brand_name: str = Field(default="", max_length=120)
     password: str = Field(min_length=10, max_length=256)
     role: Literal["admin", "operator"] = "operator"
 
@@ -52,6 +57,7 @@ class UpdateUserRequest(BaseModel):
     """Mutable user attributes; usernames and immutable IDs never change."""
 
     display_name: str | None = Field(default=None, max_length=80)
+    brand_name: str | None = Field(default=None, max_length=120)
     role: Literal["admin", "operator"] | None = None
     status: Literal["active", "disabled"] | None = None
 

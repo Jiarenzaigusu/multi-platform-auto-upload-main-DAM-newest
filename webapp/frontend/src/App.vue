@@ -5,6 +5,7 @@ import AgentSetupDialog from './components/AgentSetupDialog.vue'
 import AuthGate from './components/AuthGate.vue'
 import DamAssetPicker from './components/DamAssetPicker.vue'
 import AiCopyView from './features/ai-copy/AiCopyView.vue'
+import DashboardView from './features/dashboard/DashboardView.vue'
 import LlmAdapterView from './features/llm-adapter/LlmAdapterView.vue'
 import UserManagementView from './features/users/UserManagementView.vue'
 
@@ -29,6 +30,7 @@ const DRAFT_DB_VERSION = 1
 const DRAFT_VIDEO_STORE = 'videos'
 const DRAFT_VIDEO_MAX_BYTES = 100 * 1024 * 1024
 const MAX_COVER_IMAGE_BYTES = 20 * 1024 * 1024
+const JD_MAX_COVER_IMAGE_BYTES = 5 * 1024 * 1024
 const tmallCreatorDeclarationOptions = [
   '内容无需标注',
   '内容含营销信息',
@@ -565,6 +567,7 @@ const batchGroups = computed(() => {
 const visibleAccounts = computed(() => accounts.value.filter((item) => item.platform === form.platform))
 const batchAccounts = computed(() => accounts.value.filter((item) => item.platform === batchForm.platform))
 const viewTitle = computed(() => ({
+  dashboard: '数据看板',
   publish: '新建发布任务',
   'ai-copy': 'AI 文案工坊',
   'llm-adapter': 'LLM 适配器',
@@ -573,6 +576,7 @@ const viewTitle = computed(() => ({
   jobs: '任务追踪中心',
 }[activeView.value] || '智能发布中枢系统'))
 const viewEyebrow = computed(() => ({
+  dashboard: 'PERFORMANCE OVERVIEW',
   'ai-copy': 'AI COPY STUDIO',
   'llm-adapter': 'LLM ROUTING DESK',
   users: 'ACCESS DIRECTORY',
@@ -1199,8 +1203,9 @@ async function submitPublish() {
       : '图文图片仅支持 JPG、PNG 或 WebP 格式'
     return
   }
-  if (isVideo.value && form.coverImage && form.coverImage.size > MAX_COVER_IMAGE_BYTES) {
-    publishError.value = '封面图片不能超过 20 MiB'
+  const maxCoverImageBytes = isJD.value ? JD_MAX_COVER_IMAGE_BYTES : MAX_COVER_IMAGE_BYTES
+  if (isVideo.value && form.coverImage && form.coverImage.size > maxCoverImageBytes) {
+    publishError.value = isJD.value ? '京东视频封面图片不能超过 5 MiB' : '封面图片不能超过 20 MiB'
     return
   }
   if (!form.title.trim()) {
@@ -1504,6 +1509,10 @@ onBeforeUnmount(() => {
           <span>批量发布任务</span>
           <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="7" y="4" width="12" height="14" rx="2" /><path d="M15 18v2H5a2 2 0 0 1-2-2V8h4M10 9h6m-6 4h6" /></svg></span>
         </button>
+        <button class="feature-nav-entry" :class="{ active: activeView === 'dashboard' }" @click="activeView = 'dashboard'">
+          <span>数据看板</span>
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 19V9m6 10V5m6 14v-7m4 7H2" /><path d="m4 7 6-4 6 7 4-3" /></svg></span>
+        </button>
         <button class="feature-nav-entry" :class="{ active: activeView === 'llm-adapter' }" @click="activeView = 'llm-adapter'">
           <span>LLM 适配器</span>
           <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.5" /><circle cx="18" cy="6" r="2.5" /><circle cx="12" cy="18" r="2.5" /><path d="m8 7.5 2.7 7.8m5.3-7.8-2.7 7.8M8.5 6h7" /></svg></span>
@@ -1532,7 +1541,7 @@ onBeforeUnmount(() => {
           <h1>{{ viewTitle }}</h1>
         </div>
         <div class="session-actions">
-          <span><strong>{{ currentUser.display_name }}</strong><small>{{ currentUser.username }} · {{ currentUser.role }}</small></span>
+          <span><strong>{{ currentUser.display_name }}</strong><small>{{ currentUser.username }} · {{ currentUser.brand_name || '未绑定品牌' }} · {{ currentUser.role }}</small></span>
           <button
             class="agent-connection-status"
             :class="{ online: agentStatus.online, offline: !agentStatus.online && agentStatus.checked && !agentStatus.unavailable, unknown: agentStatus.unavailable || !agentStatus.checked, updates: agentUpdateAvailable }"
@@ -1543,15 +1552,17 @@ onBeforeUnmount(() => {
             <i aria-hidden="true"></i>{{ agentStatusLabel }}
           </button>
           <button class="refresh agent-windows" :class="{ updates: agentUpdateAvailable }" type="button" @click="agentSetupOpen = true">Windows 助手</button>
-          <button v-if="!['ai-copy', 'llm-adapter', 'users'].includes(activeView)" class="refresh" @click="refreshDashboard">刷新状态</button>
+          <button v-if="!['dashboard', 'ai-copy', 'llm-adapter', 'users'].includes(activeView)" class="refresh" @click="refreshDashboard">刷新状态</button>
           <button class="refresh logout" type="button" @click="logout">退出</button>
         </div>
       </header>
 
-      <p v-if="notice && !['ai-copy', 'llm-adapter'].includes(activeView)" :class="['notice', `notice-${noticeType}`]">{{ notice }}</p>
+      <p v-if="notice && !['dashboard', 'ai-copy', 'llm-adapter'].includes(activeView)" :class="['notice', `notice-${noticeType}`]">{{ notice }}</p>
+
+      <DashboardView v-if="activeView === 'dashboard'" />
 
       <AiCopyView
-        v-if="activeView === 'ai-copy'"
+        v-else-if="activeView === 'ai-copy'"
         :active="activeView === 'ai-copy'"
         :user-id="currentUser.id"
         @import-to-workbench="importAiCopyToWorkbench"
@@ -1611,7 +1622,7 @@ onBeforeUnmount(() => {
           <div v-if="isVideo" class="field cover-image-field">
             <span>自定义封面图片 <em>可选</em></span>
             <DamAssetPicker mode="cover" :limit="1" @selected="onDamCoverSelected" />
-            <input id="cover-image-file" ref="coverImageInput" class="native-file-input" type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" @change="onCoverImageChange" />
+            <input id="cover-image-file" ref="coverImageInput" class="native-file-input" type="file" :accept="isJD ? 'image/jpeg,image/png,.jpg,.jpeg,.png' : 'image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp'" @change="onCoverImageChange" />
             <label class="cover-file-picker" :class="{ selected: form.coverImage }" for="cover-image-file">
               <span class="cover-file-action">{{ form.coverImage ? '更换封面' : '选择封面图片' }}</span>
               <span class="cover-file-name">{{ form.coverImage ? form.coverImage.name : '尚未选择封面图片' }}</span>

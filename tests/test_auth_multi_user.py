@@ -208,6 +208,28 @@ class MultiUserApiTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "1-65535"):
                 server_bind_address()
 
+    def test_mysql_demo_requires_admin_and_reports_missing_configuration(self):
+        anonymous = self.client.get("/api/mysql/demo")
+        self.assertEqual(anonymous.status_code, 401, anonymous.text)
+
+        self.bootstrap_admin()
+        response = self.client.get("/api/mysql/demo")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertFalse(response.json()["configured"])
+        self.assertIn("MPAU_MYSQL_HOST", response.json()["missing_settings"])
+
+    def test_dashboard_requires_login_and_reports_missing_configuration(self):
+        anonymous = self.client.get("/api/dashboard")
+        self.assertEqual(anonymous.status_code, 401, anonymous.text)
+
+        self.bootstrap_admin()
+        response = self.client.get("/api/dashboard")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertFalse(response.json()["configured"])
+        self.assertTrue(response.json()["empty"])
+
     def test_direct_http_ip_login_preserves_session_and_csrf_flow(self):
         direct_headers = {
             "host": "10.31.108.221:8788",
@@ -219,6 +241,7 @@ class MultiUserApiTests(unittest.TestCase):
             json={
                 "username": "admin",
                 "display_name": "Administrator",
+                "brand_name": "Example Brand",
                 "password": "admin-password-123",
             },
         )
@@ -292,6 +315,7 @@ class MultiUserApiTests(unittest.TestCase):
             json={
                 "username": username,
                 "display_name": username.title(),
+                "brand_name": "Example Brand",
                 "password": password,
                 "role": role,
             },
@@ -314,6 +338,7 @@ class MultiUserApiTests(unittest.TestCase):
         username: str,
         *,
         display_name: str = "New Operator",
+        brand_name: str = "Example Brand",
         password: str = "operator-password-123",
     ) -> dict:
         """Self-register an operator and establish its application session."""
@@ -323,6 +348,7 @@ class MultiUserApiTests(unittest.TestCase):
             json={
                 "username": username,
                 "display_name": display_name,
+                "brand_name": brand_name,
                 "password": password,
             },
         )
@@ -424,13 +450,21 @@ class MultiUserApiTests(unittest.TestCase):
         self.assertEqual(self.app.state.auth_service.store.user_count(), 0)
 
         self.bootstrap_admin()
-        operator = self.register("selfservice")
+        operator = self.register("selfservice", brand_name="  Ｅｘａｍｐｌｅ   BRAND ")
         self.assertEqual(operator["role"], "operator")
+        self.assertEqual(operator["brand_name"], "Example BRAND")
+        self.assertEqual(operator["brand_key"], "example brand")
         self.assertTrue(self.client.cookies.get("mpau_session_v2"))
         self.assertTrue(self.client.cookies.get("mpau_csrf_v2"))
         self.assertEqual(
             self.client.get("/api/auth/me").json()["id"], operator["id"]
         )
+        usable = self.client.post(
+            "/api/accounts/tmall/registered-shop/check",
+            headers=self.csrf_headers(),
+        )
+        self.assertEqual(usable.status_code, 202, usable.text)
+        self.assertEqual(self.wait_for_jobs()[0]["account"], "registered-shop")
         self.assertEqual(self.client.get("/api/admin/users").status_code, 403)
 
         duplicate = self.client.post(

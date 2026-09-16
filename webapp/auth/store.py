@@ -66,6 +66,8 @@ class AuthStore:
                 id TEXT PRIMARY KEY,
                 username TEXT NOT NULL UNIQUE COLLATE NOCASE,
                 display_name TEXT NOT NULL,
+                brand_name TEXT NOT NULL DEFAULT '',
+                brand_key TEXT NOT NULL DEFAULT '',
                 password_hash TEXT NOT NULL,
                 role TEXT NOT NULL CHECK (role IN ('admin', 'operator')),
                 status TEXT NOT NULL CHECK (status IN ('active', 'disabled', 'locked')),
@@ -116,13 +118,16 @@ class AuthStore:
             connection.execute(
                 """
                 INSERT INTO users_without_viewer (
-                    id, username, display_name, password_hash, role, status,
+                    id, username, display_name, brand_name, brand_key,
+                    password_hash, role, status,
                     created_at, updated_at, last_login_at
                 )
                 SELECT
                     id,
                     username,
                     display_name,
+                    brand_name,
+                    brand_key,
                     password_hash,
                     CASE WHEN role = 'viewer' THEN 'operator' ELSE role END,
                     CASE WHEN role = 'viewer' THEN 'disabled' ELSE status END,
@@ -148,6 +153,18 @@ class AuthStore:
         with self._write_lock, self._connection() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
             self._create_users_table(connection, "users", if_not_exists=True)
+            existing_user_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(users)").fetchall()
+            }
+            if "brand_name" not in existing_user_columns:
+                connection.execute(
+                    "ALTER TABLE users ADD COLUMN brand_name TEXT NOT NULL DEFAULT ''"
+                )
+            if "brand_key" not in existing_user_columns:
+                connection.execute(
+                    "ALTER TABLE users ADD COLUMN brand_key TEXT NOT NULL DEFAULT ''"
+                )
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS sessions (
@@ -179,10 +196,15 @@ class AuthStore:
                     ON sessions(user_id);
                 CREATE INDEX IF NOT EXISTS idx_audit_user_created
                     ON audit_logs(user_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_users_brand_key
+                    ON users(brand_key);
                 """
             )
             connection.commit()
             self._remove_viewer_role(connection)
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_users_brand_key ON users(brand_key)"
+            )
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS agent_pairing_codes (
@@ -226,6 +248,8 @@ class AuthStore:
             display_name=row["display_name"],
             role=row["role"],
             status=row["status"],
+            brand_name=row["brand_name"] if "brand_name" in row.keys() else "",
+            brand_key=row["brand_key"] if "brand_key" in row.keys() else "",
         )
 
     @staticmethod
@@ -255,6 +279,8 @@ class AuthStore:
         display_name: str,
         password_hash: str,
         role: str,
+        brand_name: str = "",
+        brand_key: str = "",
     ) -> User:
         """Insert a user with an immutable random workspace identifier."""
         user_id = uuid.uuid4().hex
@@ -263,11 +289,22 @@ class AuthStore:
             connection.execute(
                 """
                 INSERT INTO users (
-                    id, username, display_name, password_hash, role, status,
+                    id, username, display_name, brand_name, brand_key,
+                    password_hash, role, status,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
                 """,
-                (user_id, username, display_name, password_hash, role, now, now),
+                (
+                    user_id,
+                    username,
+                    display_name,
+                    brand_name,
+                    brand_key,
+                    password_hash,
+                    role,
+                    now,
+                    now,
+                ),
             )
             connection.commit()
             row = connection.execute(
@@ -282,6 +319,8 @@ class AuthStore:
         username: str,
         display_name: str,
         password_hash: str,
+        brand_name: str = "",
+        brand_key: str = "",
     ) -> User:
         """Create an operator only after an active administrator exists."""
         user_id = uuid.uuid4().hex
@@ -298,11 +337,21 @@ class AuthStore:
                 connection.execute(
                     """
                     INSERT INTO users (
-                        id, username, display_name, password_hash, role, status,
+                        id, username, display_name, brand_name, brand_key,
+                        password_hash, role, status,
                         created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, 'operator', 'active', ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'operator', 'active', ?, ?)
                     """,
-                    (user_id, username, display_name, password_hash, now, now),
+                    (
+                        user_id,
+                        username,
+                        display_name,
+                        brand_name,
+                        brand_key,
+                        password_hash,
+                        now,
+                        now,
+                    ),
                 )
                 connection.commit()
             except Exception:
@@ -320,6 +369,8 @@ class AuthStore:
         username: str,
         display_name: str,
         password_hash: str,
+        brand_name: str = "",
+        brand_key: str = "",
     ) -> User:
         """Atomically create the first administrator and close bootstrap races."""
         user_id = uuid.uuid4().hex
@@ -332,11 +383,21 @@ class AuthStore:
             connection.execute(
                 """
                 INSERT INTO users (
-                    id, username, display_name, password_hash, role, status,
+                    id, username, display_name, brand_name, brand_key,
+                    password_hash, role, status,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, 'admin', 'active', ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, 'admin', 'active', ?, ?)
                 """,
-                (user_id, username, display_name, password_hash, now, now),
+                (
+                    user_id,
+                    username,
+                    display_name,
+                    brand_name,
+                    brand_key,
+                    password_hash,
+                    now,
+                    now,
+                ),
             )
             connection.commit()
             created = connection.execute(
@@ -366,6 +427,8 @@ class AuthStore:
         user_id: str,
         *,
         display_name: str | None,
+        brand_name: str | None,
+        brand_key: str | None,
         role: str | None,
         status: str | None,
     ) -> User:
@@ -396,11 +459,14 @@ class AuthStore:
             connection.execute(
                 """
                 UPDATE users
-                SET display_name = ?, role = ?, status = ?, updated_at = ?
+                SET display_name = ?, brand_name = ?, brand_key = ?,
+                    role = ?, status = ?, updated_at = ?
                 WHERE id = ?
                 """,
                 (
                     display_name if display_name is not None else current["display_name"],
+                    brand_name if brand_name is not None else current["brand_name"],
+                    brand_key if brand_key is not None else current["brand_key"],
                     next_role,
                     next_status,
                     _utc_now(),
@@ -614,7 +680,8 @@ class AuthStore:
                 SELECT
                     d.agent_id, d.user_id, d.device_name, d.system, d.version,
                     d.created_at, d.last_seen_at, d.expires_at, d.revoked_at,
-                    u.id AS id, u.username, u.display_name, u.role, u.status
+                    u.id AS id, u.username, u.display_name,
+                    u.brand_name, u.brand_key, u.role, u.status
                 FROM agent_devices d
                 JOIN users u ON u.id = d.user_id
                 WHERE d.token_hash = ?

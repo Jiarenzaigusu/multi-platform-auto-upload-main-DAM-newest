@@ -10,6 +10,7 @@ import sqlite3
 import threading
 import time
 
+from webapp.auth.brands import normalize_brand_name
 from webapp.auth.models import AgentDevice, AuthenticatedAgent, AuthenticatedSession, User
 from webapp.auth.passwords import PasswordService
 from webapp.auth.store import AuthStore
@@ -104,23 +105,34 @@ class AuthService:
             raise AuthenticationError("显示名称不能超过 80 个字符")
         return name
 
+    @staticmethod
+    def _normalize_brand(brand_name: str) -> tuple[str, str]:
+        try:
+            return normalize_brand_name(brand_name)
+        except ValueError as exc:
+            raise AuthenticationError(str(exc)) from exc
+
     def bootstrap_admin(
         self,
         *,
         username: str,
         display_name: str,
         password: str,
+        brand_name: str = "",
     ) -> User:
         if not self.setup_required():
             raise AuthenticationError("系统已经完成初始化")
         normalized = self._normalize_username(username)
         self._validate_password(password)
         name = self._normalize_display_name(display_name, normalized)
+        normalized_brand_name, brand_key = self._normalize_brand(brand_name)
         try:
             user = self.store.create_initial_user(
                 username=normalized,
                 display_name=name,
                 password_hash=self.passwords.hash(password),
+                brand_name=normalized_brand_name,
+                brand_key=brand_key,
             )
         except ValueError as exc:
             raise AuthenticationError("系统已经完成初始化") from exc
@@ -134,15 +146,19 @@ class AuthService:
         display_name: str,
         password: str,
         ip_address: str,
+        brand_name: str = "",
     ) -> User:
         """Self-register an active operator after the administrator initializes the app."""
         normalized = self._normalize_username(username)
         self._validate_password(password)
+        normalized_brand_name, brand_key = self._normalize_brand(brand_name)
         try:
             user = self.store.register_operator(
                 username=normalized,
                 display_name=self._normalize_display_name(display_name, normalized),
                 password_hash=self.passwords.hash(password),
+                brand_name=normalized_brand_name,
+                brand_key=brand_key,
             )
         except sqlite3.IntegrityError as exc:
             raise AuthenticationError("用户名已经存在") from exc
@@ -171,18 +187,22 @@ class AuthService:
         password: str,
         role: str,
         ip_address: str,
+        brand_name: str = "",
     ) -> User:
         """Provision a user and record who performed the action."""
         normalized = self._normalize_username(username)
         self._validate_password(password)
         if role not in {"admin", "operator"}:
             raise AuthenticationError("用户角色无效")
+        normalized_brand_name, brand_key = self._normalize_brand(brand_name)
         try:
             user = self.store.create_user(
                 username=normalized,
                 display_name=self._normalize_display_name(display_name, normalized),
                 password_hash=self.passwords.hash(password),
                 role=role,
+                brand_name=normalized_brand_name,
+                brand_key=brand_key,
             )
         except sqlite3.IntegrityError as exc:
             raise AuthenticationError("用户名已经存在") from exc
@@ -205,9 +225,10 @@ class AuthService:
         role: str | None,
         status: str | None,
         ip_address: str,
+        brand_name: str | None = None,
     ) -> User:
         """Change profile or access state without changing the workspace ID."""
-        if display_name is None and role is None and status is None:
+        if display_name is None and brand_name is None and role is None and status is None:
             raise AuthenticationError("至少需要修改一个用户字段")
         if display_name is not None and not display_name.strip():
             raise AuthenticationError("显示名称不能为空")
@@ -218,10 +239,16 @@ class AuthService:
         if status is not None and status not in {"active", "disabled"}:
             raise AuthenticationError("用户状态无效")
         normalized_name = display_name.strip() if display_name is not None else None
+        normalized_brand_name = None
+        brand_key = None
+        if brand_name is not None:
+            normalized_brand_name, brand_key = self._normalize_brand(brand_name)
         try:
             user = self.store.update_user(
                 user_id,
                 display_name=normalized_name,
+                brand_name=normalized_brand_name,
+                brand_key=brand_key,
                 role=role,
                 status=status,
             )

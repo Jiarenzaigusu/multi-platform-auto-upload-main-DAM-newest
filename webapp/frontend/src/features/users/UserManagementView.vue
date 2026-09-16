@@ -17,9 +17,14 @@ const resetPasswords = reactive({})
 const createForm = reactive({
   username: '',
   displayName: '',
+  brandName: '',
   password: '',
   role: 'operator',
 })
+
+function normalizeBrandName(value) {
+  return value.normalize('NFKC').trim().replace(/\s+/gu, ' ')
+}
 
 /** Load fresh user state so role and disabled-session changes are immediately visible. */
 async function loadUsers() {
@@ -46,11 +51,12 @@ async function createUser() {
       body: JSON.stringify({
         username: createForm.username.trim(),
         display_name: createForm.displayName.trim(),
+        brand_name: normalizeBrandName(createForm.brandName),
         password: createForm.password,
         role: createForm.role,
       }),
     })
-    Object.assign(createForm, { username: '', displayName: '', password: '', role: 'operator' })
+    Object.assign(createForm, { username: '', displayName: '', brandName: '', password: '', role: 'operator' })
     notice.value = '用户已创建，可以立即使用新账号登录。'
     await loadUsers()
   } catch (requestError) {
@@ -71,6 +77,7 @@ async function saveUser(user) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         display_name: user.display_name.trim(),
+        brand_name: normalizeBrandName(user.brand_name || ''),
         role: user.role,
         status: user.status,
       }),
@@ -178,6 +185,10 @@ onMounted(loadUsers)
                 <input v-model="user.display_name" maxlength="80" />
               </label>
               <label>
+                <span>绑定品牌名</span>
+                <input v-model="user.brand_name" maxlength="120" spellcheck="false" />
+              </label>
+              <label>
                 <span>角色</span>
                 <select v-model="user.role">
                   <option value="admin">管理员</option>
@@ -214,6 +225,7 @@ onMounted(loadUsers)
       <form @submit.prevent="createUser">
         <label><span>用户名</span><input v-model="createForm.username" autocomplete="off" minlength="3" maxlength="64" required placeholder="例如 zhangsan" /></label>
         <label><span>显示名称</span><input v-model="createForm.displayName" autocomplete="off" maxlength="80" placeholder="例如 张三" /></label>
+        <label><span>绑定品牌名</span><input v-model="createForm.brandName" autocomplete="organization" maxlength="120" required spellcheck="false" placeholder="例如 Nike" /></label>
         <label><span>初始密码</span><input v-model="createForm.password" autocomplete="new-password" minlength="10" maxlength="256" required type="password" /></label>
         <label><span>角色</span><select v-model="createForm.role"><option value="operator">操作员</option><option value="admin">管理员</option></select></label>
         <button :disabled="creating" type="submit">{{ creating ? '正在创建…' : '创建公司账号' }}</button>
@@ -350,7 +362,7 @@ onMounted(loadUsers)
 
 .user-profile {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(132px, .48fr) minmax(118px, .42fr);
+  grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr) minmax(132px, .42fr) minmax(118px, .38fr);
   gap: 10px;
   align-items: end;
   min-width: 0;
@@ -543,7 +555,7 @@ onMounted(loadUsers)
   }
 
   .user-profile {
-    grid-template-columns: minmax(200px, 1fr) minmax(128px, .55fr) minmax(112px, .5fr);
+    grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr) minmax(128px, .5fr) minmax(112px, .45fr);
   }
 
   .user-security {

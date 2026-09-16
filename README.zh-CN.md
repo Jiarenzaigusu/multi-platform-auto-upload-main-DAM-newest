@@ -17,7 +17,7 @@
 
 两个用户即使填写相同的店铺标识，也会解析到不同云端任务目录和不同本机 Cookie 目录。每个应用账号同时只允许连接一台本地代理；不同用户的浏览器负载由各自电脑承担，不占用云服务器 CPU 和内存。
 
-登录应用的用户仍可访问自己的云端任务和上传素材，但新登录产生的平台 Cookie 只保存在用户电脑。视频和可选的天猫自定义封面创建任务时先上传到云端，代理领取后再下载到本机临时目录，任务终态后删除单条发布的云端和本机临时副本。
+登录应用的用户仍可访问自己的云端任务和上传素材，但新登录产生的平台 Cookie 只保存在用户电脑。视频和可选的天猫/京东自定义封面创建任务时先上传到云端，代理领取后再下载到本机临时目录，任务终态后删除单条发布的云端和本机临时副本。
 
 ## 角色
 
@@ -35,7 +35,7 @@
 | 平台 | 支持字段 |
 | --- | --- |
 | 天猫 / 淘宝光合 | 视频、可选自定义封面、标题、文案、内容标签、品牌标签、最多 6 个商品 ID、活动话题、音乐、定时发布、创作者声明 |
-| 京东 / 京东京麦 | 视频与图文、标题/正文、最多 10 个商品 ID、参与话题、自主原创、定时发布、创作者声明 |
+| 京东 / 京东京麦 | 视频、可选 JPG/PNG 自定义封面与图文、标题/正文、最多 10 个商品 ID、参与话题、自主原创、定时发布、创作者声明 |
 
 创作者声明是单条和批量发布的必填项。Excel 必须使用当前模板并包含“创作者声明”列，不再对缺少该列的旧模板自动补默认值。
 
@@ -179,6 +179,74 @@ Windows 助手安装包通过 `deploy/windows/output/` 只读挂载到容器；�
 | `MPAU_MAX_UPLOAD_REQUEST_BYTES` | `21474836480` | 单个 HTTP 上传请求上限 |
 | `MPAU_MAX_MEDIA_TOTAL_BYTES` | `107374182400` | 每个用户批量素材与待执行上传的总容量上限 |
 | `MPAU_MAX_MEDIA_FILES` | `1000` | 每个用户批量素材库最多保留的文件数 |
+| `MPAU_MYSQL_HOST` | 未配置 | 新业务 MySQL 地址；服务与 MySQL 同机时使用 `127.0.0.1` |
+| `MPAU_MYSQL_PORT` | `3306` | 新业务 MySQL 端口 |
+| `MPAU_MYSQL_DATABASE` | 未配置 | 新业务数据库名 |
+| `MPAU_MYSQL_USER` | 未配置 | 新业务数据库用户 |
+| `MPAU_MYSQL_PASSWORD` | 未配置 | 新业务数据库密码；不要提交到 Git |
+| `MPAU_MYSQL_CONNECT_TIMEOUT` | `5` | MySQL 连接与读写超时秒数 |
+
+### MySQL 连通性 Demo
+
+MySQL 是可选扩展，不替换现有的 SQLite 和任务状态文件。填写上述环境变量后，先在
+运行 FastAPI 的同一个 Python 环境安装 Demo 驱动，再执行只读连通性检查：
+
+```bash
+python -m pip install -r requirements-mysql-demo.txt
+export MPAU_MYSQL_HOST='MySQL 地址'
+export MPAU_MYSQL_PORT='3306'
+export MPAU_MYSQL_DATABASE='数据库名'
+export MPAU_MYSQL_USER='数据库用户'
+python -m webapp.mysql_demo
+```
+
+命令会在终端中隐藏输入 MySQL 密码，密码不会显示或进入 Shell 历史。服务器以服务方式
+无人值守运行时，才需要通过权限受限的环境文件设置 `MPAU_MYSQL_PASSWORD`。
+
+如果要让本机运行的整个 FastAPI 服务复用这条 MySQL 连接，请保持 SSH 隧道终端运行，
+在另一个终端设置 `MPAU_MYSQL_HOST=127.0.0.1`、`MPAU_MYSQL_PORT=13306` 等参数，
+然后使用 `mpau-web`（或 `python -m webapp.api.main`）启动服务。启动时会隐藏提示一次
+MySQL 密码，并在服务生命周期内复用 `app.state.mysql_database`；后续业务模块可以从该
+服务执行查询，不需要每个功能重新创建连接。直接使用 `uvicorn webapp.api.main:app`
+时不会弹出密码提示，需提前设置 `MPAU_MYSQL_PASSWORD`。
+
+也可以用管理员账号登录后访问 `GET /api/mysql/demo`。该检查只执行
+`SELECT VERSION(), DATABASE()`，不会建表或修改数据。未配置 MySQL 时，现有服务仍可正常启动。
+
+### Movado 数据看板
+
+数据看板页面会在登录后访问 `GET /api/dashboard?period=week`，只读以下 Movado 表：
+
+- `guanghe_metrics`：周度光合数据，用于周度核心指标与渠道趋势；
+- `subscription_daily_metrics`：每日订阅/内容指标，用于日趋势和近 30 天聚合；
+- `weekly_report_summary`、`weekly_report_notes`：周报渠道拆解和运营备注。
+
+首次使用时，先将提供的 `movado_data.sql` 导入 MySQL（该文件会创建并填充
+`movado_data` 数据库），再把 `MPAU_MYSQL_DATABASE` 设置为 `movado_data`，并配置其余
+`MPAU_MYSQL_*` 连接变量。看板支持本周、上周、近 30 天；没有配置或没有数据时会显示
+明确的空态，不会用演示数字代替真实数据。
+
+例如：
+
+```bash
+mysql -u root -p < /path/to/movado_data.sql
+export MPAU_MYSQL_HOST='127.0.0.1'
+export MPAU_MYSQL_PORT='3306'
+export MPAU_MYSQL_DATABASE='movado_data'
+export MPAU_MYSQL_USER='mpau_app'
+export MPAU_MYSQL_PASSWORD='数据库密码'
+mpau-web
+```
+
+以 systemd 等方式在服务器直接运行本项目且 MySQL 也在同一台服务器时，使用
+`MPAU_MYSQL_HOST=127.0.0.1` 和 `MPAU_MYSQL_PORT=3306`。若项目在 Docker 内，
+容器中的 `127.0.0.1` 不是宿主机，应使用同一 Docker 网络内的 MySQL 服务名，或配置明确的宿主机网关地址。
+在本机测试服务器数据库时，需要选择以下一种方式：
+
+- MySQL 已安全放行本机 IP：把 `MPAU_MYSQL_HOST` 设置为服务器地址，端口设置为对外映射端口；
+- 推荐使用 SSH 隧道：先把服务器的 `127.0.0.1:3306` 映射到本机 `13306`，再设置 `MPAU_MYSQL_HOST=127.0.0.1`、`MPAU_MYSQL_PORT=13306`。
+
+宝塔面板端口不等于 MySQL 或 SSH 端口，不能用作这里的 MySQL 端口。
 
 ### Windows 助手浏览器显示尺寸
 

@@ -1256,6 +1256,8 @@ class PublishRequestValidationTests(unittest.TestCase):
         trigger.nth.return_value = surface
         file_input = MagicMock()
         file_input.wait_for = AsyncMock()
+        # 京麦接收文件后会替换原 input，实时 locator 因而读到空 FileList。
+        file_input.evaluate = AsyncMock(return_value="")
         file_input.locator.return_value = trigger
         first = MagicMock()
         first.first = file_input

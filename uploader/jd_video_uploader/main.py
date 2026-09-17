@@ -640,7 +640,9 @@ async def _jd_file_input_has_file(file_input) -> bool | None:
                 ? input.files[0].name
                 : ''"""
         )
-    except (AttributeError, TypeError):
+    except (AttributeError, TypeError, PlaywrightError):
+        # 京麦接收文件后会立即卸载或替换原 input；此时旧 locator 无法回读，
+        # 不能据此判断文件选择失败。
         return None
     return bool(selected_name)
 
@@ -710,10 +712,13 @@ async def _choose_jd_video_file(page: Page, frame: Frame, file_path: str) -> Non
             await chooser.set_files(file_path)
             selected = await _jd_file_input_has_file(file_input)
             if selected is False:
-                # The clicked wrapper can belong to a stale nested input. Keep
-                # the real input selected above as the authoritative fallback.
-                jd_logger.warning(_msg("⚠️", "京东文件选择器未回填当前视频 input，改用已绑定 input 重试"))
-                await _set_jd_video_file_and_verify(file_input, file_path)
+                # 京麦开始上传后会立刻用一个空 input 替换已选择文件的节点，
+                # 因而实时 locator 常会读到新 input 的空 FileList。文件选择器
+                # 已成功接收文件，后续由上传/封面状态轮询确认是否真正完成；
+                # 此处再次 set_input_files 会等待已卸载节点并阻断整个流程。
+                jd_logger.info(
+                    _msg("✅", "京东已接收视频文件，上传 input 已由页面重置")
+                )
             await asyncio.sleep(JD_UPLOAD_EVENT_PROPAGATION_SECONDS)
             jd_logger.info(_msg("✅", "已通过京东原生文件选择流程提交视频"))
             return

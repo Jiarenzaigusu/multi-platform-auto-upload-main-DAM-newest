@@ -1,0 +1,61 @@
+name: Build Windows Agent
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "agent-v*"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Inno Setup
+        shell: powershell
+        run: |
+          choco install innosetup --yes --no-progress
+          echo "C:\Program Files (x86)\Inno Setup 6" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Build self-contained installer
+        shell: powershell
+        run: .\deploy\windows\build-mpau-agent.ps1
+
+      - name: Verify release manifest
+        shell: powershell
+        run: |
+          $installer = "deploy/windows/output/MPAU-Agent-Setup.exe"
+          $manifestPath = "deploy/windows/output/agent-installer.json"
+
+          if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+            throw "Release manifest was not generated: $manifestPath"
+          }
+
+          $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer).Hash.ToLowerInvariant()
+          $size = (Get-Item -LiteralPath $installer).Length
+
+          if ($manifest.sha256 -ne $hash) {
+            throw "Manifest SHA-256 does not match the installer."
+          }
+
+          if ([int64]$manifest.size -ne [int64]$size) {
+            throw "Manifest size does not match the installer."
+          }
+
+          Write-Host "Verified agent release v$($manifest.version): $size bytes, $hash"
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: MPAU-Agent-Setup
+          path: |
+            deploy/windows/output/MPAU-Agent-Setup.exe
+            deploy/windows/output/MPAU-Agent-Setup.exe.sha256
+            deploy/windows/output/agent-installer.json
+          if-no-files-found: error

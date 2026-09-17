@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.venv-agent-build/
+.venv-agent-build-macos/
+venv/
+build/
+dist/
+webapp/frontend/node_modules/
+webapp/frontend/dist/
+
+# Environment / secrets — keep *.env.example tracked
+*.env
+!*.env.example
+deploy/docker/docker.env
+deploy/windows/mpau.local.ps1
+
+# Runtime data and credentials
+cookies/
+data/
+logs/
+photos/
+runtime/
+*.log
+
+# Databases / local state
+db/database.db
+*.sqlite
+*.sqlite3
+
+# Test / coverage / type-checker caches
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.ruff_cache/
+.pyright/
+
+# System / IDE
+.DS_Store
+deploy/windows/output/
+deploy/macos/output/
+Thumbs.db
+.vscode/
+.idea/
+
+# Local agent/workspace metadata
+.pi/
+
+# Large media files
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.flv
+*.wmv
+*.webm

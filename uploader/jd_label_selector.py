@@ -179,6 +179,61 @@ async def _wait_for_menu_item(frame, value: str, *, minimum_x: float | None = No
     return None, None
 
 
+async def _close_tag_menu(frame, trigger, last_option) -> None:
+    """点击标签控件外的页面空白处并等待级联菜单收起。"""
+    body = frame.locator("body")
+    try:
+        body_box = await body.bounding_box()
+    except Exception:
+        body_box = None
+    try:
+        trigger_box = await trigger.bounding_box()
+    except Exception:
+        # 选中末级标签后，部分京麦版本会重绘整个 select。
+        trigger_box = None
+
+    clicked_blank = False
+    if body_box:
+        # 优先点击控件右侧、与控件同一高度的空白区域。截图中的级联菜单
+        # 位于控件左上方，这个点既在菜单外，也不会再次触发下拉箭头。
+        y = body_box["height"] / 2
+        x = body_box["width"] - 24
+        if trigger_box:
+            y = (
+                trigger_box["y"]
+                + trigger_box["height"] / 2
+                - body_box["y"]
+            )
+            right_of_trigger = (
+                trigger_box["x"] + trigger_box["width"] + 24 - body_box["x"]
+            )
+            if right_of_trigger <= body_box["width"] - 12:
+                x = right_of_trigger
+        x = max(8, min(x, body_box["width"] - 8))
+        y = max(8, min(y, body_box["height"] - 8))
+        try:
+            await body.click(position={"x": x, "y": y}, timeout=3000)
+            clicked_blank = True
+        except Exception:
+            pass
+
+    if clicked_blank:
+        for _ in range(10):
+            try:
+                if not await last_option.count() or not await last_option.is_visible():
+                    return
+            except Exception:
+                return
+            await asyncio.sleep(0.1)
+
+    # 极窄窗口或浮层遮挡空白点击时，用 Escape 保证后续控件不被菜单覆盖。
+    try:
+        await body.press("Escape")
+    except Exception:
+        pass
+    await asyncio.sleep(0.3)
+
+
 async def select_jd_tag(
     frame,
     *,
@@ -205,6 +260,7 @@ async def select_jd_tag(
     await asyncio.sleep(0.5)
 
     minimum_x = None
+    last_option = None
     for index, part in enumerate(parts):
         option, box = await _wait_for_menu_item(
             frame,
@@ -224,9 +280,13 @@ async def select_jd_tag(
         # 保证与截图中高亮一级/二级菜单项的交互一致。
         await option.hover()
         await option.click()
+        last_option = option
         await asyncio.sleep(0.5)
         if box:
             minimum_x = box["x"] + max(20, box["width"] * 0.6)
+
+    if last_option is not None:
+        await _close_tag_menu(frame, trigger, last_option)
 
     if len(parts) == 3:
         logger.success(f"🏷️ 京东标签已选择: {' / '.join(parts)}")

@@ -28,6 +28,8 @@ class _FakeLocator:
         return self
 
     async def is_visible(self):
+        if self.name in {"兴趣标签", "居家", "健康环保家居"}:
+            return self._frame.menu_open
         return True
 
     async def bounding_box(self):
@@ -45,6 +47,10 @@ class _FakeLocator:
         self.clicks.append(kwargs)
         if self._on_click is not None:
             self._on_click(self, kwargs)
+
+    async def press(self, key):
+        if key == "Escape" and self._frame is not None:
+            self._frame.menu_open = False
 
     def locator(self, selector):
         if self._parent is not None and "ancestor::*[@role='menuitem']" in selector:
@@ -68,6 +74,7 @@ class _FakeCollection:
 class _FakeFrame:
     def __init__(self):
         self.stage = 0
+        self.menu_open = False
         self.click_order = []
         self.hovered = []
         self.trigger = _FakeLocator(
@@ -82,10 +89,21 @@ class _FakeFrame:
             on_click=self._open,
             frame=self,
         )
+        self.body = _FakeLocator(
+            "body",
+            {"x": 0, "y": 0, "width": 800, "height": 500},
+            on_click=self._close,
+            frame=self,
+        )
 
     def _open(self, _locator, _kwargs):
         self.stage = 1
+        self.menu_open = True
         self.click_order.append("arrow")
+
+    def _close(self, _locator, _kwargs):
+        self.menu_open = False
+        self.click_order.append("blank")
 
     def _choose(self, value):
         def on_click(_locator, _kwargs):
@@ -95,6 +113,8 @@ class _FakeFrame:
         return on_click
 
     def locator(self, selector):
+        if selector == "body":
+            return self.body
         if "placeholder" in selector:
             return _FakeCollection([self.trigger])
         raise AssertionError(f"unexpected frame selector: {selector}")
@@ -137,7 +157,15 @@ def test_jd_tag_selector_follows_three_cascader_columns():
         )
     )
 
-    assert frame.click_order == ["arrow", "兴趣标签", "居家", "健康环保家居"]
+    assert frame.click_order == [
+        "arrow",
+        "兴趣标签",
+        "居家",
+        "健康环保家居",
+        "blank",
+    ]
     assert frame.hovered == ["兴趣标签", "居家", "健康环保家居"]
     assert frame.container.clicks[0]["position"]["x"] == 540
+    assert frame.body.clicks[0]["position"] == {"x": 670, "y": 16}
+    assert frame.menu_open is False
     log.success.assert_called_once_with("🏷️ 京东标签已选择: 兴趣标签 / 居家 / 健康环保家居")

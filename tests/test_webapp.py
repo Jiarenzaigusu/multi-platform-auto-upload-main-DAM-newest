@@ -48,7 +48,10 @@ from webapp.api.batch_templates import build_batch_template
 from webapp.api.batch_xiaohongshu_article import parse_xiaohongshu_article_batch_workbook
 from webapp.api.batch_xiaohongshu_video import parse_xiaohongshu_video_batch_workbook
 from webapp.api.agent_tasks import AgentTaskManager
-from webapp.api.agent_batch import parse_remote_tmall_article_batch_workbook
+from webapp.api.agent_batch import (
+    parse_remote_jd_video_batch_workbook,
+    parse_remote_tmall_article_batch_workbook,
+)
 from webapp.api.main import WebSettings
 from webapp.api.batch import resolve_local_path
 from webapp.api.main import create_app as _create_app
@@ -2646,6 +2649,33 @@ class JdBatchWorkbookTests(unittest.TestCase):
 
         self.assertEqual(rows[0].request.creator_declaration, "含AI生成内容")
 
+    def test_optional_jd_tag_maps_to_local_and_agent_requests(self):
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.append(["视频路径", "标题", "京东标签"])
+        worksheet.append([
+            str(self.video),
+            "京东视频标题示例",
+            "兴趣标签 / 居家 / 健康环保家居",
+        ])
+        output = BytesIO()
+        workbook.save(output)
+        workbook.close()
+
+        local_rows = parse_jd_video_batch_workbook(
+            output.getvalue(), account="shop1", dry_run=True, headed=True
+        )
+        agent_rows = parse_remote_jd_video_batch_workbook(
+            output.getvalue(), account="shop1", dry_run=True, headed=True
+        )
+
+        for row in (*local_rows, *agent_rows):
+            self.assertEqual(row.request.jd_tag_type, "兴趣标签")
+            self.assertEqual(
+                row.request.jd_tag_path,
+                "兴趣标签 / 居家 / 健康环保家居",
+            )
+
     def test_blank_creator_declaration_is_rejected_when_column_exists(self):
         workbook = Workbook()
         worksheet = workbook.active
@@ -2887,11 +2917,11 @@ class JdBatchApiTests(unittest.TestCase):
             worksheet = workbook.active
             worksheet.append([
                 "图片文件夹路径", "标题", "正文内容", "商品ID", "参与话题",
-                "定时发布", "自主原创", "创作者声明",
+                "京东标签", "定时发布", "自主原创", "创作者声明",
             ])
             worksheet.append([
                 str(image_dir), "京东图文标题", "京东图文正文", "12345", "数码先锋",
-                "", "否", "内容无需标注",
+                "兴趣标签 / 居家 / 健康环保家居", "", "否", "内容无需标注",
             ])
             content = BytesIO()
             workbook.save(content)
@@ -2924,6 +2954,10 @@ class JdBatchApiTests(unittest.TestCase):
                 self.assertEqual(created["payload"]["content_type"], "article")
                 self.assertEqual(created["payload"]["description"], "京东图文正文")
                 self.assertEqual(created["payload"]["activity_topic"], "数码先锋")
+                self.assertEqual(
+                    created["payload"]["jd_tag_path"],
+                    "兴趣标签 / 居家 / 健康环保家居",
+                )
             finally:
                 manager.shutdown()
 

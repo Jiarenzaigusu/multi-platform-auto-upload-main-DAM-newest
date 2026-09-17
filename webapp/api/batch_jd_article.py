@@ -9,14 +9,16 @@ from webapp.api.models import JD_CREATOR_DECLARATIONS, JD_ARTICLE_IMAGE_EXTENSIO
 JD_ARTICLE_BATCH_COLUMNS = (
     ("image_folder_path", "图片文件夹路径", True), ("title", "标题", True),
     ("description", "正文内容", False), ("goods_id", "商品ID", False),
-    ("activity_topic", "参与话题", False), ("schedule", "定时发布", False), ("original", "自主原创", False),
+    ("activity_topic", "参与话题", False), ("jd_tag_path", "京东标签", False),
+    ("schedule", "定时发布", False), ("original", "自主原创", False),
     ("creator_declaration", "创作者声明", False),
 )
-JD_ARTICLE_SAMPLE_ROW = ("/Users/your-name/Pictures/jd-graphic", "夏日好物分享", "真实体验与使用场景分享。", "123456789", "数码先锋", "", "否", "内容无需标注")
+JD_ARTICLE_SAMPLE_ROW = ("/Users/your-name/Pictures/jd-graphic", "夏日好物分享", "真实体验与使用场景分享。", "123456789", "数码先锋", "兴趣标签 / 居家 / 健康环保家居", "", "否", "内容无需标注")
 JD_ARTICLE_COLUMN_ALIASES = {
     "image_folder_path": {"图片文件夹路径", "图片文件夹", "图片路径", "imagefolderpath", "images"},
     "title": {"标题", "title"}, "description": {"正文内容", "正文", "文案", "description"},
     "goods_id": {"商品id", "商品编号", "goodsid"}, "activity_topic": {"参与话题", "话题", "activitytopic"},
+    "jd_tag_path": {"京东标签", "标签路径", "三级标签", "jdtagpath", "tagpath"},
     "schedule": {"定时发布", "发布时间", "schedule"}, "original": {"自主原创", "原创", "original"},
     "creator_declaration": {"创作者声明", "内容声明", "creatordeclaration"},
 }
@@ -75,7 +77,8 @@ def parse_jd_article_batch_workbook(content: bytes, *, account: str, dry_run: bo
                 request = validate_publish_request(
                     platform="jd", account=account, content_type="article", image_paths=images, original_filename=images[0].name,
                     title=row_values["title"], description=row_values["description"], goods_id=row_values["goods_id"],
-                    activity_topic=row_values["activity_topic"], raw_schedule=row_values["schedule"],
+                    activity_topic=row_values["activity_topic"], jd_tag_path=row_values["jd_tag_path"],
+                    raw_schedule=row_values["schedule"],
                     original=original, raw_creator_declaration=row_values["creator_declaration"] or "内容无需标注",
                     dry_run=dry_run, headed=headed,
                 )

@@ -22,13 +22,15 @@ JD_VIDEO_BATCH_COLUMNS = (
     ("title", "标题", True),
     ("goods_id", "商品ID", False),
     ("activity_topic", "参与话题", False),
+    ("jd_tag_path", "京东标签", False),
     ("schedule", "定时发布", False),
     ("original", "自主原创", False),
     ("creator_declaration", "创作者声明", False),
 )
 JD_VIDEO_SAMPLE_ROW = (
     "/Users/your-name/Videos/example.mp4", "",
-    "夏季女鞋穿搭", "123456789", "数码先锋", "2030年12月31日 14点30分", "否",
+    "夏季女鞋穿搭", "123456789", "数码先锋",
+    "兴趣标签 / 居家 / 健康环保家居", "2030年12月31日 14点30分", "否",
     "内容含营销广告",
 )
 JD_VIDEO_COLUMN_ALIASES = {
@@ -37,6 +39,7 @@ JD_VIDEO_COLUMN_ALIASES = {
     "title": {"标题", "title"},
     "goods_id": {"商品id", "商品编号", "goodsid"},
     "activity_topic": {"参与话题", "话题", "activitytopic"},
+    "jd_tag_path": {"京东标签", "标签路径", "三级标签", "jdtagpath", "tagpath"},
     "schedule": {"定时发布", "发布时间", "schedule"},
     "original": {"自主原创", "原创", "original"},
     "creator_declaration": {"创作者声明", "内容声明", "creatordeclaration"},
@@ -103,6 +106,7 @@ def parse_jd_video_batch_workbook(
                     cover_image_path=cover_image_path, original_filename=video_path.name,
                     title=row_values["title"], goods_id=row_values["goods_id"],
                     activity_topic=row_values["activity_topic"],
+                    jd_tag_path=row_values["jd_tag_path"],
                     raw_schedule=row_values["schedule"], original=original,
                     raw_creator_declaration=row_values["creator_declaration"] if "creator_declaration" in positions else "内容无需标注",
                     dry_run=dry_run, headed=headed,

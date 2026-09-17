@@ -181,6 +181,7 @@ def _remote_video_request(
             brand_tag=values.get("brand_tag", ""),
             goods_id=values.get("goods_id", ""),
             activity_topic=values.get("activity_topic", ""),
+            jd_tag_path=values.get("jd_tag_path", ""),
             raw_music_name=values.get("music_name", ""),
             raw_creator_declaration=(
                 values["creator_declaration"]
@@ -307,6 +308,7 @@ def parse_remote_jd_article_batch_workbook(
                 description=values["description"],
                 goods_id=values["goods_id"],
                 activity_topic=values["activity_topic"],
+                jd_tag_path=values["jd_tag_path"],
                 raw_creator_declaration=(
                     values["creator_declaration"]
                     if "creator_declaration" in positions

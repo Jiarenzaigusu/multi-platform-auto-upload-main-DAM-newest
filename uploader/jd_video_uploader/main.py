@@ -776,7 +776,7 @@ class JDVideo(JDBaseUploader):
         :param cover_image_path: 自定义封面图片路径（可选，最大 5 MiB）
         :param goods_id: 商品 ID（可选，支持逗号、空格或换行分隔，最多 10 个）
         :param topic: 参与话题名称（可选，精确匹配后选择）
-        :param tag_type: 京东标签一级类型（可选，兴趣标签 / 体验标签）
+        :param tag_type: 京东标签一级类型（可选，兴趣标签 / 体裁标签）
         :param tag_path: 京东三级标签路径（可选，用“/”分隔）
         :param schedule: 定时发布时间（None 立即发布）
         :param original: 是否开启"自主原创"开关

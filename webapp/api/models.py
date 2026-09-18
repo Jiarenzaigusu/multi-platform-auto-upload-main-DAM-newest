@@ -72,7 +72,7 @@ JD_CREATOR_DECLARATIONS = (
 # 京东发布页“标签”控件的一级标签类型。标签类型独立于“参与话题”。
 JD_TAG_TYPES = (
     "兴趣标签",
-    "体验标签",
+    "体裁标签",
 )
 # 小红书与抖音当前不强制创作者声明；保留空值以便前端表单复用同一结构。
 SOCIAL_CREATOR_DECLARATIONS = ("",)
@@ -108,7 +108,7 @@ class PublishRequest:
     brand_tag: str              # 品牌标签（仅天猫视频/图文）
     goods_id: str               # 商品 ID 字符串（逗号分隔）
     activity_topic: str         # 参与话题（天猫活动话题 / 京东话题）
-    jd_tag_type: str             # 京东标签类型（兴趣标签 / 体验标签）
+    jd_tag_type: str             # 京东标签类型（兴趣标签 / 体裁标签）
     jd_tag_path: str             # 京东三级标签路径
     music_name: str             # 音乐名称（天猫有，京东无）
     creator_declaration: str    # 创作者声明
@@ -193,7 +193,7 @@ def parse_jd_tag_path(raw_path: str) -> tuple[str, ...]:
     if len(parts) != 3:
         raise ValidationError("京东标签请按“一级类型 / 二级分类 / 标签名称”填写")
     if parts[0] not in JD_TAG_TYPES:
-        raise ValidationError("京东标签一级类型必须是“兴趣标签”或“体验标签”")
+        raise ValidationError("京东标签一级类型必须是“兴趣标签”或“体裁标签”")
     return parts
 
 

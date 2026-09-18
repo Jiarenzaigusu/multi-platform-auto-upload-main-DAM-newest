@@ -55,7 +55,7 @@ from webapp.api.agent_batch import (
 from webapp.api.main import WebSettings
 from webapp.api.batch import resolve_local_path
 from webapp.api.main import create_app as _create_app
-from webapp.api.models import ValidationError, validate_account_name, validate_publish_request
+from webapp.api.models import ValidationError, parse_jd_tag_path, validate_account_name, validate_publish_request
 from webapp.api.platforms import (
     JdVideoUploadRequest,
     TmallArticleUploadRequest,
@@ -2923,6 +2923,14 @@ class TmallBatchApiTests(unittest.TestCase):
 
 
 class JdBatchApiTests(unittest.TestCase):
+    def test_jd_tag_types_use_genre_not_experience(self):
+        self.assertEqual(
+            parse_jd_tag_path("体裁标签 / 家装建材 / 装修记录"),
+            ("体裁标签", "家装建材", "装修记录"),
+        )
+        with self.assertRaisesRegex(ValidationError, "兴趣标签.*体裁标签"):
+            parse_jd_tag_path("体验标签 / 家装建材 / 装修记录")
+
     def test_valid_article_workbook_creates_jd_article_job(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -2989,7 +2997,7 @@ class JdBatchApiTests(unittest.TestCase):
             worksheet = workbook.active
             worksheet.append(["视频路径", "标题", "商品ID", "京东标签", "定时发布", "自主原创", "创作者声明"])
             worksheet.append([str(video), "京东视频标题示例", "12345", "兴趣标签 / 居家 / 健康环保家居", "", "是", "内容无需标注"])
-            worksheet.append([str(video), "京东夏日好物推荐", "", "体验标签 / 家装建材 / 装修记录", "", "否", "内容无需标注"])
+            worksheet.append([str(video), "京东夏日好物推荐", "", "体裁标签 / 家装建材 / 装修记录", "", "否", "内容无需标注"])
             content = BytesIO()
             workbook.save(content)
             workbook.close()
@@ -3024,7 +3032,7 @@ class JdBatchApiTests(unittest.TestCase):
                     [(payload["jd_tag_type"], payload["jd_tag_path"]) for payload in created_payloads],
                     [
                         ("兴趣标签", "兴趣标签 / 居家 / 健康环保家居"),
-                        ("体验标签", "体验标签 / 家装建材 / 装修记录"),
+                        ("体裁标签", "体裁标签 / 家装建材 / 装修记录"),
                     ],
                 )
                 for _ in range(50):

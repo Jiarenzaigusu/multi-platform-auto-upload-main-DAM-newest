@@ -6,7 +6,7 @@ import asyncio
 import re
 
 
-JD_TAG_TYPES = ("兴趣标签", "体验标签")
+JD_TAG_TYPES = ("兴趣标签", "体裁标签")
 
 
 def _split_tag_path(tag_path: str, tag_type: str) -> tuple[str, ...]:

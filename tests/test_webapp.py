@@ -2809,6 +2809,22 @@ class SocialBatchWorkbookTests(unittest.TestCase):
             finally:
                 workbook.close()
 
+    def test_jd_web_templates_are_the_path_import_assistant_templates(self):
+        template_dir = (
+            Path(__file__).resolve().parents[1]
+            / "local_agent"
+            / "assets"
+            / "tmall_path_import"
+        )
+        self.assertEqual(
+            build_batch_template("jd", "video"),
+            (template_dir / "JdVideoTemplate.xlsx").read_bytes(),
+        )
+        self.assertEqual(
+            build_batch_template("jd", "article"),
+            (template_dir / "JdArticleTemplate.xlsx").read_bytes(),
+        )
+
 
 class TmallBatchApiTests(unittest.TestCase):
     def test_valid_workbook_creates_one_job_per_excel_row(self):
@@ -2971,9 +2987,9 @@ class JdBatchApiTests(unittest.TestCase):
             video.write_bytes(b"video")
             workbook = Workbook()
             worksheet = workbook.active
-            worksheet.append(["视频路径", "标题", "商品ID", "定时发布", "自主原创", "创作者声明"])
-            worksheet.append([str(video), "京东视频标题示例", "12345", "", "是", "内容无需标注"])
-            worksheet.append([str(video), "京东夏日好物推荐", "", "", "否", "内容无需标注"])
+            worksheet.append(["视频路径", "标题", "商品ID", "京东标签", "定时发布", "自主原创", "创作者声明"])
+            worksheet.append([str(video), "京东视频标题示例", "12345", "兴趣标签 / 居家 / 健康环保家居", "", "是", "内容无需标注"])
+            worksheet.append([str(video), "京东夏日好物推荐", "", "体验标签 / 家装建材 / 装修记录", "", "否", "内容无需标注"])
             content = BytesIO()
             workbook.save(content)
             workbook.close()
@@ -3003,6 +3019,14 @@ class JdBatchApiTests(unittest.TestCase):
                 self.assertEqual([job["platform"] for job in body["jobs"]], ["jd", "jd"])
                 self.assertEqual([job["source_row"] for job in body["jobs"]], [2, 3])
                 self.assertTrue(all(job["batch_id"] == body["batch_id"] for job in body["jobs"]))
+                created_payloads = [store.get_job(job["id"])["payload"] for job in body["jobs"]]
+                self.assertEqual(
+                    [(payload["jd_tag_type"], payload["jd_tag_path"]) for payload in created_payloads],
+                    [
+                        ("兴趣标签", "兴趣标签 / 居家 / 健康环保家居"),
+                        ("体验标签", "体验标签 / 家装建材 / 装修记录"),
+                    ],
+                )
                 for _ in range(50):
                     statuses = [store.get_job(job["id"])["status"] for job in body["jobs"]]
                     if all(status == "succeeded" for status in statuses):

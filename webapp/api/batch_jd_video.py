@@ -39,7 +39,7 @@ JD_VIDEO_COLUMN_ALIASES = {
     "title": {"标题", "title"},
     "goods_id": {"商品id", "商品编号", "goodsid"},
     "activity_topic": {"参与话题", "话题", "activitytopic"},
-    "jd_tag_path": {"京东标签", "标签路径", "三级标签", "jdtagpath", "tagpath"},
+    "jd_tag_path": {"京东标签", "标签", "标签路径", "三级标签", "jdtagpath", "tagpath"},
     "schedule": {"定时发布", "发布时间", "schedule"},
     "original": {"自主原创", "原创", "original"},
     "creator_declaration": {"创作者声明", "内容声明", "creatordeclaration"},

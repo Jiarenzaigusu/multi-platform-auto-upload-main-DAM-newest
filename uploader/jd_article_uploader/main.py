@@ -21,6 +21,7 @@ from uploader.jd_session import JdBrowserSession
 from utils.log import jd_logger
 from utils.clipboard import dispatch_paste
 from uploader.jd_label_selector import select_jd_tag
+from uploader.jd_schedule_selector import select_jd_time_value
 
 JD_GRAPHIC_URL = "https://dr.jd.com/jm/#/n/publish-graphic.html?platform=jm-pop"
 JD_AUTH_HOSTS = {"passport.shop.jd.com", "passport.jd.com", "safe.jd.com"}
@@ -407,22 +408,34 @@ class JDArticle:
             raise ValueError(f"京东京麦当前不允许选择定时日期 {target_date}。当前可点击范围约为 {state['first_enabled']} 到 {state['last_enabled']}。")
         await frame.locator(f'td.jd-picker-cell[title="{target_date}"]').first.click()
         await asyncio.sleep(.5)
-        columns = frame.locator('.jd-picker-time-panel-column')
-        hour = columns.nth(0).locator(f'li.jd-picker-time-panel-cell:has-text("{target_hour:02d}")').first
-        minute = columns.nth(1).locator(f'li.jd-picker-time-panel-cell:has-text("{target_minute:02d}")').first
-        await hour.scroll_into_view_if_needed()
-        await hour.click()
-        await minute.scroll_into_view_if_needed()
-        await minute.click()
-        confirm = frame.locator('.jd-picker-datetime-panel').locator('button').filter(has_text="确定").first
-        if not await confirm.count():
-            confirm = frame.locator('.jd-picker-ok button').first
-        await confirm.click()
-        await asyncio.sleep(.8)
-        actual = (await date_input.input_value()).strip()
-        if actual != expected_value:
-            raise RuntimeError(f"图文定时发布时间设置后校验失败：期望 {expected_value}，页面实际 {actual!r}。")
-        jd_logger.success(f"📅 图文定时发布时间已设置: {actual}")
+        actual = ""
+        for attempt in range(1, 4):
+            if attempt > 1:
+                jd_logger.warning(f"🕐 图文页面未接受目标时间，正在进行第 {attempt} 次精确选择")
+                await date_input.click()
+                await frame.locator('.jd-picker-datetime-panel:visible').wait_for(state="visible", timeout=5000)
+                target_cell = frame.locator('.jd-picker-datetime-panel:visible').locator(f'td.jd-picker-cell[title="{target_date}"]').first
+                if await target_cell.count() and await target_cell.is_visible():
+                    await target_cell.click()
+                    await asyncio.sleep(.3)
+
+            visible_panel = frame.locator('.jd-picker-datetime-panel:visible').first
+            columns = visible_panel.locator('.jd-picker-time-panel-column')
+            await select_jd_time_value(columns.nth(0), target_hour, "小时")
+            await select_jd_time_value(columns.nth(1), target_minute, "分钟")
+            confirm = visible_panel.locator('button').filter(has_text="确定").first
+            if not await confirm.count():
+                confirm = frame.locator('.jd-picker-ok button').first
+            await confirm.click()
+            await asyncio.sleep(.8)
+            actual = (await date_input.input_value()).strip()
+            if actual == expected_value:
+                jd_logger.success(f"📅 图文定时发布时间已设置: {actual}")
+                return
+
+        raise RuntimeError(
+            f"图文定时发布时间设置后校验失败：期望 {expected_value}，页面实际 {actual!r}。已重试 3 次。"
+        )
 
     async def _handle_captcha(self, frame: Frame) -> None:
         """与视频发布一致：检测到京东验证码后等待人工在可见浏览器完成。"""

@@ -42,6 +42,7 @@ from uploader.jd_session import JdBrowserSession
 from utils.log import jd_logger
 from utils.clipboard import dispatch_paste
 from uploader.jd_label_selector import select_jd_tag
+from uploader.jd_schedule_selector import select_jd_time_value
 
 # 京东京麦发布中心 URL，用于 Cookie 校验与登录入口
 JD_POST_CENTER_URL = "https://dr.jd.com/jm/#/n/post-center.html"
@@ -1596,36 +1597,36 @@ class JDVideo(JDBaseUploader):
         await asyncio.sleep(0.5)
         jd_logger.info(_msg("📅", f"已选择日期: {target_date}"))
 
-        # 设小时和分钟。两列 ul 分别是小时（24 个 li）和分钟（60 个 li）
-        time_panel = frame.locator('.jd-picker-time-panel-column')
-        hour_col, minute_col = time_panel.nth(0), time_panel.nth(1)
+        actual = ""
+        for attempt in range(1, 4):
+            if attempt > 1:
+                jd_logger.warning(_msg("🕐", f"页面未接受目标时间，正在进行第 {attempt} 次精确选择"))
+                await date_input.click()
+                await frame.locator('.jd-picker-datetime-panel:visible').wait_for(state="visible", timeout=5000)
+                target_cell = frame.locator('.jd-picker-datetime-panel:visible').locator(f'td.jd-picker-cell[title="{target_date}"]').first
+                if await target_cell.count() and await target_cell.is_visible():
+                    await target_cell.click()
+                    await asyncio.sleep(0.3)
 
-        hour_li = hour_col.locator(f'li.jd-picker-time-panel-cell:has-text("{target_hour:02d}")').first
-        await hour_li.scroll_into_view_if_needed()
-        await hour_li.click()
-        jd_logger.info(_msg("🕐", f"已选择小时: {target_hour:02d}"))
-        await asyncio.sleep(0.3)
+            visible_panel = frame.locator('.jd-picker-datetime-panel:visible').first
+            time_panel = visible_panel.locator('.jd-picker-time-panel-column')
+            await select_jd_time_value(time_panel.nth(0), target_hour, "小时")
+            await select_jd_time_value(time_panel.nth(1), target_minute, "分钟")
+            jd_logger.info(_msg("🕐", f"已精确选择时间: {target_hour:02d}:{target_minute:02d}"))
 
-        minute_li = minute_col.locator(f'li.jd-picker-time-panel-cell:has-text("{target_minute:02d}")').first
-        await minute_li.scroll_into_view_if_needed()
-        await minute_li.click()
-        jd_logger.info(_msg("🕐", f"已选择分钟: {target_minute:02d}"))
-        await asyncio.sleep(0.3)
+            confirm_btn = visible_panel.locator('button').filter(has_text="确定").first
+            if not await confirm_btn.count():
+                confirm_btn = frame.locator('.jd-picker-ok button').first
+            await confirm_btn.click()
+            await asyncio.sleep(0.8)
+            actual = (await date_input.input_value()).strip()
+            if actual == expected_value:
+                jd_logger.success(_msg("📅", f"定时发布时间已设置: {actual}"))
+                return
 
-        # 点击日期面板右下角的「确定」按钮
-        confirm_btn = frame.locator('.jd-picker-datetime-panel').locator('button').filter(has_text="确定").first
-        if not await confirm_btn.count():
-            confirm_btn = frame.locator('.jd-picker-ok button').first
-        await confirm_btn.click()
-        await asyncio.sleep(0.8)
-
-        # 校验 input.value 与期望值一致
-        actual = (await date_input.input_value()).strip()
-        if actual != expected_value:
-            raise RuntimeError(
-                f"定时发布时间设置后校验失败：期望 {expected_value}，页面实际 {actual!r}。已停止发布以避免错误时间。"
-            )
-        jd_logger.success(_msg("📅", f"定时发布时间已设置: {actual}"))
+        raise RuntimeError(
+            f"定时发布时间设置后校验失败：期望 {expected_value}，页面实际 {actual!r}。已重试 3 次并停止发布以避免错误时间。"
+        )
 
     async def _handle_captcha(self, frame) -> None:
         """检测验证码弹窗，若出现则暂停并等待用户手动完成。

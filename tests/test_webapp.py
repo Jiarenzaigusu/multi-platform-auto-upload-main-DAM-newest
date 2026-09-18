@@ -52,6 +52,7 @@ from webapp.api.agent_batch import (
     parse_remote_jd_video_batch_workbook,
     parse_remote_tmall_article_batch_workbook,
 )
+from uploader.jd_schedule_selector import select_jd_time_value
 from webapp.api.main import WebSettings
 from webapp.api.batch import resolve_local_path
 from webapp.api.main import create_app as _create_app
@@ -2923,6 +2924,25 @@ class TmallBatchApiTests(unittest.TestCase):
 
 
 class JdBatchApiTests(unittest.TestCase):
+    def test_jd_time_selector_uses_exact_title_match(self):
+        column = MagicMock()
+        candidates = MagicMock()
+        option = MagicMock()
+        candidates.count = AsyncMock(return_value=1)
+        candidates.first = option
+        option.scroll_into_view_if_needed = AsyncMock()
+        option.click = AsyncMock()
+        column.locator.return_value = candidates
+
+        with patch("uploader.jd_schedule_selector.asyncio.sleep", new=AsyncMock()):
+            asyncio.run(select_jd_time_value(column, 30, "分钟"))
+
+        selector = column.locator.call_args.args[0]
+        self.assertIn('title="30"', selector)
+        self.assertNotIn(":has-text", selector)
+        option.scroll_into_view_if_needed.assert_awaited_once()
+        option.click.assert_awaited_once()
+
     def test_jd_tag_types_use_genre_not_experience(self):
         self.assertEqual(
             parse_jd_tag_path("体裁标签 / 家装建材 / 装修记录"),

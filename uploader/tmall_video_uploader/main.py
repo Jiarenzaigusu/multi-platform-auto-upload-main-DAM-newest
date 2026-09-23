@@ -23,6 +23,7 @@ from io import BytesIO
 import os
 import re
 import shutil
+import sys
 import tempfile
 import uuid
 from datetime import datetime
@@ -1077,7 +1078,8 @@ class TmallVideo(TmallBaseUploader):
         await desc_editor.click()
 
         # 清空已有内容（草稿可能自动保留上次输入）
-        await page.keyboard.press("Meta+A")
+        select_all = "Meta+A" if os.name == "posix" and sys.platform == "darwin" else "Control+A"
+        await page.keyboard.press(select_all)
         await page.keyboard.press("Delete")
 
         # 输入描述文本

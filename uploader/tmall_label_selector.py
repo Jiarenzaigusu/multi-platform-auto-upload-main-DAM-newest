@@ -61,16 +61,29 @@ async def focus_tmall_editor_end(frame, page):
                 return true;
             }"""
         )
+        # A trusted keyboard event is necessary here. Cangjie keeps its own
+        # cached range and does not reliably persist a range created only by
+        # JavaScript; that leaves the visible copy selected and label mode has
+        # no insertion point when the toolbar takes focus.
+        shortcut = "Meta+ArrowDown" if sys.platform == "darwin" else "Control+End"
+        await page.keyboard.press(shortcut)
         # Let Cangjie's selectionchange handler persist this caret before a
         # toolbar click temporarily takes focus away from the editor.
         await asyncio.sleep(0.1)
+        selection_ok = await editor.evaluate(
+            """element => {
+                const selection = window.getSelection();
+                return !!selection && selection.rangeCount === 1
+                    && selection.isCollapsed
+                    && element.contains(selection.anchorNode);
+            }"""
+        )
+        if selection_ok is False:
+            raise RuntimeError("无法将天猫文案光标定位到末尾")
     except (AttributeError, TypeError):
         # Older wrappers/test doubles may not expose locator.evaluate.
-        await page.keyboard.press("ArrowRight")
         shortcut = "Meta+ArrowDown" if sys.platform == "darwin" else "Control+End"
         await page.keyboard.press(shortcut)
-        # Move out of a possible trailing structured node into the editable tail.
-        await page.keyboard.press("ArrowRight")
     return editor
 
 

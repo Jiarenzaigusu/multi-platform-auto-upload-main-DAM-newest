@@ -716,9 +716,7 @@ class PublishRequestValidationTests(unittest.TestCase):
             page.keyboard.press.await_args_list,
             [
                 call("Escape"),
-                call("ArrowRight"),
                 call("Control+End"),
-                call("ArrowRight"),
             ],
         )
 
@@ -728,7 +726,7 @@ class PublishRequestValidationTests(unittest.TestCase):
         editor = MagicMock()
         editor.wait_for = AsyncMock()
         editor.click = AsyncMock()
-        editor.evaluate = AsyncMock(return_value=True)
+        editor.evaluate = AsyncMock(side_effect=[True, True])
         editor_query = MagicMock()
         editor_query.first = editor
         frame = MagicMock()
@@ -739,8 +737,11 @@ class PublishRequestValidationTests(unittest.TestCase):
         result = asyncio.run(focus_tmall_editor_end(frame, page))
 
         self.assertIs(result, editor)
-        editor.evaluate.assert_awaited_once()
-        page.keyboard.press.assert_awaited_once_with("Escape")
+        self.assertEqual(editor.evaluate.await_count, 2)
+        self.assertEqual(
+            page.keyboard.press.await_args_list,
+            [call("Escape"), call("Control+End")],
+        )
 
     def test_tmall_content_tag_enters_toolbar_mode_before_typing_value(self):
         from uploader.tmall_label_selector import type_tmall_content_tag

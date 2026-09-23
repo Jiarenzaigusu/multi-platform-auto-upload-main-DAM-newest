@@ -21,6 +21,7 @@ from patchright.async_api import (
 
 from uploader.errors import PublishResultUncertainError
 from uploader.tmall_label_selector import (
+    focus_tmall_editor_end,
     select_tmall_label_suggestion,
     type_tmall_content_tag,
 )
@@ -568,6 +569,9 @@ class TmallArticle:
             await page.keyboard.type(desc[:1000])
             tmall_logger.info(_msg("✍️", f"内容描述已填写: {desc[:30]}"))
 
+        # 先将仓颉记录的选区固定在文案末尾；每个标签输入前还会
+        # 再次校正，避免工具栏焦点切换恢复到旧光标位置。
+        await focus_tmall_editor_end(frame, page)
         tags = self._normalized_tags()
         for index, tag in enumerate(tags, start=1):
             tmall_logger.info(_msg("🏷️", f"小人正在添加第 {index} 个内容标签: #{tag}"))

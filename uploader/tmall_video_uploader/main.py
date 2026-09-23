@@ -37,6 +37,7 @@ from patchright.async_api import (
 
 from uploader.errors import PublishResultUncertainError
 from uploader.tmall_label_selector import (
+    focus_tmall_editor_end,
     select_tmall_label_suggestion,
     type_tmall_content_tag,
 )
@@ -1085,6 +1086,9 @@ class TmallVideo(TmallBaseUploader):
             await page.keyboard.type(desc[:1000])
             tmall_logger.info(_msg("✍️", f"视频描述已填写: {desc[:30]}"))
 
+        # 文案输入后立即把仓颉的内部选区同步到末尾，防止第一个
+        # 标签在工具栏抢走焦点后回落到文案中间。
+        await focus_tmall_editor_end(frame, page)
         await self._add_content_tags(frame, page)
 
     async def _select_label_suggestion(

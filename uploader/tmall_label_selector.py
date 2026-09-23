@@ -25,16 +25,45 @@ async def focus_tmall_editor_end(frame, page):
     try:
         await editor.evaluate(
             """element => {
-                element.focus();
+                element.focus({ preventScroll: true });
                 const selection = window.getSelection();
                 const range = document.createRange();
-                range.selectNodeContents(element);
-                range.collapse(false);
+                const walker = document.createTreeWalker(
+                    element,
+                    NodeFilter.SHOW_TEXT,
+                    {
+                        acceptNode(node) {
+                            const parent = node.parentElement;
+                            if (!parent || parent.closest('[contenteditable="false"]')) {
+                                return NodeFilter.FILTER_REJECT;
+                            }
+                            return NodeFilter.FILTER_ACCEPT;
+                        }
+                    }
+                );
+                let lastText = null;
+                for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+                    lastText = node;
+                }
+                if (lastText) {
+                    range.setStart(lastText, lastText.data.length);
+                } else {
+                    // Keep the caret *inside* Cangjie. Collapsing a range after
+                    // the editor's final child can be normalised to its cached
+                    // (stale) selection when the label toolbar receives focus.
+                    const tail = document.createTextNode('');
+                    element.appendChild(tail);
+                    range.setStart(tail, 0);
+                }
+                range.collapse(true);
                 selection.removeAllRanges();
                 selection.addRange(range);
                 return true;
             }"""
         )
+        # Let Cangjie's selectionchange handler persist this caret before a
+        # toolbar click temporarily takes focus away from the editor.
+        await asyncio.sleep(0.1)
     except (AttributeError, TypeError):
         # Older wrappers/test doubles may not expose locator.evaluate.
         await page.keyboard.press("ArrowRight")

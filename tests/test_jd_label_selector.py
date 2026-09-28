@@ -28,8 +28,11 @@ class _FakeLocator:
         return self
 
     async def is_visible(self):
-        if self.name in {"兴趣标签", "居家", "健康环保家居"}:
+        if self.name in {"兴趣标签", "居家", "健康环保家居", "确定"}:
             return self._frame.menu_open
+        return True
+
+    async def is_enabled(self):
         return True
 
     async def bounding_box(self):
@@ -95,6 +98,12 @@ class _FakeFrame:
             on_click=self._close,
             frame=self,
         )
+        self.confirm = _FakeLocator(
+            "确定",
+            {"x": 300, "y": 180, "width": 64, "height": 32},
+            on_click=self._confirm,
+            frame=self,
+        )
 
     def _open(self, _locator, _kwargs):
         self.stage = 1
@@ -104,6 +113,10 @@ class _FakeFrame:
     def _close(self, _locator, _kwargs):
         self.menu_open = False
         self.click_order.append("blank")
+
+    def _confirm(self, _locator, _kwargs):
+        self.menu_open = False
+        self.click_order.append("确定")
 
     def _choose(self, value):
         def on_click(_locator, _kwargs):
@@ -144,6 +157,11 @@ class _FakeFrame:
         )
         return _FakeCollection([candidate])
 
+    def get_by_role(self, role, *, name, exact):
+        assert role == "button"
+        assert exact is True
+        return _FakeCollection([self.confirm] if name == "确定" else [])
+
 
 def test_jd_tag_selector_follows_three_cascader_columns():
     frame = _FakeFrame()
@@ -162,11 +180,11 @@ def test_jd_tag_selector_follows_three_cascader_columns():
         "兴趣标签",
         "居家",
         "健康环保家居",
-        "blank",
+        "确定",
     ]
     assert frame.hovered == ["兴趣标签", "居家", "健康环保家居"]
     assert frame.container.clicks[0]["position"]["x"] == 540
-    assert frame.body.clicks[0]["position"] == {"x": 670, "y": 16}
+    assert len(frame.confirm.clicks) == 1
     assert frame.menu_open is False
     log.success.assert_called_once_with("🏷️ 京东标签已选择: 兴趣标签 / 居家 / 健康环保家居")
 

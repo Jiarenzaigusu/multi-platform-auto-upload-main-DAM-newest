@@ -621,6 +621,7 @@ class PublishRequestValidationTests(unittest.TestCase):
         editor = MagicMock()
         editor.wait_for = AsyncMock()
         editor.click = AsyncMock()
+        editor.evaluate = AsyncMock(side_effect=[True, True])
         editor.inner_html = AsyncMock(
             side_effect=["<p>123</p>", "<p>123Gap</p>", "<p>123<span>Gap</span></p>"]
         )
@@ -655,8 +656,6 @@ class PublishRequestValidationTests(unittest.TestCase):
             page.keyboard.press.await_args_list,
             [
                 call("Escape"),
-                call("ArrowRight"),
-                call("Meta+ArrowDown"),
                 call("ArrowRight"),
             ],
         )
@@ -741,9 +740,10 @@ class PublishRequestValidationTests(unittest.TestCase):
 
         self.assertIs(result, editor)
         self.assertEqual(editor.evaluate.await_count, 2)
+        self.assertIn("range.selectNodeContents(element)", editor.evaluate.await_args_list[0].args[0])
         self.assertEqual(
             page.keyboard.press.await_args_list,
-            [call("Escape"), call("Control+End")],
+            [call("Escape"), call("ArrowRight")],
         )
 
     def test_tmall_content_tag_enters_toolbar_mode_before_typing_value(self):

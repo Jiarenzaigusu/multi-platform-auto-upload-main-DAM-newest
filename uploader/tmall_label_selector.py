@@ -28,45 +28,22 @@ async def focus_tmall_editor_end(frame, page):
                 element.focus({ preventScroll: true });
                 const selection = window.getSelection();
                 const range = document.createRange();
-                const walker = document.createTreeWalker(
-                    element,
-                    NodeFilter.SHOW_TEXT,
-                    {
-                        acceptNode(node) {
-                            const parent = node.parentElement;
-                            if (!parent || parent.closest('[contenteditable="false"]')) {
-                                return NodeFilter.FILTER_REJECT;
-                            }
-                            return NodeFilter.FILTER_ACCEPT;
-                        }
-                    }
-                );
-                let lastText = null;
-                for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-                    lastText = node;
-                }
-                if (lastText) {
-                    range.setStart(lastText, lastText.data.length);
-                } else {
-                    // Keep the caret *inside* Cangjie. Collapsing a range after
-                    // the editor's final child can be normalised to its cached
-                    // (stale) selection when the label toolbar receives focus.
-                    const tail = document.createTextNode('');
-                    element.appendChild(tail);
-                    range.setStart(tail, 0);
-                }
-                range.collapse(true);
+                // A converted label is a contenteditable=false structured node.
+                // Looking for the last editable text node would place the caret
+                // before that label, so the next toolbar click has no valid
+                // insertion position. Collapse at the root's true DOM end.
+                range.selectNodeContents(element);
+                range.collapse(false);
                 selection.removeAllRanges();
                 selection.addRange(range);
                 return true;
             }"""
         )
-        # A trusted keyboard event is necessary here. Cangjie keeps its own
-        # cached range and does not reliably persist a range created only by
-        # JavaScript; that leaves the visible copy selected and label mode has
-        # no insertion point when the toolbar takes focus.
-        shortcut = "Meta+ArrowDown" if sys.platform == "darwin" else "Control+End"
-        await page.keyboard.press(shortcut)
+        # A trusted keyboard event makes Cangjie persist selectionchange.  Do
+        # not use Control+End here: after the first structured label Chromium
+        # can move it back into the preceding visual paragraph. ArrowRight is
+        # a no-op at the true end while still producing the trusted event.
+        await page.keyboard.press("ArrowRight")
         # Let Cangjie's selectionchange handler persist this caret before a
         # toolbar click temporarily takes focus away from the editor.
         await asyncio.sleep(0.1)

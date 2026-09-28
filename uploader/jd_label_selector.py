@@ -123,7 +123,32 @@ async def _find_tag_trigger(frame):
             return trigger
 
     candidates = frame.get_by_text("请选择标签", exact=True)
-    return await _first_visible(candidates)
+    trigger = await _first_visible(candidates)
+    if trigger is not None:
+        return trigger
+
+    # 选中第一条后 placeholder 可能不再显示，第二条不能继续依赖“请选择标签”。
+    # 从“标签”字段所在表单容器反向找到同一控件中的 input/combobox。
+    labels = frame.get_by_text("标签", exact=True)
+    for index in range(await labels.count()):
+        label = labels.nth(index)
+        if not await label.is_visible():
+            continue
+        for ancestor_selector in (
+            "xpath=ancestor::label[1]",
+            "xpath=ancestor::*[contains(@class, 'form-item')][1]",
+            "xpath=ancestor::*[contains(@class, 'field')][1]",
+        ):
+            ancestor = label.locator(ancestor_selector)
+            if not await ancestor.count() or not await ancestor.is_visible():
+                continue
+            controls = ancestor.locator(
+                "input, [role='combobox'], [class*='cascader'], [class*='select-selector']"
+            )
+            trigger = await _first_visible(controls)
+            if trigger is not None:
+                return trigger
+    return None
 
 
 async def _click_tag_trigger(trigger, *, prefer_input: bool = False) -> None:
@@ -192,59 +217,50 @@ async def _wait_for_menu_item(frame, value: str, *, minimum_x: float | None = No
     return None, None
 
 
-async def _close_tag_menu(frame, trigger, last_option) -> None:
-    """点击标签控件外的页面空白处并等待级联菜单收起。"""
-    body = frame.locator("body")
+async def _confirm_tag_menu(frame, last_option) -> None:
+    """点击级联浮层的确认按钮，并确认浮层已经真正关闭。"""
+    # 京东标签是多选级联控件，末级 checkbox 只改变临时选择；必须点击浮层
+    # 的确认按钮才会提交。按末级选项与按钮的位置选择最近的可见确认按钮，
+    # 避免误点发布表单中其它同名按钮。
     try:
-        body_box = await body.bounding_box()
+        option_box = await last_option.bounding_box()
     except Exception:
-        body_box = None
-    try:
-        trigger_box = await trigger.bounding_box()
-    except Exception:
-        # 选中末级标签后，部分京麦版本会重绘整个 select。
-        trigger_box = None
+        option_box = None
 
-    clicked_blank = False
-    if body_box:
-        # 优先点击控件右侧、与控件同一高度的空白区域。截图中的级联菜单
-        # 位于控件左上方，这个点既在菜单外，也不会再次触发下拉箭头。
-        y = body_box["height"] / 2
-        x = body_box["width"] - 24
-        if trigger_box:
-            y = (
-                trigger_box["y"]
-                + trigger_box["height"] / 2
-                - body_box["y"]
-            )
-            right_of_trigger = (
-                trigger_box["x"] + trigger_box["width"] + 24 - body_box["x"]
-            )
-            if right_of_trigger <= body_box["width"] - 12:
-                x = right_of_trigger
-        x = max(8, min(x, body_box["width"] - 8))
-        y = max(8, min(y, body_box["height"] - 8))
+    confirm_candidates = []
+    for name in ("确定", "确认", "完成"):
+        buttons = frame.get_by_role("button", name=name, exact=True)
+        for index in range(await buttons.count()):
+            button = buttons.nth(index)
+            if not await button.is_visible() or not await button.is_enabled():
+                continue
+            box = await button.bounding_box()
+            if not box:
+                continue
+            if option_box:
+                distance = abs(box["x"] - option_box["x"]) + abs(
+                    box["y"] - option_box["y"]
+                )
+            else:
+                distance = index
+            confirm_candidates.append((distance, button))
+
+    if not confirm_candidates:
+        raise RuntimeError("京东标签选择完成后未找到浮层的“确定”按钮")
+
+    _, confirm_button = min(confirm_candidates, key=lambda item: item[0])
+    await confirm_button.scroll_into_view_if_needed()
+    await confirm_button.click()
+
+    for _ in range(30):
         try:
-            await body.click(position={"x": x, "y": y}, timeout=3000)
-            clicked_blank = True
-        except Exception:
-            pass
-
-    if clicked_blank:
-        for _ in range(10):
-            try:
-                if not await last_option.count() or not await last_option.is_visible():
-                    return
-            except Exception:
+            if not await last_option.count() or not await last_option.is_visible():
                 return
-            await asyncio.sleep(0.1)
-
-    # 极窄窗口或浮层遮挡空白点击时，用 Escape 保证后续控件不被菜单覆盖。
-    try:
-        await body.press("Escape")
-    except Exception:
-        pass
-    await asyncio.sleep(0.3)
+        except Exception:
+            # 浮层卸载后旧 locator 可能失效，也表示确认步骤已经结束。
+            return
+        await asyncio.sleep(0.1)
+    raise RuntimeError("已点击京东标签“确定”，但标签选择浮层没有关闭")
 
 
 async def _select_jd_tag_path(
@@ -299,7 +315,7 @@ async def _select_jd_tag_path(
             minimum_x = box["x"] + max(20, box["width"] * 0.6)
 
     if last_option is not None:
-        await _close_tag_menu(frame, trigger, last_option)
+        await _confirm_tag_menu(frame, last_option)
 
     if len(parts) == 3:
         logger.success(f"🏷️ 京东标签已选择: {' / '.join(parts)}")

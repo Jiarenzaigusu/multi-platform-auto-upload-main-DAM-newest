@@ -217,50 +217,26 @@ async def _wait_for_menu_item(frame, value: str, *, minimum_x: float | None = No
     return None, None
 
 
-async def _confirm_tag_menu(frame, last_option) -> None:
-    """点击级联浮层的确认按钮，并确认浮层已经真正关闭。"""
-    # 京东标签是多选级联控件，末级 checkbox 只改变临时选择；必须点击浮层
-    # 的确认按钮才会提交。按末级选项与按钮的位置选择最近的可见确认按钮，
-    # 避免误点发布表单中其它同名按钮。
-    try:
-        option_box = await last_option.bounding_box()
-    except Exception:
-        option_box = None
-
-    confirm_candidates = []
-    for name in ("确定", "确认", "完成"):
-        buttons = frame.get_by_role("button", name=name, exact=True)
-        for index in range(await buttons.count()):
-            button = buttons.nth(index)
-            if not await button.is_visible() or not await button.is_enabled():
-                continue
-            box = await button.bounding_box()
-            if not box:
-                continue
-            if option_box:
-                distance = abs(box["x"] - option_box["x"]) + abs(
-                    box["y"] - option_box["y"]
-                )
-            else:
-                distance = index
-            confirm_candidates.append((distance, button))
-
-    if not confirm_candidates:
-        raise RuntimeError("京东标签选择完成后未找到浮层的“确定”按钮")
-
-    _, confirm_button = min(confirm_candidates, key=lambda item: item[0])
-    await confirm_button.scroll_into_view_if_needed()
-    await confirm_button.click()
+async def _close_tag_menu(frame, last_option) -> None:
+    """点击级联浮层外的稳定区域，并确认浮层已经真正关闭。"""
+    # 京东标签没有确认按钮，末级选中后点击任意浮层外区域即提交。优先点击
+    # 发布表单的标题输入框；它是视频和图文页面都有的稳定控件，且明确不属于
+    # 标签 portal，避免用推算坐标误点仍覆盖在标签菜单内的区域。
+    title = frame.locator("#title")
+    if not await title.count() or not await title.is_visible():
+        raise RuntimeError("京东标签选择完成后未找到可用于关闭浮层的标题区域")
+    await title.scroll_into_view_if_needed()
+    await title.click(force=True, timeout=3000)
 
     for _ in range(30):
         try:
             if not await last_option.count() or not await last_option.is_visible():
                 return
         except Exception:
-            # 浮层卸载后旧 locator 可能失效，也表示确认步骤已经结束。
+            # 浮层卸载后旧 locator 可能失效，也表示关闭步骤已经结束。
             return
         await asyncio.sleep(0.1)
-    raise RuntimeError("已点击京东标签“确定”，但标签选择浮层没有关闭")
+    raise RuntimeError("已点击京东标签浮层外区域，但标签选择界面没有关闭")
 
 
 async def _select_jd_tag_path(
@@ -315,7 +291,7 @@ async def _select_jd_tag_path(
             minimum_x = box["x"] + max(20, box["width"] * 0.6)
 
     if last_option is not None:
-        await _confirm_tag_menu(frame, last_option)
+        await _close_tag_menu(frame, last_option)
 
     if len(parts) == 3:
         logger.success(f"🏷️ 京东标签已选择: {' / '.join(parts)}")

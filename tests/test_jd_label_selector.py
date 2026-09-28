@@ -28,7 +28,7 @@ class _FakeLocator:
         return self
 
     async def is_visible(self):
-        if self.name in {"兴趣标签", "居家", "健康环保家居", "确定"}:
+        if self.name in {"兴趣标签", "居家", "健康环保家居"}:
             return self._frame.menu_open
         return True
 
@@ -98,10 +98,10 @@ class _FakeFrame:
             on_click=self._close,
             frame=self,
         )
-        self.confirm = _FakeLocator(
-            "确定",
-            {"x": 300, "y": 180, "width": 64, "height": 32},
-            on_click=self._confirm,
+        self.title = _FakeLocator(
+            "title",
+            {"x": 90, "y": 60, "width": 556, "height": 32},
+            on_click=self._close,
             frame=self,
         )
 
@@ -114,10 +114,6 @@ class _FakeFrame:
         self.menu_open = False
         self.click_order.append("blank")
 
-    def _confirm(self, _locator, _kwargs):
-        self.menu_open = False
-        self.click_order.append("确定")
-
     def _choose(self, value):
         def on_click(_locator, _kwargs):
             self.click_order.append(value)
@@ -128,6 +124,8 @@ class _FakeFrame:
     def locator(self, selector):
         if selector == "body":
             return self.body
+        if selector == "#title":
+            return self.title
         if "placeholder" in selector:
             return _FakeCollection([self.trigger])
         raise AssertionError(f"unexpected frame selector: {selector}")
@@ -157,11 +155,6 @@ class _FakeFrame:
         )
         return _FakeCollection([candidate])
 
-    def get_by_role(self, role, *, name, exact):
-        assert role == "button"
-        assert exact is True
-        return _FakeCollection([self.confirm] if name == "确定" else [])
-
 
 def test_jd_tag_selector_follows_three_cascader_columns():
     frame = _FakeFrame()
@@ -180,11 +173,11 @@ def test_jd_tag_selector_follows_three_cascader_columns():
         "兴趣标签",
         "居家",
         "健康环保家居",
-        "确定",
+        "blank",
     ]
     assert frame.hovered == ["兴趣标签", "居家", "健康环保家居"]
     assert frame.container.clicks[0]["position"]["x"] == 540
-    assert len(frame.confirm.clicks) == 1
+    assert len(frame.title.clicks) == 1
     assert frame.menu_open is False
     log.success.assert_called_once_with("🏷️ 京东标签已选择: 兴趣标签 / 居家 / 健康环保家居")
 

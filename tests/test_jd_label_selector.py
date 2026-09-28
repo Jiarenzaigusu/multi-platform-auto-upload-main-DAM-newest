@@ -179,7 +179,10 @@ def test_jd_tag_selector_follows_three_cascader_columns():
     assert frame.container.clicks[0]["position"]["x"] == 540
     assert len(frame.title.clicks) == 1
     assert frame.menu_open is False
-    log.success.assert_called_once_with("🏷️ 京东标签已选择: 兴趣标签 / 居家 / 健康环保家居")
+    assert log.success.call_args_list == [
+        call("🏷️ 京东标签已勾选: 兴趣标签 / 居家 / 健康环保家居"),
+        call("🏷️ 京东标签选择已结束，共 1 个"),
+    ]
 
 
 def test_jd_tag_selector_selects_each_multiline_path():
@@ -187,7 +190,9 @@ def test_jd_tag_selector_selects_each_multiline_path():
     log = Mock()
     selector = AsyncMock()
 
-    with patch("uploader.jd_label_selector._select_jd_tag_path", new=selector):
+    with patch(
+        "uploader.jd_label_selector._select_jd_tag_paths_in_one_menu", new=selector
+    ):
         asyncio.run(
             select_jd_tag(
                 frame,
@@ -200,8 +205,12 @@ def test_jd_tag_selector_selects_each_multiline_path():
             )
         )
 
-    assert selector.await_args_list == [
-        call(frame, tag_path="兴趣标签 / 居家 / 健康环保家居", logger=log),
-        call(frame, tag_path="兴趣标签 / 数码 / 智能设备", logger=log),
-        call(frame, tag_path="体裁标签 / 家装建材 / 装修记录", logger=log),
-    ]
+    selector.assert_awaited_once_with(
+        frame,
+        (
+            ("兴趣标签", "居家", "健康环保家居"),
+            ("兴趣标签", "数码", "智能设备"),
+            ("体裁标签", "家装建材", "装修记录"),
+        ),
+        logger=log,
+    )

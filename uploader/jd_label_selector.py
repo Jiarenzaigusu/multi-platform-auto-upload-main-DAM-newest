@@ -246,15 +246,21 @@ async def _select_jd_tag_path(
     tag_type: str = "",
     logger,
 ) -> None:
-    """在京麦标签级联菜单中按三级路径逐级匹配并选择。
+    """兼容单路径调用方。"""
+    parts = _split_tag_path(tag_path, tag_type)
+    if parts:
+        await _select_jd_tag_paths_in_one_menu(frame, (parts,), logger=logger)
+
+
+async def _select_jd_tag_paths_in_one_menu(frame, paths, *, logger) -> None:
+    """一次打开京麦级联菜单，选完全部标签后统一关闭。
 
     京麦的视频和图文发布页共用这套标签控件，但页面版本会把触发器渲染成
     ``input`` 或可点击文本，因此这里同时兼容两种结构。控件按截图中的三列
-    级联菜单逐级选择，末级项通过包含 checkbox 的菜单项点击；旧任务只传
-    一级类型时仍保持兼容。
+    级联菜单逐级选择。选中首个标签后控件会重绘并移除 placeholder，所以
+    多标签必须在同一次打开的菜单中完成，不能关闭后重新查找入口。
     """
-    parts = _split_tag_path(tag_path, tag_type)
-    if not parts:
+    if not paths:
         return
 
     trigger = await _find_tag_trigger(frame)
@@ -264,39 +270,41 @@ async def _select_jd_tag_path(
     await _click_tag_trigger(trigger)
     await asyncio.sleep(0.5)
 
-    minimum_x = None
     last_option = None
-    for index, part in enumerate(parts):
-        option, box = await _wait_for_menu_item(
-            frame,
-            part,
-            minimum_x=minimum_x,
-        )
-        if option is None and index == 0:
-            # 带 role/class 的外层容器在少数版本只有布局作用，首次点击
-            # 没有展开时改点 input 的右侧热区再等待一次。
-            await _click_tag_trigger(trigger, prefer_input=True)
-            await asyncio.sleep(0.3)
-            option, box = await _wait_for_menu_item(frame, part, minimum_x=minimum_x)
-        if option is None:
-            raise RuntimeError(f"京东标签控件中未找到第 {index + 1} 级“{part}”")
-        await option.scroll_into_view_if_needed()
-        # 京麦级联菜单部分版本通过 hover 展开下一列；点击前先悬停，
-        # 保证与截图中高亮一级/二级菜单项的交互一致。
-        await option.hover()
-        await option.click()
-        last_option = option
-        await asyncio.sleep(0.5)
-        if box:
-            minimum_x = box["x"] + max(20, box["width"] * 0.6)
+    for path_index, parts in enumerate(paths):
+        minimum_x = None
+        for index, part in enumerate(parts):
+            option, box = await _wait_for_menu_item(
+                frame,
+                part,
+                minimum_x=minimum_x,
+            )
+            if option is None and path_index == 0 and index == 0:
+                # 带 role/class 的外层容器在少数版本只有布局作用，首次点击
+                # 没有展开时改点 input 的右侧热区再等待一次。
+                await _click_tag_trigger(trigger, prefer_input=True)
+                await asyncio.sleep(0.3)
+                option, box = await _wait_for_menu_item(
+                    frame, part, minimum_x=minimum_x
+                )
+            if option is None:
+                raise RuntimeError(
+                    f"京东标签控件中未找到第 {index + 1} 级“{part}”"
+                )
+            await option.scroll_into_view_if_needed()
+            await option.hover()
+            await option.click()
+            last_option = option
+            await asyncio.sleep(0.5)
+            if box:
+                minimum_x = box["x"] + max(20, box["width"] * 0.6)
+
+        if len(parts) == 3:
+            logger.success(f"🏷️ 京东标签已勾选: {' / '.join(parts)}")
 
     if last_option is not None:
         await _close_tag_menu(frame, last_option)
-
-    if len(parts) == 3:
-        logger.success(f"🏷️ 京东标签已选择: {' / '.join(parts)}")
-    else:
-        logger.success(f"🏷️ 京东标签类型已选择: {parts[0]}")
+    logger.success(f"🏷️ 京东标签选择已结束，共 {len(paths)} 个")
 
 
 async def select_jd_tag(
@@ -314,12 +322,7 @@ async def select_jd_tag(
         raise ValueError("京东兴趣标签至多选择 3 个")
     if genre_count > 1:
         raise ValueError("京东体裁标签至多选择 1 个")
-    for parts in paths:
-        await _select_jd_tag_path(
-            frame,
-            tag_path=" / ".join(parts),
-            logger=logger,
-        )
+    await _select_jd_tag_paths_in_one_menu(frame, paths, logger=logger)
 
 
 async def select_jd_tag_type(frame, tag_type: str, logger) -> None:

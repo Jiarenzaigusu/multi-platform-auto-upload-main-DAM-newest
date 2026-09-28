@@ -1659,7 +1659,7 @@ onBeforeUnmount(() => {
           <template v-else-if="isJD">
             <label v-if="isArticle" class="field"><span>{{ descriptionLabel }} <em>可选</em></span><textarea v-model="form.description" maxlength="1001" :placeholder="descriptionPlaceholder" /></label>
             <div class="field-row">
-              <label class="field"><span>京东标签 <em>可选</em></span><input v-model="form.jdTagPath" placeholder="兴趣标签 / 居家 / 健康环保家居" /><small class="field-hint">按“一级类型 / 二级分类 / 标签名称”填写，发布时自动逐级匹配</small></label>
+              <label class="field"><span>京东标签 <em>可选</em></span><textarea v-model="form.jdTagPath" placeholder="兴趣标签 / 居家 / 健康环保家居&#10;兴趣标签 / 数码 / 智能设备&#10;体裁标签 / 家装建材 / 装修记录" /><small class="field-hint">每行填写一个“一级类型 / 二级分类 / 标签名称”；兴趣标签至多 3 个，体裁标签至多 1 个</small></label>
               <label class="field"><span>参与话题 <em>可选</em></span><input v-model="form.activityTopic" placeholder="例如：数码先锋" /></label>
             </div>
           </template>

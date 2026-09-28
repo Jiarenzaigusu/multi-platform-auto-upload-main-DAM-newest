@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock, call, patch
 
 from uploader.jd_label_selector import select_jd_tag
 
@@ -169,3 +169,28 @@ def test_jd_tag_selector_follows_three_cascader_columns():
     assert frame.body.clicks[0]["position"] == {"x": 670, "y": 16}
     assert frame.menu_open is False
     log.success.assert_called_once_with("🏷️ 京东标签已选择: 兴趣标签 / 居家 / 健康环保家居")
+
+
+def test_jd_tag_selector_selects_each_multiline_path():
+    frame = _FakeFrame()
+    log = Mock()
+    selector = AsyncMock()
+
+    with patch("uploader.jd_label_selector._select_jd_tag_path", new=selector):
+        asyncio.run(
+            select_jd_tag(
+                frame,
+                tag_path=(
+                    "兴趣标签 / 居家 / 健康环保家居\n"
+                    "兴趣标签 / 数码 / 智能设备\n"
+                    "体裁标签 / 家装建材 / 装修记录"
+                ),
+                logger=log,
+            )
+        )
+
+    assert selector.await_args_list == [
+        call(frame, tag_path="兴趣标签 / 居家 / 健康环保家居", logger=log),
+        call(frame, tag_path="兴趣标签 / 数码 / 智能设备", logger=log),
+        call(frame, tag_path="体裁标签 / 家装建材 / 装修记录", logger=log),
+    ]

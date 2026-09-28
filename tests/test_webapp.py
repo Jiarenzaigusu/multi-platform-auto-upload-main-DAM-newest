@@ -27,7 +27,10 @@ from uploader.jd_video_uploader.main import (
     _attach_upload_diagnostics,
     _choose_jd_video_file,
 )
-from uploader.tmall_article_uploader.main import TmallArticle
+from uploader.tmall_article_uploader.main import (
+    TmallArticle,
+    _article_picker_upload_names,
+)
 from uploader.tmall_video_uploader.main import (
     TmallVideo,
     _contains_exact_product_id,
@@ -56,7 +59,7 @@ from uploader.jd_schedule_selector import select_jd_time_value
 from webapp.api.main import WebSettings
 from webapp.api.batch import resolve_local_path
 from webapp.api.main import create_app as _create_app
-from webapp.api.models import ValidationError, parse_jd_tag_path, validate_account_name, validate_publish_request
+from webapp.api.models import ValidationError, parse_jd_tag_path, parse_jd_tag_paths, validate_account_name, validate_publish_request
 from webapp.api.platforms import (
     JdVideoUploadRequest,
     TmallArticleUploadRequest,
@@ -901,6 +904,8 @@ class PublishRequestValidationTests(unittest.TestCase):
         self.assertIn("expectedStem", selection_script)
         self.assertEqual(selection_stem, "mpau-cover-20260817-091530-a1b2c3d4e5f6")
         self.assertNotIn("document.images", selection_script)
+        self.assertIn("card.querySelector('img')", selection_script)
+        self.assertNotIn("PicList_pic_imgBox", selection_script)
         selected_control.evaluate.assert_awaited_once_with("(control) => control.click()")
         self.assertEqual(
             [call.args for call in click_visible_frame_button.await_args_list],
@@ -967,6 +972,23 @@ class PublishRequestValidationTests(unittest.TestCase):
         asyncio.run(uploader._crop_images_if_requested(MagicMock()))
 
         uploader._crop_uploaded_images.assert_not_awaited()
+
+    def test_tmall_article_picker_names_are_unique_and_keep_order(self):
+        names = _article_picker_upload_names(
+            [Path("8.JPG"), Path("8.png"), Path("2.webp")],
+            now=datetime(2026, 9, 28, 10, 20, 30),
+            task_token="abc123",
+        )
+
+        self.assertEqual(
+            names,
+            [
+                "mpau-article-20260928-102030-abc123-01.jpg",
+                "mpau-article-20260928-102030-abc123-02.png",
+                "mpau-article-20260928-102030-abc123-03.webp",
+            ],
+        )
+        self.assertEqual(len(names), len(set(names)))
 
     def test_tmall_article_one_to_one_ratio_triggers_requested_crop(self):
         uploader = object.__new__(TmallArticle)
@@ -2951,6 +2973,28 @@ class JdBatchApiTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValidationError, "兴趣标签.*体裁标签"):
             parse_jd_tag_path("体验标签 / 家装建材 / 装修记录")
+
+    def test_jd_tag_paths_allow_three_interests_and_one_genre(self):
+        paths = parse_jd_tag_paths(
+            "兴趣标签 / 居家 / 健康环保家居\n"
+            "兴趣标签 / 数码 / 智能设备\n"
+            "兴趣标签 / 运动 / 户外运动\n"
+            "体裁标签 / 家装建材 / 装修记录"
+        )
+
+        self.assertEqual(len(paths), 4)
+
+    def test_jd_tag_paths_enforce_per_type_limits(self):
+        with self.assertRaisesRegex(ValidationError, "兴趣标签至多选择 3 个"):
+            parse_jd_tag_paths(
+                "\n".join(
+                    f"兴趣标签 / 分类{index} / 标签{index}" for index in range(4)
+                )
+            )
+        with self.assertRaisesRegex(ValidationError, "体裁标签至多选择 1 个"):
+            parse_jd_tag_paths(
+                "体裁标签 / 分类1 / 标签1\n体裁标签 / 分类2 / 标签2"
+            )
 
     def test_valid_article_workbook_creates_jd_article_job(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -980,8 +980,10 @@ class TmallVideo(TmallBaseUploader):
         for _ in range(120):
             selected_cover = await picker_frame.evaluate(
                 r"""(expectedStem) => {
+                    // 平台 CSS-module 的哈希类名会变；与图文流程一致，按素材卡片
+                    // 的稳定语义结构定位，仍只接受唯一文件名精确命中的卡片。
                     const cards = [...document.querySelectorAll('label')].filter(card =>
-                        card.querySelector('.PicList_pic_imgBox__c0HXw img')
+                        card.querySelector('img')
                         && card.querySelector('input[type="checkbox"], input[type="radio"]')
                     );
                     const matches = cards.filter(card => {

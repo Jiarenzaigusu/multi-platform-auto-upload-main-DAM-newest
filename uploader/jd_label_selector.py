@@ -32,6 +32,19 @@ def _split_tag_path(tag_path: str, tag_type: str) -> tuple[str, ...]:
     return (normalized_type,) if normalized_type else ()
 
 
+def _split_tag_paths(tag_paths: str, tag_type: str) -> tuple[tuple[str, ...], ...]:
+    """拆分每行一个的多标签值；单标签和旧的一级类型仍兼容。"""
+    value = (tag_paths or "").strip()
+    if not value:
+        single = _split_tag_path("", tag_type)
+        return (single,) if single else ()
+    return tuple(
+        _split_tag_path(item, "")
+        for item in re.split(r"\s*(?:\r?\n|[;；])\s*", value)
+        if item.strip()
+    )
+
+
 async def _first_visible(locator):
     """返回 locator 集合中的第一个可见节点。"""
     for index in range(await locator.count()):
@@ -234,7 +247,7 @@ async def _close_tag_menu(frame, trigger, last_option) -> None:
     await asyncio.sleep(0.3)
 
 
-async def select_jd_tag(
+async def _select_jd_tag_path(
     frame,
     *,
     tag_path: str = "",
@@ -292,6 +305,29 @@ async def select_jd_tag(
         logger.success(f"🏷️ 京东标签已选择: {' / '.join(parts)}")
     else:
         logger.success(f"🏷️ 京东标签类型已选择: {parts[0]}")
+
+
+async def select_jd_tag(
+    frame,
+    *,
+    tag_path: str = "",
+    tag_type: str = "",
+    logger,
+) -> None:
+    """逐条选择京东标签；支持兴趣标签最多三个、体裁标签最多一个。"""
+    paths = _split_tag_paths(tag_path, tag_type)
+    interest_count = sum(parts[0] == "兴趣标签" for parts in paths)
+    genre_count = sum(parts[0] == "体裁标签" for parts in paths)
+    if interest_count > 3:
+        raise ValueError("京东兴趣标签至多选择 3 个")
+    if genre_count > 1:
+        raise ValueError("京东体裁标签至多选择 1 个")
+    for parts in paths:
+        await _select_jd_tag_path(
+            frame,
+            tag_path=" / ".join(parts),
+            logger=logger,
+        )
 
 
 async def select_jd_tag_type(frame, tag_type: str, logger) -> None:

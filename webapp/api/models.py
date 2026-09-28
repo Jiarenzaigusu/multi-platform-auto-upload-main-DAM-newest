@@ -197,6 +197,27 @@ def parse_jd_tag_path(raw_path: str) -> tuple[str, ...]:
     return parts
 
 
+def parse_jd_tag_paths(raw_paths: str) -> tuple[tuple[str, ...], ...]:
+    """解析多条京东标签路径，并校验兴趣/体裁标签数量上限。"""
+    value = raw_paths.strip()
+    if not value:
+        return ()
+    paths = tuple(
+        parse_jd_tag_path(item)
+        for item in re.split(r"\s*(?:\r?\n|[;；])\s*", value)
+        if item.strip()
+    )
+    if len(set(paths)) != len(paths):
+        raise ValidationError("京东标签不能重复")
+    interest_count = sum(parts[0] == "兴趣标签" for parts in paths)
+    genre_count = sum(parts[0] == "体裁标签" for parts in paths)
+    if interest_count > 3:
+        raise ValidationError("京东兴趣标签至多选择 3 个")
+    if genre_count > 1:
+        raise ValidationError("京东体裁标签至多选择 1 个")
+    return paths
+
+
 # 中文定时格式正则："2030年12月31日 14点30分"
 _SCHEDULE_CN_PATTERN = re.compile(
     r"^(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日"
@@ -416,12 +437,16 @@ def validate_publish_request(
     schedule = parse_schedule(raw_schedule)
     tags = parse_tags(raw_tags, max_tags=4 if selected_platform == "tmall" else 20)
     if selected_platform == "jd":
-        jd_tag_parts = parse_jd_tag_path(normalized_jd_tag_path)
-        if jd_tag_parts:
-            if normalized_jd_tag_type and normalized_jd_tag_type != jd_tag_parts[0]:
+        jd_tag_paths = parse_jd_tag_paths(normalized_jd_tag_path)
+        if jd_tag_paths:
+            if normalized_jd_tag_type and any(
+                normalized_jd_tag_type != parts[0] for parts in jd_tag_paths
+            ):
                 raise ValidationError("京东标签类型与标签路径的一级类型不一致")
-            normalized_jd_tag_type = jd_tag_parts[0]
-            normalized_jd_tag_path = " / ".join(jd_tag_parts)
+            # 多标签时一级类型已完整包含在每条路径中；旧字段只在类型唯一时保留。
+            path_types = {parts[0] for parts in jd_tag_paths}
+            normalized_jd_tag_type = next(iter(path_types)) if len(path_types) == 1 else ""
+            normalized_jd_tag_path = "\n".join(" / ".join(parts) for parts in jd_tag_paths)
         if normalized_jd_tag_type and normalized_jd_tag_type not in JD_TAG_TYPES:
             raise ValidationError("请选择有效的京东标签类型")
     elif normalized_jd_tag_type or normalized_jd_tag_path:

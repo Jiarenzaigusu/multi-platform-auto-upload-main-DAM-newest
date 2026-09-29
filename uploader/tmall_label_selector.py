@@ -24,7 +24,7 @@ async def focus_tmall_editor_end(frame, page):
     await editor.click()
     try:
         await editor.evaluate(
-            """element => {
+            r"""element => {
                 element.focus({ preventScroll: true });
                 const selection = window.getSelection();
                 const range = document.createRange();
@@ -48,7 +48,7 @@ async def focus_tmall_editor_end(frame, page):
         # toolbar click temporarily takes focus away from the editor.
         await asyncio.sleep(0.1)
         selection_ok = await editor.evaluate(
-            """element => {
+            r"""element => {
                 const selection = window.getSelection();
                 if (!selection || selection.rangeCount !== 1
                     || !selection.isCollapsed
@@ -59,11 +59,34 @@ async def focus_tmall_editor_end(frame, page):
                 const tail = document.createRange();
                 tail.selectNodeContents(element);
                 tail.setStart(selection.anchorNode, selection.anchorOffset);
-                return tail.toString().replace(/[\u200B-\u200D\uFEFF]/g, '') === '';
+                // Range.toString() 会为块级节点边界和末尾 <br> 生成换行；这些
+                // 不是可见正文，长文自动分段时尤其常见，不能据此误判光标未
+                // 到末尾。只要尾部没有非空白、非零宽字符即可。
+                return tail.toString().replace(/[\s\u200B-\u200D\uFEFF]/g, '') === '';
             }"""
         )
         if selection_ok is False:
-            raise RuntimeError("无法将天猫文案光标定位到末尾")
+            # 某些长文会被仓颉拆成多个块，左右键可能停在最后一个视觉行的
+            # 边界。仅在严格校验失败时使用原生“文档末尾”快捷键补救，再次
+            # 执行同一校验；含结构标签时若仍不是真末尾也不会被放行。
+            shortcut = "Meta+ArrowDown" if sys.platform == "darwin" else "Control+End"
+            await page.keyboard.press(shortcut)
+            await asyncio.sleep(0.1)
+            selection_ok = await editor.evaluate(
+                r"""element => {
+                    const selection = window.getSelection();
+                    if (!selection || selection.rangeCount !== 1
+                        || !selection.isCollapsed
+                        || !element.contains(selection.anchorNode)) return false;
+                    const tail = document.createRange();
+                    tail.selectNodeContents(element);
+                    tail.setStart(selection.anchorNode, selection.anchorOffset);
+                    return tail.toString()
+                        .replace(/[\s\u200B-\u200D\uFEFF]/g, '') === '';
+                }"""
+            )
+        if selection_ok is False:
+            raise RuntimeError("无法将天猫文案光标定位到真实末尾")
     except (AttributeError, TypeError):
         # Older wrappers/test doubles may not expose locator.evaluate.
         shortcut = "Meta+ArrowDown" if sys.platform == "darwin" else "Control+End"

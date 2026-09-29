@@ -742,10 +742,39 @@ class PublishRequestValidationTests(unittest.TestCase):
         self.assertIs(result, editor)
         self.assertEqual(editor.evaluate.await_count, 2)
         self.assertIn("range.selectNodeContents(element)", editor.evaluate.await_args_list[0].args[0])
+        self.assertIn("\\s", editor.evaluate.await_args_list[1].args[0])
         self.assertEqual(
             page.keyboard.press.await_args_list,
             [call("Escape"), call("ArrowLeft"), call("ArrowRight")],
         )
+
+    def test_tmall_editor_focus_falls_back_to_native_end_for_long_copy(self):
+        from uploader.tmall_label_selector import focus_tmall_editor_end
+
+        editor = MagicMock()
+        editor.wait_for = AsyncMock()
+        editor.click = AsyncMock()
+        editor.evaluate = AsyncMock(side_effect=[True, False, True])
+        editor_query = MagicMock()
+        editor_query.first = editor
+        frame = MagicMock()
+        frame.locator.return_value = editor_query
+        page = MagicMock()
+        page.keyboard.press = AsyncMock()
+
+        with patch("uploader.tmall_label_selector.sys.platform", "win32"):
+            asyncio.run(focus_tmall_editor_end(frame, page))
+
+        self.assertEqual(
+            page.keyboard.press.await_args_list,
+            [
+                call("Escape"),
+                call("ArrowLeft"),
+                call("ArrowRight"),
+                call("Control+End"),
+            ],
+        )
+        self.assertEqual(editor.evaluate.await_count, 3)
 
     def test_tmall_content_tag_enters_toolbar_mode_before_typing_value(self):
         from uploader.tmall_label_selector import type_tmall_content_tag

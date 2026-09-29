@@ -860,7 +860,7 @@ class PublishRequestValidationTests(unittest.TestCase):
         cover_dialog = locator()
         cover_dialog.get_by_text.return_value = query(cover_upload)
         opened_overlays = MagicMock()
-        opened_overlays.count = AsyncMock(side_effect=[0, 0, 1])
+        opened_overlays.count = AsyncMock(side_effect=[0, 0, 1, 0])
         opened_overlays.nth.return_value = cover_dialog
 
         frame = MagicMock()
@@ -929,8 +929,11 @@ class PublishRequestValidationTests(unittest.TestCase):
             [
                 ((picker_frame,), ("完成",)),
                 ((picker_frame,), ("确定",)),
-                ((picker_frame,), ("下一步", "完成", "确定")),
+                ((frame,), ("下一步", "完成", "确定")),
             ],
+        )
+        self.assertTrue(
+            click_visible_frame_button.await_args_list[-1].kwargs["top_overlay_only"]
         )
         frame.get_by_text.assert_called_once_with("智能封面图生成中", exact=False)
 

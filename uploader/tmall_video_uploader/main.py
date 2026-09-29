@@ -1038,12 +1038,19 @@ class TmallVideo(TmallBaseUploader):
 
         # 进入可选的花字确认层；不选模板也要确认，封面才会写回主表单。
         await _click_visible_frame_button(
-            tuple(reversed(page.frames)),
+            (frame,),
             ("下一步", "完成", "确定"),
             description="花字确认",
+            top_overlay_only=True,
         )
-        await asyncio.sleep(1)
-        await cover_dialog.wait_for(state="hidden", timeout=10000)
+        # 裁剪与花字步骤会重建 overlay。原始 cover_dialog 隐藏并不代表最新
+        # 花字层已关闭；只有 opened 数量回落到进入封面流程前才算真正完成。
+        for _ in range(40):
+            if await opened_overlays.count() <= initial_overlay_count:
+                break
+            await asyncio.sleep(0.5)
+        else:
+            raise RuntimeError("天猫自定义封面确认后仍有花字浮层未关闭")
         tmall_logger.success(_msg("🖼️", f"自定义封面已设置: {cover_path.name}"))
 
     def _build_description(self) -> str:

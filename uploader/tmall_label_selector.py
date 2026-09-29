@@ -20,36 +20,13 @@ async def focus_tmall_editor_end(frame, page):
     # label insertion position.
     await page.keyboard.press("Escape")
     await editor.click()
-    try:
-        select_all = "Meta+A" if sys.platform == "darwin" else "Control+A"
-        await page.keyboard.press(select_all)
-        # 在浏览器编辑器中，右方向键会把一个非折叠选区收起到右端。这两步
-        # 都是可信键盘事件，仓颉不会再恢复 editor.click() 的中间位置。
-        await page.keyboard.press("ArrowRight")
-        await asyncio.sleep(0.1)
-        selection_ok = await editor.evaluate(
-            r"""element => {
-                const selection = window.getSelection();
-                if (!selection || selection.rangeCount !== 1
-                    || !selection.isCollapsed
-                    || !element.contains(selection.anchorNode)) return false;
-                // 不只检查“在编辑器内”，还要确认光标之后没有任何可见文本。
-                // 若仓颉恢复到正文中间或某个结构化标签之前，tail.toString()
-                // 会包含后续正文/标签文字，必须判定失败。
-                const tail = document.createRange();
-                tail.selectNodeContents(element);
-                tail.setStart(selection.anchorNode, selection.anchorOffset);
-                // Range.toString() 会为块级节点边界和末尾 <br> 生成换行；这些
-                // 不是可见正文，长文自动分段时尤其常见，不能据此误判光标未
-                // 到末尾。只要尾部没有非空白、非零宽字符即可。
-                return tail.toString().replace(/[\s\u200B-\u200D\uFEFF]/g, '') === '';
-            }"""
-        )
-        if selection_ok is False:
-            raise RuntimeError("无法将天猫文案光标定位到真实末尾")
-    except (AttributeError, TypeError):
-        # Older wrappers/test doubles may not expose locator.evaluate.
-        raise RuntimeError("当前浏览器接口无法校验天猫文案光标位置")
+    select_all = "Meta+A" if sys.platform == "darwin" else "Control+A"
+    await page.keyboard.press(select_all)
+    # 在浏览器编辑器中，右方向键会把非折叠选区收起到右端。仓颉末尾可能
+    # 存在不可见辅助 DOM，不能再用 Range.toString() 判断视觉光标位置；
+    # 标签插入是否成功由后续 HTML/文本变化单独校验。
+    await page.keyboard.press("ArrowRight")
+    await asyncio.sleep(0.1)
     return editor
 
 

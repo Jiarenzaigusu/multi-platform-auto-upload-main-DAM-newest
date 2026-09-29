@@ -709,8 +709,10 @@ class PublishRequestValidationTests(unittest.TestCase):
         page = MagicMock()
         page.keyboard.press = AsyncMock()
 
-        with self.assertRaisesRegex(RuntimeError, "无法校验天猫文案光标位置"):
-            asyncio.run(focus_tmall_editor_end(frame, page))
+        result = asyncio.run(focus_tmall_editor_end(frame, page))
+
+        self.assertIs(result, editor)
+        editor.evaluate.assert_not_called()
 
     def test_tmall_editor_focus_uses_dom_range_for_structured_editor(self):
         from uploader.tmall_label_selector import focus_tmall_editor_end
@@ -729,14 +731,13 @@ class PublishRequestValidationTests(unittest.TestCase):
         result = asyncio.run(focus_tmall_editor_end(frame, page))
 
         self.assertIs(result, editor)
-        self.assertEqual(editor.evaluate.await_count, 1)
-        self.assertIn("\\s", editor.evaluate.await_args.args[0])
+        editor.evaluate.assert_not_awaited()
         self.assertEqual(
             page.keyboard.press.await_args_list,
             [call("Escape"), call("Control+A"), call("ArrowRight")],
         )
 
-    def test_tmall_editor_focus_rejects_position_before_long_copy_end(self):
+    def test_tmall_editor_focus_does_not_use_dom_text_for_long_copy(self):
         from uploader.tmall_label_selector import focus_tmall_editor_end
 
         editor = MagicMock()
@@ -750,8 +751,7 @@ class PublishRequestValidationTests(unittest.TestCase):
         page = MagicMock()
         page.keyboard.press = AsyncMock()
 
-        with self.assertRaisesRegex(RuntimeError, "光标定位到真实末尾"):
-            asyncio.run(focus_tmall_editor_end(frame, page))
+        asyncio.run(focus_tmall_editor_end(frame, page))
 
         self.assertEqual(
             page.keyboard.press.await_args_list,
@@ -761,7 +761,7 @@ class PublishRequestValidationTests(unittest.TestCase):
                 call("ArrowRight"),
             ],
         )
-        self.assertEqual(editor.evaluate.await_count, 1)
+        editor.evaluate.assert_not_awaited()
 
     def test_tmall_content_tag_enters_toolbar_mode_before_typing_value(self):
         from uploader.tmall_label_selector import type_tmall_content_tag

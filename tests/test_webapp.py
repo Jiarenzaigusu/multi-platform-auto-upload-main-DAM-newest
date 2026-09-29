@@ -656,6 +656,7 @@ class PublishRequestValidationTests(unittest.TestCase):
             page.keyboard.press.await_args_list,
             [
                 call("Escape"),
+                call("ArrowLeft"),
                 call("ArrowRight"),
             ],
         )
@@ -743,7 +744,7 @@ class PublishRequestValidationTests(unittest.TestCase):
         self.assertIn("range.selectNodeContents(element)", editor.evaluate.await_args_list[0].args[0])
         self.assertEqual(
             page.keyboard.press.await_args_list,
-            [call("Escape"), call("ArrowRight")],
+            [call("Escape"), call("ArrowLeft"), call("ArrowRight")],
         )
 
     def test_tmall_content_tag_enters_toolbar_mode_before_typing_value(self):

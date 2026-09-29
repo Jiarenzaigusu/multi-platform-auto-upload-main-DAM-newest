@@ -1063,10 +1063,10 @@ class TmallVideo(TmallBaseUploader):
         return cleaned
 
     async def _fill_title_and_desc(self, frame, page: Page):
-        """填写视频标题与描述，然后通过原生标签模式添加内容标签。
+        """填写视频标题与描述；内容标签在其它标签完成后统一追加。
 
         描述区是淘宝"仓颉"富文本编辑器（contenteditable div），不是真正的 textarea。
-        先点击工具栏“内容标签”让仓颉进入标签态，再输入文本并以空格确认。
+        本步骤只建立并校验正文末尾选区，不在此处插入标签。
         """
         # 填写标题
         title_input = frame.locator('input[placeholder="加个标题让内容更吸引人"]').first
@@ -1093,7 +1093,6 @@ class TmallVideo(TmallBaseUploader):
         # 文案输入后立即把仓颉的内部选区同步到末尾，防止第一个
         # 标签在工具栏抢走焦点后回落到文案中间。
         await focus_tmall_editor_end(frame, page)
-        await self._add_content_tags(frame, page)
 
     async def _select_label_suggestion(
         self, frame, page: Page, *, toolbar_label: str, value: str
@@ -1916,6 +1915,7 @@ class TmallVideo(TmallBaseUploader):
             await self._fill_title_and_desc(frame, page)
             await self._add_brand_tag(frame, page)
             await self._add_activity_topic(frame, page)
+            await self._add_content_tags(frame, page)
             await self._add_music(frame)
             await self._add_goods(frame)
             await self._set_schedule(frame, page)

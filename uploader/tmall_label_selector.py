@@ -39,10 +39,10 @@ async def focus_tmall_editor_end(frame, page):
                 return true;
             }"""
         )
-        # A trusted keyboard event makes Cangjie persist selectionchange.  Do
-        # not use Control+End here: after the first structured label Chromium
-        # can move it back into the preceding visual paragraph. ArrowRight is
-        # a no-op at the true end while still producing the trusted event.
+        # 仓颉只可靠记录由真实键盘位移触发的 selectionchange。单独在末尾按
+        # ArrowRight 是 no-op，事件可能根本不发生；先左移再右移回到末尾，既
+        # 不改变内容，又能让仓颉刷新其内部缓存选区。
+        await page.keyboard.press("ArrowLeft")
         await page.keyboard.press("ArrowRight")
         # Let Cangjie's selectionchange handler persist this caret before a
         # toolbar click temporarily takes focus away from the editor.
@@ -50,9 +50,16 @@ async def focus_tmall_editor_end(frame, page):
         selection_ok = await editor.evaluate(
             """element => {
                 const selection = window.getSelection();
-                return !!selection && selection.rangeCount === 1
-                    && selection.isCollapsed
-                    && element.contains(selection.anchorNode);
+                if (!selection || selection.rangeCount !== 1
+                    || !selection.isCollapsed
+                    || !element.contains(selection.anchorNode)) return false;
+                // 不只检查“在编辑器内”，还要确认光标之后没有任何可见文本。
+                // 若仓颉恢复到正文中间或某个结构化标签之前，tail.toString()
+                // 会包含后续正文/标签文字，必须判定失败。
+                const tail = document.createRange();
+                tail.selectNodeContents(element);
+                tail.setStart(selection.anchorNode, selection.anchorOffset);
+                return tail.toString().replace(/[\u200B-\u200D\uFEFF]/g, '') === '';
             }"""
         )
         if selection_ok is False:

@@ -656,7 +656,7 @@ class PublishRequestValidationTests(unittest.TestCase):
             page.keyboard.press.await_args_list,
             [
                 call("Escape"),
-                call("ArrowLeft"),
+                call("Control+A"),
                 call("ArrowRight"),
             ],
         )
@@ -709,19 +709,8 @@ class PublishRequestValidationTests(unittest.TestCase):
         page = MagicMock()
         page.keyboard.press = AsyncMock()
 
-        with patch("uploader.tmall_label_selector.sys.platform", "win32"):
-            result = asyncio.run(focus_tmall_editor_end(frame, page))
-
-        self.assertIs(result, editor)
-        editor.wait_for.assert_awaited_once_with(state="visible", timeout=10000)
-        editor.click.assert_awaited_once_with()
-        self.assertEqual(
-            page.keyboard.press.await_args_list,
-            [
-                call("Escape"),
-                call("Control+End"),
-            ],
-        )
+        with self.assertRaisesRegex(RuntimeError, "无法校验天猫文案光标位置"):
+            asyncio.run(focus_tmall_editor_end(frame, page))
 
     def test_tmall_editor_focus_uses_dom_range_for_structured_editor(self):
         from uploader.tmall_label_selector import focus_tmall_editor_end
@@ -729,7 +718,7 @@ class PublishRequestValidationTests(unittest.TestCase):
         editor = MagicMock()
         editor.wait_for = AsyncMock()
         editor.click = AsyncMock()
-        editor.evaluate = AsyncMock(side_effect=[True, True])
+        editor.evaluate = AsyncMock(return_value=True)
         editor_query = MagicMock()
         editor_query.first = editor
         frame = MagicMock()
@@ -740,21 +729,20 @@ class PublishRequestValidationTests(unittest.TestCase):
         result = asyncio.run(focus_tmall_editor_end(frame, page))
 
         self.assertIs(result, editor)
-        self.assertEqual(editor.evaluate.await_count, 2)
-        self.assertIn("range.selectNodeContents(element)", editor.evaluate.await_args_list[0].args[0])
-        self.assertIn("\\s", editor.evaluate.await_args_list[1].args[0])
+        self.assertEqual(editor.evaluate.await_count, 1)
+        self.assertIn("\\s", editor.evaluate.await_args.args[0])
         self.assertEqual(
             page.keyboard.press.await_args_list,
-            [call("Escape"), call("ArrowLeft"), call("ArrowRight")],
+            [call("Escape"), call("Control+A"), call("ArrowRight")],
         )
 
-    def test_tmall_editor_focus_falls_back_to_native_end_for_long_copy(self):
+    def test_tmall_editor_focus_rejects_position_before_long_copy_end(self):
         from uploader.tmall_label_selector import focus_tmall_editor_end
 
         editor = MagicMock()
         editor.wait_for = AsyncMock()
         editor.click = AsyncMock()
-        editor.evaluate = AsyncMock(side_effect=[True, False, True])
+        editor.evaluate = AsyncMock(return_value=False)
         editor_query = MagicMock()
         editor_query.first = editor
         frame = MagicMock()
@@ -762,19 +750,18 @@ class PublishRequestValidationTests(unittest.TestCase):
         page = MagicMock()
         page.keyboard.press = AsyncMock()
 
-        with patch("uploader.tmall_label_selector.sys.platform", "win32"):
+        with self.assertRaisesRegex(RuntimeError, "光标定位到真实末尾"):
             asyncio.run(focus_tmall_editor_end(frame, page))
 
         self.assertEqual(
             page.keyboard.press.await_args_list,
             [
                 call("Escape"),
-                call("ArrowLeft"),
+                call("Control+A"),
                 call("ArrowRight"),
-                call("Control+End"),
             ],
         )
-        self.assertEqual(editor.evaluate.await_count, 3)
+        self.assertEqual(editor.evaluate.await_count, 1)
 
     def test_tmall_content_tag_enters_toolbar_mode_before_typing_value(self):
         from uploader.tmall_label_selector import type_tmall_content_tag

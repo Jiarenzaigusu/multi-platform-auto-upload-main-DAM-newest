@@ -1584,7 +1584,12 @@ class TmallArticle:
             return
         await self._crop_uploaded_images(frame, self.cover_ratio)
 
-    async def _upload_in_context(self, context: BrowserContext) -> dict:
+    async def _upload_in_context(
+        self,
+        context: BrowserContext,
+        *,
+        session: TmallBrowserSession | None = None,
+    ) -> dict:
         """执行完整的天猫图文发布流程。"""
         tmall_logger.info(_msg("🧍", "小人先检查 cookie 和图文图片"))
         await self.validate_upload_args()
@@ -1593,6 +1598,8 @@ class TmallArticle:
         page = None
         try:
             page = await context.new_page()
+            if session is not None:
+                await session.minimize_page(page)
             await page.goto(TMALL_ARTICLE_PUBLISH_URL, wait_until="domcontentloaded")
             if _is_login_page_url(page.url) or _is_auth_page_url(page.url):
                 raise TmallAuthenticationError("天猫 Cookie 已失效，请重新登录")
@@ -1638,13 +1645,15 @@ class TmallArticle:
             if success:
                 await context.storage_state(path=self.account_file)
             if page and not page.is_closed():
+                if session is not None:
+                    await session.reveal_page(page)
                 tmall_logger.info(_msg("📌", "图文发布页面已保留供人工复核"))
 
     async def upload_in_session(self, session: TmallBrowserSession) -> dict:
         """通过天猫共享浏览器会话执行图文发布。"""
         context = await session.ensure_open()
         try:
-            result = await self._upload_in_context(context)
+            result = await self._upload_in_context(context, session=session)
         except TmallAuthenticationError:
             session.mark_authenticated(False)
             raise

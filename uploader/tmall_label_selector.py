@@ -8,10 +8,8 @@ import sys
 async def focus_tmall_editor_end(frame, page):
     """Put the Cangjie caret at the editor's actual DOM end.
 
-    ``Control+End`` can stop at the end of the current visual paragraph when
-    Cangjie contains structured label nodes.  Prefer an explicit DOM Range so
-    the next native label insertion cannot land in the middle of the copy;
-    retain the keyboard sequence for older editor variants and test doubles.
+    仓颉不会可靠保存脚本创建的 DOM Range。使用原生“全选后向右收起”把
+    选区折叠到编辑器末尾，使其内部缓存和浏览器可见光标保持一致。
     """
     editor = frame.locator('div[data-cangjie-content="true"]').first
     await editor.wait_for(state="visible", timeout=10000)
@@ -23,29 +21,11 @@ async def focus_tmall_editor_end(frame, page):
     await page.keyboard.press("Escape")
     await editor.click()
     try:
-        await editor.evaluate(
-            r"""element => {
-                element.focus({ preventScroll: true });
-                const selection = window.getSelection();
-                const range = document.createRange();
-                // A converted label is a contenteditable=false structured node.
-                // Looking for the last editable text node would place the caret
-                // before that label, so the next toolbar click has no valid
-                // insertion position. Collapse at the root's true DOM end.
-                range.selectNodeContents(element);
-                range.collapse(false);
-                selection.removeAllRanges();
-                selection.addRange(range);
-                return true;
-            }"""
-        )
-        # 仓颉只可靠记录由真实键盘位移触发的 selectionchange。单独在末尾按
-        # ArrowRight 是 no-op，事件可能根本不发生；先左移再右移回到末尾，既
-        # 不改变内容，又能让仓颉刷新其内部缓存选区。
-        await page.keyboard.press("ArrowLeft")
+        select_all = "Meta+A" if sys.platform == "darwin" else "Control+A"
+        await page.keyboard.press(select_all)
+        # 在浏览器编辑器中，右方向键会把一个非折叠选区收起到右端。这两步
+        # 都是可信键盘事件，仓颉不会再恢复 editor.click() 的中间位置。
         await page.keyboard.press("ArrowRight")
-        # Let Cangjie's selectionchange handler persist this caret before a
-        # toolbar click temporarily takes focus away from the editor.
         await asyncio.sleep(0.1)
         selection_ok = await editor.evaluate(
             r"""element => {
@@ -66,31 +46,10 @@ async def focus_tmall_editor_end(frame, page):
             }"""
         )
         if selection_ok is False:
-            # 某些长文会被仓颉拆成多个块，左右键可能停在最后一个视觉行的
-            # 边界。仅在严格校验失败时使用原生“文档末尾”快捷键补救，再次
-            # 执行同一校验；含结构标签时若仍不是真末尾也不会被放行。
-            shortcut = "Meta+ArrowDown" if sys.platform == "darwin" else "Control+End"
-            await page.keyboard.press(shortcut)
-            await asyncio.sleep(0.1)
-            selection_ok = await editor.evaluate(
-                r"""element => {
-                    const selection = window.getSelection();
-                    if (!selection || selection.rangeCount !== 1
-                        || !selection.isCollapsed
-                        || !element.contains(selection.anchorNode)) return false;
-                    const tail = document.createRange();
-                    tail.selectNodeContents(element);
-                    tail.setStart(selection.anchorNode, selection.anchorOffset);
-                    return tail.toString()
-                        .replace(/[\s\u200B-\u200D\uFEFF]/g, '') === '';
-                }"""
-            )
-        if selection_ok is False:
             raise RuntimeError("无法将天猫文案光标定位到真实末尾")
     except (AttributeError, TypeError):
         # Older wrappers/test doubles may not expose locator.evaluate.
-        shortcut = "Meta+ArrowDown" if sys.platform == "darwin" else "Control+End"
-        await page.keyboard.press(shortcut)
+        raise RuntimeError("当前浏览器接口无法校验天猫文案光标位置")
     return editor
 
 

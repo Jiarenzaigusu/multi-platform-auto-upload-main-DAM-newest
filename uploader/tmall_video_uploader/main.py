@@ -1865,6 +1865,8 @@ class TmallVideo(TmallBaseUploader):
     async def _upload_in_context(
         self,
         context: BrowserContext,
+        *,
+        session: TmallBrowserSession | None = None,
     ) -> dict:
         """在指定 BrowserContext 中执行完整的发布流程。
 
@@ -1891,6 +1893,8 @@ class TmallVideo(TmallBaseUploader):
 
         try:
             page = await context.new_page()
+            if session is not None:
+                await session.minimize_page(page)
             await page.goto(TMALL_VIDEO_PUBLISH_URL, wait_until="domcontentloaded")
             if _is_login_page_url(page.url) or _is_auth_page_url(page.url):
                 raise TmallAuthenticationError("天猫 Cookie 已失效，请重新登录")
@@ -1972,6 +1976,8 @@ class TmallVideo(TmallBaseUploader):
             if page:
                 try:
                     if not page.is_closed():
+                        if session is not None:
+                            await session.reveal_page(page)
                         tmall_logger.info(
                             _msg(
                                 "📌",
@@ -1989,7 +1995,7 @@ class TmallVideo(TmallBaseUploader):
         """
         context = await session.ensure_open()
         try:
-            result = await self._upload_in_context(context)
+            result = await self._upload_in_context(context, session=session)
         except TmallAuthenticationError:
             session.mark_authenticated(False)
             raise

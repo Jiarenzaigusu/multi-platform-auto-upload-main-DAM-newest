@@ -110,6 +110,7 @@ async def _click_visible_frame_button(
     description: str,
     timeout_seconds: int = 15,
     top_overlay_only: bool = False,
+    required_text: str | None = None,
 ) -> None:
     """点击任一 frame 中当前可见的指定按钮，避免依赖浮层坐标。
 
@@ -135,6 +136,16 @@ async def _click_visible_frame_button(
                         for index in range(await opened.count() - 1, -1, -1)
                     ]
             for scope in scopes:
+                if required_text:
+                    marker = scope.get_by_text(required_text, exact=False)
+                    marker_visible = False
+                    for marker_index in range(await marker.count()):
+                        if await marker.nth(marker_index).is_visible():
+                            marker_visible = True
+                            break
+                    if not marker_visible:
+                        continue
+
                 buttons = scope.locator('button, [role="button"], a')
                 for index in range(await buttons.count()):
                     button = buttons.nth(index)
@@ -150,25 +161,44 @@ async def _click_visible_frame_button(
                         # Next 组件的文字节点偶尔覆盖按钮命中区域；仅在已确认可用后
                         # 强制点击实际按钮，不会绕过禁用态。
                         await button.click(force=True)
-                        return
-
-                # 花字弹窗当前版本把操作控件渲染成带文字的 div/span，
-                # 没有 button、role 或 a。仍限定在当前 opened wrapper 内，
-                # 用精确可见文案点击其事件目标。
-                for name in names:
-                    text_nodes = scope.get_by_text(name, exact=True)
-                    for index in range(await text_nodes.count()):
-                        text_node = text_nodes.nth(index)
-                        if not await text_node.is_visible():
-                            continue
-                        try:
-                            if not await text_node.is_enabled():
+                        break
+                else:
+                    # 花字弹窗当前版本把操作控件渲染成带文字的 div/span，
+                    # 没有 button、role 或 a。仍限定在当前 opened wrapper 内，
+                    # 用精确可见文案点击其事件目标。
+                    for name in names:
+                        text_nodes = scope.get_by_text(name, exact=True)
+                        for index in range(await text_nodes.count()):
+                            text_node = text_nodes.nth(index)
+                            if not await text_node.is_visible():
                                 continue
-                        except Exception:
-                            # span/div 没有 enabled 属性，能见性已经足够。
-                            pass
-                        await text_node.click(force=True)
-                        return
+                            try:
+                                if not await text_node.is_enabled():
+                                    continue
+                            except Exception:
+                                # span/div 没有 enabled 属性，能见性已经足够。
+                                pass
+                            await text_node.click(force=True)
+                            break
+                        else:
+                            continue
+                        break
+
+                if required_text:
+                    for _ in range(20):
+                        marker_visible = False
+                        marker = scope.get_by_text(required_text, exact=False)
+                        for marker_index in range(await marker.count()):
+                            if await marker.nth(marker_index).is_visible():
+                                marker_visible = True
+                                break
+                        if not marker_visible:
+                            return
+                        await asyncio.sleep(0.25)
+                    raise RuntimeError(
+                        f"已点击{description}按钮，但“{required_text}”弹窗仍未关闭"
+                    )
+                return
         await asyncio.sleep(0.5)
     # 平台改版时保留可见操作文案，便于只调整语义名称，不需要恢复坐标点击。
     visible_actions: list[str] = []
@@ -1093,6 +1123,7 @@ class TmallVideo(TmallBaseUploader):
             ("下一步", "完成", "确定"),
             description="花字确认",
             top_overlay_only=True,
+            required_text="添加花字",
         )
         # 花字层可能挂在外层页面或另一个动态 iframe。所有 frame 的可见
         # opened 数量都回落到进入封面流程前，才算真正完成。

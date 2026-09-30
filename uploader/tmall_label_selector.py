@@ -70,6 +70,12 @@ async def _editor_has_structured_tag(editor, tag: str) -> bool:
                     return node.getAttribute('contenteditable') === 'false'
                       || node.getAttribute('role') === 'link'
                       || node.tagName === 'A'
+                      // Cangjie currently renders a committed content tag as
+                      // an exact-text leaf span, but its CSS-module class has
+                      // no stable semantic name.  Plain editor text remains a
+                      // direct text node of a block element, so this does not
+                      // accept a normal paragraph as a tag.
+                      || (node.tagName === 'SPAN' && node.childElementCount === 0)
                       || /(tag|topic|label|hashtag|cangjie)/i.test(`${attrs} ${className}`);
                   });
                 }""",
@@ -123,13 +129,22 @@ async def type_tmall_content_tag(frame, page, tag: str) -> None:
     # that Cangjie created a structured label node rather than plain text.
     await asyncio.sleep(0.5)
     await page.keyboard.press("Space")
+    tail_seen = False
     for _ in range(12):
         final_text = await editor.inner_text()
-        if final_text.rstrip().endswith(tag):
+        # Cangjie may append zero-width cursor markers or a non-breaking space
+        # after the committed label; these are layout markers, not content.
+        normalized_tail = (final_text or '').rstrip(
+            ' \t\r\n\u00a0\u200b\u200c\u200d\ufeff'
+        )
+        if normalized_tail.endswith(tag):
+            tail_seen = True
             if await _editor_has_structured_tag(editor, tag):
                 return
         await asyncio.sleep(0.25)
-    raise RuntimeError(f"内容标签“{tag}”未提交到文案末尾或未转换为标签节点")
+    if tail_seen:
+        raise RuntimeError(f"内容标签“{tag}”已在文案末尾，但未转换为可识别的标签节点")
+    raise RuntimeError(f"内容标签“{tag}”未提交到文案末尾")
 
 
 async def select_tmall_label_suggestion(

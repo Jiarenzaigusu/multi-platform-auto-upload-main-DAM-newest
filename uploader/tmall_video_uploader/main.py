@@ -175,6 +175,20 @@ async def _click_visible_frame_button(
     )
 
 
+async def _visible_open_overlay_count(frames) -> int:
+    """统计所有 frame 中真正可见的 Next opened 浮层。"""
+    total = 0
+    for candidate in tuple(frames):
+        try:
+            overlays = candidate.locator(".next-overlay-wrapper.opened")
+            for index in range(await overlays.count()):
+                if await overlays.nth(index).is_visible():
+                    total += 1
+        except Exception:
+            continue
+    return total
+
+
 def _is_cover_card_gray(red: int, green: int, blue: int) -> bool:
     """返回截图中光合未选中比例卡片的背景色是否命中。"""
     return max(red, green, blue) - min(red, green, blue) <= 4 and 207 <= red <= 225
@@ -716,7 +730,7 @@ class TmallVideo(TmallBaseUploader):
     4. 填写标题/描述/话题标签
     5. 参与活动话题（可选）→ 添加音乐（可选）→ 关联商品
     6. 设置定时/立即发布 → 选择创作者声明 → 点击发布按钮
-    7. 等待平台成功/失败/跳转信号，30 秒内无信号则抛 PublishResultUncertainError
+     7. 等待平台明确成功/失败信号，30 秒内无信号则抛 PublishResultUncertainError
     """
 
     def __init__(
@@ -849,12 +863,12 @@ class TmallVideo(TmallBaseUploader):
         """等待视频上传完成，发布表单可编辑。
 
         判定信号：页面出现"重新上传"且包含"视频封面"字样。
-        若出现"上传失败"或"失败"字样则抛出异常。
-        超时 180 秒。
+        只在上传区域出现明确失败提示时抛出异常。
+        超时由 timeout_seconds 严格控制。
         """
-        for i in range(timeout_seconds // 2):
+        for i in range(timeout_seconds):
             body = await frame.locator("body").inner_text(timeout=3000)
-            if "上传失败" in body or "失败" in body:
+            if any(hint in body for hint in ("上传失败", "视频上传失败", "上传出错")):
                 raise RuntimeError("视频上传失败，请检查页面提示")
             if "重新上传" in body and "视频封面" in body:
                 tmall_logger.success(_msg("🥳", "视频上传完成，发布表单已可编辑"))
@@ -880,6 +894,7 @@ class TmallVideo(TmallBaseUploader):
         """
         cover_path = Path(self.cover_image_path)
         tmall_logger.info(_msg("🖼️", f"准备设置自定义封面: {cover_path.name}"))
+        initial_page_overlay_count = await _visible_open_overlay_count(page.frames)
         # 等待"编辑"封面按钮可点击
         edit_button = frame.locator('[data-autolog-container="coverOperate_edit"]').first
         await edit_button.wait_for(state="visible", timeout=90000)
@@ -1038,15 +1053,18 @@ class TmallVideo(TmallBaseUploader):
 
         # 进入可选的花字确认层；不选模板也要确认，封面才会写回主表单。
         await _click_visible_frame_button(
-            (frame,),
+            tuple(reversed(page.frames)),
             ("下一步", "完成", "确定"),
             description="花字确认",
             top_overlay_only=True,
         )
-        # 裁剪与花字步骤会重建 overlay。原始 cover_dialog 隐藏并不代表最新
-        # 花字层已关闭；只有 opened 数量回落到进入封面流程前才算真正完成。
+        # 花字层可能挂在外层页面或另一个动态 iframe。所有 frame 的可见
+        # opened 数量都回落到进入封面流程前，才算真正完成。
         for _ in range(40):
-            if await opened_overlays.count() <= initial_overlay_count:
+            if (
+                await _visible_open_overlay_count(page.frames)
+                <= initial_page_overlay_count
+            ):
                 break
             await asyncio.sleep(0.5)
         else:
@@ -1314,22 +1332,35 @@ class TmallVideo(TmallBaseUploader):
         tmall_logger.info(_msg("🔎", f"已搜索话题关键词: {self.activity_topic}"))
         await asyncio.sleep(3)
 
-        # 找搜索结果第一张可点击卡片
-        # 结构：.topic-card--xxx > .topic-card-select--xxx（cursor:pointer）
-        result_card = dialog.locator('[class*="topic-card-select--"]').first
-        count = await result_card.count()
-        if count == 0:
+        # 结构：.topic-card--xxx > .topic-card-select--xxx（cursor:pointer）。
+        # 搜索结果必须与输入关键词匹配，不能仅取排序第一项，否则模糊搜索
+        # 可能把内容加入到同名/相近的错误活动中。
+        cards = dialog.locator('[class*="topic-card-select--"]')
+        normalized_query = _normalize_option_text(self.activity_topic).lower()
+        result_card = None
+        topic_name = ""
+        for card_index in range(await cards.count()):
+            candidate = cards.nth(card_index)
+            if not await candidate.is_visible():
+                continue
+            candidate_text = (await candidate.inner_text()).strip()
+            candidate_name = await candidate.evaluate(
+                "el => (el.getAttribute('data-autolog') || el.innerText || '')"
+                ".split(':').pop().split('\\n')[0].trim()"
+            )
+            searchable = _normalize_option_text(f"{candidate_name} {candidate_text}").lower()
+            if normalized_query and normalized_query in searchable:
+                result_card = candidate
+                topic_name = candidate_name or candidate_text
+                break
+        if result_card is None:
             # 无结果时取消对话框并报错
             await dialog.locator(".next-btn-normal").filter(has_text="取消").first.click()
             raise ValueError(
-                f"话题活动搜索关键词 '{self.activity_topic}' 无结果。"
+                f"话题活动搜索结果中没有匹配“{self.activity_topic}”的活动。"
                 "请核实关键词是否正确，或不传 --activity-topic 使用平台推荐话题。"
             )
 
-        # 提取话题名称用于日志
-        topic_name = await result_card.evaluate(
-            "el => (el.getAttribute('data-autolog') || el.innerText || '').split(':').pop().split('\\n')[0].trim()"
-        )
         await result_card.click()
         await asyncio.sleep(1)
         tmall_logger.info(_msg("📣", f"已选择话题: {topic_name}"))
@@ -1825,9 +1856,12 @@ class TmallVideo(TmallBaseUploader):
         """等待发布后的平台确认信号。
 
         30 秒内轮询检测：
-        - 成功：页面出现"发布成功"等提示，或页面跳转到非登录/鉴权页
+        - 成功：页面出现"发布成功"等明确提示
         - 失败：页面出现"发布失败"等提示
         - 无信号：抛出 PublishResultUncertainError
+
+        ``initial_url`` 保留在接口中用于兼容已有调用方；URL 变化本身不再
+        作为成功依据。
 
         :returns: 确认信息字符串（用于日志）
         """
@@ -1836,15 +1870,6 @@ class TmallVideo(TmallBaseUploader):
 
         for _ in range(timeout_seconds):
             await asyncio.sleep(1)
-            current_url = page.url
-            # 页面跳转到非登录/鉴权页视为成功
-            if (
-                current_url != initial_url
-                and not _is_login_page_url(current_url)
-                and not _is_auth_page_url(current_url)
-            ):
-                return f"页面已跳转：{current_url}"
-
             # 读取 frame 与 page 的文本，检测成功/失败提示
             try:
                 frame_text = await frame.locator("body").inner_text(timeout=3000)
@@ -1977,7 +2002,10 @@ class TmallVideo(TmallBaseUploader):
         finally:
             # 成功后保存 storage_state（更新 Cookie）
             if success:
-                await context.storage_state(path=self.account_file)
+                if session is not None:
+                    await session.save_storage_state()
+                else:
+                    await context.storage_state(path=self.account_file)
                 tmall_logger.success(_msg("🥳", "cookie 更新完毕"))
             # 页面保留供人工复核
             if page:

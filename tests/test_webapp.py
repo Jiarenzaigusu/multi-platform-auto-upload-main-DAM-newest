@@ -773,7 +773,8 @@ class PublishRequestValidationTests(unittest.TestCase):
                 "<p>文案新生</p>",
             ]
         )
-        editor.inner_text = AsyncMock(side_effect=["文案", "文案新生"])
+        editor.inner_text = AsyncMock(side_effect=["文案", "文案新生", "文案新生"])
+        editor.evaluate = AsyncMock(return_value=True)
         trigger = MagicMock()
         trigger.click = AsyncMock()
         trigger.is_visible = AsyncMock(return_value=True)
@@ -809,7 +810,8 @@ class PublishRequestValidationTests(unittest.TestCase):
         second_editor.inner_html = AsyncMock(
             side_effect=["<p>文案</p>", "<p>文案新生</p>"]
         )
-        second_editor.inner_text = AsyncMock(side_effect=["文案", "文案新生"])
+        second_editor.inner_text = AsyncMock(side_effect=["文案", "文案新生", "文案新生"])
+        second_editor.evaluate = AsyncMock(return_value=True)
         trigger = MagicMock()
         trigger.click = AsyncMock()
         trigger.is_visible = AsyncMock(return_value=True)
@@ -834,6 +836,32 @@ class PublishRequestValidationTests(unittest.TestCase):
         self.assertEqual(trigger.click.await_count, 2)
         self.assertEqual(page.keyboard.type.await_count, 2)
         page.keyboard.press.assert_awaited_once_with("Space")
+
+    def test_tmall_content_tag_rejects_plain_text_without_structured_node(self):
+        from uploader.tmall_label_selector import type_tmall_content_tag
+
+        editor = MagicMock()
+        editor.inner_html = AsyncMock(side_effect=["<p>文案</p>", "<p>文案新生</p>"])
+        editor.inner_text = AsyncMock(side_effect=["文案", "文案新生", *(["文案新生"] * 12)])
+        editor.evaluate = AsyncMock(return_value=False)
+        trigger = MagicMock()
+        trigger.click = AsyncMock()
+        trigger.is_visible = AsyncMock(return_value=True)
+        trigger_query = MagicMock()
+        trigger_query.count = AsyncMock(return_value=1)
+        trigger_query.nth.return_value = trigger
+        frame = MagicMock()
+        frame.get_by_text.return_value = trigger_query
+        page = MagicMock()
+        page.keyboard.type = AsyncMock()
+        page.keyboard.press = AsyncMock()
+
+        with patch(
+            "uploader.tmall_label_selector.focus_tmall_editor_end",
+            new=AsyncMock(return_value=editor),
+        ), patch("uploader.tmall_label_selector.asyncio.sleep", new=AsyncMock()):
+            with self.assertRaises(RuntimeError):
+                asyncio.run(type_tmall_content_tag(frame, page, "新生"))
 
     def test_tmall_custom_cover_uses_the_current_two_dialog_flow(self):
         cover = Path(self.temp_dir.name) / "20260811-093942.jpeg"
@@ -881,11 +909,12 @@ class PublishRequestValidationTests(unittest.TestCase):
         selected_control.evaluate = AsyncMock()
         selected_control.is_checked = AsyncMock(return_value=True)
         picker_frame.locator.return_value = selected_control
-        page.frames = [picker_frame]
+        page.frames = [frame, picker_frame]
 
         upload_picker_file = AsyncMock()
         click_visible_frame_button = AsyncMock()
         select_cover_ratio_and_continue = AsyncMock()
+        visible_open_overlay_count = AsyncMock(side_effect=[0, 0])
 
         with (
             patch(
@@ -908,6 +937,10 @@ class PublishRequestValidationTests(unittest.TestCase):
                 "uploader.tmall_video_uploader.main._select_cover_ratio_and_continue",
                 new=select_cover_ratio_and_continue,
             ),
+            patch(
+                "uploader.tmall_video_uploader.main._visible_open_overlay_count",
+                new=visible_open_overlay_count,
+            ),
         ):
             asyncio.run(uploader._set_custom_cover(frame, page))
 
@@ -929,12 +962,13 @@ class PublishRequestValidationTests(unittest.TestCase):
             [
                 ((picker_frame,), ("完成",)),
                 ((picker_frame,), ("确定",)),
-                ((frame,), ("下一步", "完成", "确定")),
+                ((picker_frame, frame), ("下一步", "完成", "确定")),
             ],
         )
         self.assertTrue(
             click_visible_frame_button.await_args_list[-1].kwargs["top_overlay_only"]
         )
+        self.assertEqual(visible_open_overlay_count.await_count, 2)
         frame.get_by_text.assert_called_once_with("智能封面图生成中", exact=False)
 
     def test_tmall_cover_crop_chooses_requested_one_to_one_card(self):
@@ -3839,7 +3873,7 @@ class PlatformAdapterTests(unittest.TestCase):
             asyncio.run(upload_tmall_video(request, paths=paths, session_pool=Pool()))
 
         self.assertEqual(
-            uploader_type.call_args.kwargs["cover_image_path"], "/tmp/cover.png"
+            uploader_type.call_args.kwargs["cover_image_path"], str(Path("/tmp/cover.png"))
         )
 
     def test_jd_publish_adapter_calls_pooled_uploader(self):

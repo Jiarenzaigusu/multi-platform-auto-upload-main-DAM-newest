@@ -69,6 +69,11 @@ JD_CREATOR_DECLARATIONS = (
     "内容为转载",
     "个人观点，仅供参考",
 )
+# 京东发布页“标签”控件的一级标签类型。标签类型独立于“参与话题”。
+JD_TAG_TYPES = (
+    "兴趣标签",
+    "体裁标签",
+)
 # 小红书与抖音当前不强制创作者声明；保留空值以便前端表单复用同一结构。
 SOCIAL_CREATOR_DECLARATIONS = ("",)
 # 仅天猫兼容已下载旧模板的营销声明；京东始终要求其后台真实字段。
@@ -103,6 +108,8 @@ class PublishRequest:
     brand_tag: str              # 品牌标签（仅天猫视频/图文）
     goods_id: str               # 商品 ID 字符串（逗号分隔）
     activity_topic: str         # 参与话题（天猫活动话题 / 京东话题）
+    jd_tag_type: str             # 京东标签类型（兴趣标签 / 体裁标签）
+    jd_tag_path: str             # 京东三级标签路径
     music_name: str             # 音乐名称（天猫有，京东无）
     creator_declaration: str    # 创作者声明
     schedule: datetime | None   # 定时发布时间，None 立即发布
@@ -168,6 +175,49 @@ def parse_goods_ids(raw_goods_ids: str) -> tuple[str, ...]:
     return goods_ids
 
 
+def parse_jd_tag_path(raw_path: str) -> tuple[str, ...]:
+    """解析京东三级标签路径：一级类型 / 二级分类 / 末级标签。"""
+    value = raw_path.strip()
+    if not value:
+        return ()
+    parts = tuple(
+        part.strip()
+        for part in re.split(r"\s*(?:[/／>＞,，|\n])\s*", value)
+        if part.strip()
+    )
+    if len(parts) == 1:
+        # 也接受用户直接用空格填写的三个中文层级。
+        spaced_parts = tuple(value.split())
+        if len(spaced_parts) == 3:
+            parts = spaced_parts
+    if len(parts) != 3:
+        raise ValidationError("京东标签请按“一级类型 / 二级分类 / 标签名称”填写")
+    if parts[0] not in JD_TAG_TYPES:
+        raise ValidationError("京东标签一级类型必须是“兴趣标签”或“体裁标签”")
+    return parts
+
+
+def parse_jd_tag_paths(raw_paths: str) -> tuple[tuple[str, ...], ...]:
+    """解析多条京东标签路径，并校验兴趣/体裁标签数量上限。"""
+    value = raw_paths.strip()
+    if not value:
+        return ()
+    paths = tuple(
+        parse_jd_tag_path(item)
+        for item in re.split(r"\s*(?:\r?\n|[;；])\s*", value)
+        if item.strip()
+    )
+    if len(set(paths)) != len(paths):
+        raise ValidationError("京东标签不能重复")
+    interest_count = sum(parts[0] == "兴趣标签" for parts in paths)
+    genre_count = sum(parts[0] == "体裁标签" for parts in paths)
+    if interest_count > 3:
+        raise ValidationError("京东兴趣标签至多选择 3 个")
+    if genre_count > 1:
+        raise ValidationError("京东体裁标签至多选择 1 个")
+    return paths
+
+
 # 中文定时格式正则："2030年12月31日 14点30分"
 _SCHEDULE_CN_PATTERN = re.compile(
     r"^(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日"
@@ -231,6 +281,8 @@ def validate_publish_request(
     brand_tag: str = "",
     goods_id: str = "",
     activity_topic: str = "",
+    jd_tag_type: str = "",
+    jd_tag_path: str = "",
     raw_music_name: str = "",
     raw_creator_declaration: str = "内容无需标注",
     raw_schedule: str = "",
@@ -243,7 +295,7 @@ def validate_publish_request(
 
     包含通用校验（平台/账号/素材/封面/创作者声明）与平台专属校验：
     - 天猫：标题最多 30 字，文案+标签最多 1000 字，不支持自主原创，最多 6 个商品 ID
-    - 京东：视频标题 5-27 字且无独立文案；图文标题 5-20 字并支持正文；二者均不支持标签/音乐，支持一个可选话题、自主原创，最多 10 个商品 ID
+    - 京东：视频标题 5-27 字且无独立文案；图文标题 5-20 字并支持正文；二者不支持自由文本标签/音乐，支持可选参与话题和标签类型、自主原创，最多 10 个商品 ID
 
     :returns: 校验后的 PublishRequest
     :raises ValidationError: 任一校验失败
@@ -256,6 +308,8 @@ def validate_publish_request(
     normalized_brand_tag = brand_tag.strip()
     goods_ids = parse_goods_ids(goods_id)
     normalized_activity_topic = activity_topic.strip()
+    normalized_jd_tag_type = jd_tag_type.strip()
+    normalized_jd_tag_path = jd_tag_path.strip()
     music_name = raw_music_name.strip()
     creator_declaration = raw_creator_declaration.strip()
     if selected_platform == "tmall":
@@ -382,6 +436,21 @@ def validate_publish_request(
     # 定时发布时间解析
     schedule = parse_schedule(raw_schedule)
     tags = parse_tags(raw_tags, max_tags=4 if selected_platform == "tmall" else 20)
+    if selected_platform == "jd":
+        jd_tag_paths = parse_jd_tag_paths(normalized_jd_tag_path)
+        if jd_tag_paths:
+            if normalized_jd_tag_type and any(
+                normalized_jd_tag_type != parts[0] for parts in jd_tag_paths
+            ):
+                raise ValidationError("京东标签类型与标签路径的一级类型不一致")
+            # 多标签时一级类型已完整包含在每条路径中；旧字段只在类型唯一时保留。
+            path_types = {parts[0] for parts in jd_tag_paths}
+            normalized_jd_tag_type = next(iter(path_types)) if len(path_types) == 1 else ""
+            normalized_jd_tag_path = "\n".join(" / ".join(parts) for parts in jd_tag_paths)
+        if normalized_jd_tag_type and normalized_jd_tag_type not in JD_TAG_TYPES:
+            raise ValidationError("请选择有效的京东标签类型")
+    elif normalized_jd_tag_type or normalized_jd_tag_path:
+        raise ValidationError("京东标签仅支持京东发布")
     if normalized_brand_tag and selected_platform != "tmall":
         raise ValidationError("品牌标签仅支持天猫")
     if len(normalized_brand_tag) > MAX_TMALL_BRAND_TAG_LENGTH:
@@ -465,6 +534,8 @@ def validate_publish_request(
         brand_tag=normalized_brand_tag,
         goods_id=",".join(goods_ids),
         activity_topic=normalized_activity_topic,
+        jd_tag_type=normalized_jd_tag_type,
+        jd_tag_path=normalized_jd_tag_path,
         music_name=music_name,
         creator_declaration=creator_declaration,
         schedule=schedule,

@@ -7,7 +7,7 @@ import os
 import uuid
 from threading import Lock
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import AsyncIterator
@@ -80,7 +80,7 @@ from webapp.api.platforms import delete_account_cookie
 from webapp.api.store import TERMINAL_STATUSES
 from webapp.api.tasks import TaskManager
 from webapp.auth import AuthService, AuthStore, create_auth_router
-from webapp.auth.dependencies import require_admin, require_operator, require_session, require_user
+from webapp.auth.dependencies import require_operator, require_session, require_user
 from webapp.auth.middleware import AuthenticationMiddleware
 from webapp.dashboard import DashboardRepository
 from webapp.dashboard_agent import ChatRequest, ConversationStore, DashboardTools, answer_question
@@ -139,8 +139,6 @@ class WebSettings:
         "http://localhost:8788",
         "http://127.0.0.1:8788",
     )
-    mysql: MySQLSettings = MySQLSettings()
-
     @classmethod
     def from_environment(cls) -> "WebSettings":
         """Load deployment settings while retaining safe local defaults."""
@@ -200,7 +198,6 @@ class WebSettings:
             in {"1", "true", "yes", "on"},
             allowed_hosts=allowed_hosts,
             allowed_origins=allowed_origins,
-            mysql=MySQLSettings.from_environment(),
         )
 
 
@@ -244,6 +241,8 @@ def _agent_asset_request(
     brand_tag: str,
     goods_id: str,
     activity_topic: str,
+    jd_tag_type: str,
+    jd_tag_path: str,
     music_name: str,
     creator_declaration: str,
     schedule: str,
@@ -287,6 +286,8 @@ def _agent_asset_request(
             brand_tag=brand_tag,
             goods_id=goods_id,
             activity_topic=activity_topic,
+            jd_tag_type=jd_tag_type,
+            jd_tag_path=jd_tag_path,
             raw_music_name=music_name,
             raw_creator_declaration=creator_declaration,
             raw_schedule=schedule,
@@ -314,17 +315,11 @@ def create_app(
         AuthStore(data_paths.auth_database),
         session_seconds=settings.session_seconds,
     )
-    mysql_database = MySQLDatabase(settings.mysql)
-    dashboard_repository = DashboardRepository(mysql_database)
-
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         try:
-            if mysql_database.configured:
-                mysql_database.check()
             yield
         finally:
-            mysql_database.close()
             workspace_registry.close()
 
     app = FastAPI(title="MPAU Commerce Console", version="0.1.0", lifespan=lifespan)
@@ -332,8 +327,6 @@ def create_app(
     app.state.data_paths = data_paths
     app.state.workspace_registry = workspace_registry
     app.state.auth_service = auth_service
-    app.state.mysql_database = mysql_database
-    app.state.dashboard_repository = dashboard_repository
     dam_sessions: dict[str, DamSettings] = {}
     dam_sessions_lock = Lock()
     trusted_browser_origins = set(settings.allowed_origins)
@@ -1546,6 +1539,8 @@ def create_app(
         brand_tag: str = Form(""),
         goods_id: str = Form(""),
         activity_topic: str = Form(""),
+        jd_tag_type: str = Form(""),
+        jd_tag_path: str = Form(""),
         music_name: str = Form(""),
         creator_declaration: str = Form("内容无需标注"),
         schedule: str = Form(""),
@@ -1640,6 +1635,8 @@ def create_app(
                 brand_tag=brand_tag,
                 goods_id=goods_id,
                 activity_topic=activity_topic,
+                jd_tag_type=jd_tag_type,
+                jd_tag_path=jd_tag_path,
                 music_name=music_name,
                 creator_declaration=creator_declaration,
                 schedule=schedule,
@@ -1942,11 +1939,6 @@ def run() -> None:
 
     host, port = server_bind_address()
     settings = WebSettings.from_environment()
-    if settings.mysql.host or settings.mysql.database or settings.mysql.user:
-        settings = replace(
-            settings,
-            mysql=prompt_for_mysql_password(settings.mysql),
-        )
     uvicorn.run(create_app(settings), host=host, port=port, reload=False)
 
 

@@ -101,6 +101,8 @@ const WORKSPACE_DRAFT_KEYS = [
   'brandTag',
   'goodsId',
   'activityTopic',
+  'jdTagType',
+  'jdTagPath',
   'musicName',
   'coverRatio',
   'creatorDeclaration',
@@ -117,6 +119,8 @@ function createEmptyWorkspaceDraft() {
     brandTag: '',
     goodsId: '',
     activityTopic: '',
+    jdTagType: '',
+    jdTagPath: '',
     musicName: '',
     coverRatio: '3:4',
     creatorDeclaration: '',
@@ -396,6 +400,8 @@ const form = reactive({
   brandTag: '',
   goodsId: '',
   activityTopic: '',
+  jdTagType: '',
+  jdTagPath: '',
   musicName: '',
   creatorDeclaration: '',
   schedule: '',
@@ -508,8 +514,8 @@ const titlePlaceholder = computed(() => {
 const workflowTip = computed(() => {
   if (isTmall.value && isVideo.value) return '天猫视频步骤：上传视频 → 可选设置自定义封面 → 填写标题、文案、内容标签和品牌标签 → 参与话题 → 可选添加音乐 → 关联商品 → 设置定时 → 选择创作者声明 → 提交发布。'
   if (isTmall.value) return '天猫图文步骤：按顺序上传 1-9 张图片 → 填写标题、文案、内容标签和品牌标签 → 参与话题 → 可选添加音乐 → 关联商品 → 设置定时 → 选择创作者声明 → 提交发布。'
-  if (isJD.value && isVideo.value) return '京东视频步骤：上传视频 → 可选设置封面 → 填写标题 → 关联商品/参与话题 → 选择创作声明与自主原创 → 设置定时 → 提交发布。'
-  if (isJD.value) return '京东图文步骤：按顺序上传 1-20 张 JPG/PNG 图片 → 填写标题与正文 → 关联商品/参与话题 → 选择创作声明与自主原创 → 设置定时 → 提交发布。'
+  if (isJD.value && isVideo.value) return '京东视频步骤：上传视频 → 可选设置封面 → 填写标题 → 关联商品/参与话题/三级标签 → 选择创作声明与自主原创 → 设置定时 → 提交发布。'
+  if (isJD.value) return '京东图文步骤：按顺序上传 1-20 张 JPG/PNG 图片 → 填写标题与正文 → 关联商品/参与话题/三级标签 → 选择创作声明与自主原创 → 设置定时 → 提交发布。'
   if (isXiaohongshu.value && isVideo.value) return '小红书视频步骤：上传视频 → 可选设置封面 → 填写标题、正文和标签 → 可选定时 → 提交发布。'
   if (isXiaohongshu.value) return '小红书图文步骤：按顺序上传 1-35 张 JPG/PNG/WebP 图片 → 填写标题、正文和标签 → 可选定时 → 提交发布。'
   if (isDouyin.value && isVideo.value) return '抖音视频步骤：上传视频 → 可选设置横版封面 → 填写标题、描述和标签 → 可选定时 → 提交发布。'
@@ -1262,6 +1268,8 @@ async function submitPublish() {
   data.append('brand_tag', isTmall.value ? form.brandTag : '')
   data.append('goods_id', isTmall.value || isJD.value ? form.goodsId : '')
   data.append('activity_topic', isTmall.value || isJD.value ? form.activityTopic : '')
+  data.append('jd_tag_type', isJD.value ? form.jdTagType : '')
+  data.append('jd_tag_path', isJD.value ? form.jdTagPath : '')
   data.append('music_name', isTmall.value ? form.musicName : '')
   data.append('creator_declaration', creatorDeclarationOptions.value.length ? form.creatorDeclaration : '')
   data.append('schedule', form.schedule.replace('T', ' '))
@@ -1410,6 +1418,8 @@ function resetUserInterface() {
     brandTag: '',
     goodsId: '',
     activityTopic: '',
+    jdTagType: '',
+    jdTagPath: '',
     musicName: '',
     creatorDeclaration: '',
     schedule: '',
@@ -1687,14 +1697,19 @@ onBeforeUnmount(() => {
               <label class="field"><span>音乐名称 <em>可选</em></span><input v-model="form.musicName" maxlength="100" placeholder="例如：默契" /></label>
             </div>
           </template>
-          <template v-else-if="isArticle || !isJD">
-            <label class="field"><span>{{ descriptionLabel }} <em>可选</em></span><textarea v-model="form.description" :maxlength="isJD ? 1001 : 1000" :placeholder="descriptionPlaceholder" /></label>
-            <div v-if="!isJD" class="field-row">
+          <template v-else-if="isJD">
+            <label v-if="isArticle" class="field"><span>{{ descriptionLabel }} <em>可选</em></span><textarea v-model="form.description" maxlength="1001" :placeholder="descriptionPlaceholder" /></label>
+            <div class="field-row">
+              <label class="field"><span>京东标签 <em>可选</em></span><textarea v-model="form.jdTagPath" placeholder="兴趣标签 / 居家 / 健康环保家居&#10;兴趣标签 / 数码 / 智能设备&#10;体裁标签 / 家装建材 / 装修记录" /><small class="field-hint">每行填写一个“一级类型 / 二级分类 / 标签名称”；兴趣标签至多 3 个，体裁标签至多 1 个</small></label>
+              <label class="field"><span>参与话题 <em>可选</em></span><input v-model="form.activityTopic" placeholder="例如：数码先锋" /></label>
+            </div>
+          </template>
+          <template v-else>
+            <label class="field"><span>{{ descriptionLabel }} <em>可选</em></span><textarea v-model="form.description" maxlength="1000" :placeholder="descriptionPlaceholder" /></label>
+            <div class="field-row">
               <label class="field"><span>标签 <em>可选</em></span><input v-model="form.tags" placeholder="女鞋,夏季穿搭,通勤鞋" /></label>
             </div>
-            <label v-if="isJD" class="field"><span>参与话题 <em>可选</em></span><input v-model="form.activityTopic" placeholder="例如：数码先锋" /></label>
           </template>
-          <p v-else class="platform-tip">京东京麦视频不支持独立文案与标签字段；标题会写入平台正文标题。</p>
 
           <div class="section-heading"><span>03</span><div><h2>发布设置</h2></div></div>
           <div class="field-row">

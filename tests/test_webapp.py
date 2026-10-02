@@ -23,10 +23,14 @@ from uploader.jd_video_uploader.main import (
     JDVideo,
     JdUploadDiagnostics,
     JdVideoProcessingStalledError,
+    JdVideoUploadRetryableError,
     _attach_upload_diagnostics,
     _choose_jd_video_file,
 )
-from uploader.tmall_article_uploader.main import TmallArticle
+from uploader.tmall_article_uploader.main import (
+    TmallArticle,
+    _article_picker_upload_names,
+)
 from uploader.tmall_video_uploader.main import (
     TmallVideo,
     _contains_exact_product_id,
@@ -47,11 +51,15 @@ from webapp.api.batch_templates import build_batch_template
 from webapp.api.batch_xiaohongshu_article import parse_xiaohongshu_article_batch_workbook
 from webapp.api.batch_xiaohongshu_video import parse_xiaohongshu_video_batch_workbook
 from webapp.api.agent_tasks import AgentTaskManager
-from webapp.api.agent_batch import parse_remote_tmall_article_batch_workbook
+from webapp.api.agent_batch import (
+    parse_remote_jd_video_batch_workbook,
+    parse_remote_tmall_article_batch_workbook,
+)
+from uploader.jd_schedule_selector import select_jd_time_value
 from webapp.api.main import WebSettings
 from webapp.api.batch import resolve_local_path
 from webapp.api.main import create_app as _create_app
-from webapp.api.models import ValidationError, validate_account_name, validate_publish_request
+from webapp.api.models import ValidationError, parse_jd_tag_path, parse_jd_tag_paths, validate_account_name, validate_publish_request
 from webapp.api.platforms import (
     JdVideoUploadRequest,
     TmallArticleUploadRequest,
@@ -613,6 +621,7 @@ class PublishRequestValidationTests(unittest.TestCase):
         editor = MagicMock()
         editor.wait_for = AsyncMock()
         editor.click = AsyncMock()
+        editor.evaluate = AsyncMock(side_effect=[True, True])
         editor.inner_html = AsyncMock(
             side_effect=["<p>123</p>", "<p>123Gap</p>", "<p>123<span>Gap</span></p>"]
         )
@@ -647,8 +656,7 @@ class PublishRequestValidationTests(unittest.TestCase):
             page.keyboard.press.await_args_list,
             [
                 call("Escape"),
-                call("ArrowRight"),
-                call("Meta+ArrowDown"),
+                call("Control+A"),
                 call("ArrowRight"),
             ],
         )
@@ -701,21 +709,59 @@ class PublishRequestValidationTests(unittest.TestCase):
         page = MagicMock()
         page.keyboard.press = AsyncMock()
 
-        with patch("uploader.tmall_label_selector.sys.platform", "win32"):
-            result = asyncio.run(focus_tmall_editor_end(frame, page))
+        result = asyncio.run(focus_tmall_editor_end(frame, page))
 
         self.assertIs(result, editor)
-        editor.wait_for.assert_awaited_once_with(state="visible", timeout=10000)
-        editor.click.assert_awaited_once_with()
+        editor.evaluate.assert_not_called()
+
+    def test_tmall_editor_focus_uses_dom_range_for_structured_editor(self):
+        from uploader.tmall_label_selector import focus_tmall_editor_end
+
+        editor = MagicMock()
+        editor.wait_for = AsyncMock()
+        editor.click = AsyncMock()
+        editor.evaluate = AsyncMock(return_value=True)
+        editor_query = MagicMock()
+        editor_query.first = editor
+        frame = MagicMock()
+        frame.locator.return_value = editor_query
+        page = MagicMock()
+        page.keyboard.press = AsyncMock()
+
+        result = asyncio.run(focus_tmall_editor_end(frame, page))
+
+        self.assertIs(result, editor)
+        editor.evaluate.assert_not_awaited()
+        self.assertEqual(
+            page.keyboard.press.await_args_list,
+            [call("Escape"), call("Control+A"), call("ArrowRight")],
+        )
+
+    def test_tmall_editor_focus_does_not_use_dom_text_for_long_copy(self):
+        from uploader.tmall_label_selector import focus_tmall_editor_end
+
+        editor = MagicMock()
+        editor.wait_for = AsyncMock()
+        editor.click = AsyncMock()
+        editor.evaluate = AsyncMock(return_value=False)
+        editor_query = MagicMock()
+        editor_query.first = editor
+        frame = MagicMock()
+        frame.locator.return_value = editor_query
+        page = MagicMock()
+        page.keyboard.press = AsyncMock()
+
+        asyncio.run(focus_tmall_editor_end(frame, page))
+
         self.assertEqual(
             page.keyboard.press.await_args_list,
             [
                 call("Escape"),
-                call("ArrowRight"),
-                call("Control+End"),
+                call("Control+A"),
                 call("ArrowRight"),
             ],
         )
+        editor.evaluate.assert_not_awaited()
 
     def test_tmall_content_tag_enters_toolbar_mode_before_typing_value(self):
         from uploader.tmall_label_selector import type_tmall_content_tag
@@ -727,7 +773,8 @@ class PublishRequestValidationTests(unittest.TestCase):
                 "<p>文案新生</p>",
             ]
         )
-        editor.inner_text = AsyncMock(side_effect=["文案", "文案新生"])
+        editor.inner_text = AsyncMock(side_effect=["文案", "文案新生", "文案新生"])
+        editor.evaluate = AsyncMock(return_value=True)
         trigger = MagicMock()
         trigger.click = AsyncMock()
         trigger.is_visible = AsyncMock(return_value=True)
@@ -763,7 +810,8 @@ class PublishRequestValidationTests(unittest.TestCase):
         second_editor.inner_html = AsyncMock(
             side_effect=["<p>文案</p>", "<p>文案新生</p>"]
         )
-        second_editor.inner_text = AsyncMock(side_effect=["文案", "文案新生"])
+        second_editor.inner_text = AsyncMock(side_effect=["文案", "文案新生", "文案新生"])
+        second_editor.evaluate = AsyncMock(return_value=True)
         trigger = MagicMock()
         trigger.click = AsyncMock()
         trigger.is_visible = AsyncMock(return_value=True)
@@ -788,6 +836,32 @@ class PublishRequestValidationTests(unittest.TestCase):
         self.assertEqual(trigger.click.await_count, 2)
         self.assertEqual(page.keyboard.type.await_count, 2)
         page.keyboard.press.assert_awaited_once_with("Space")
+
+    def test_tmall_content_tag_rejects_plain_text_without_structured_node(self):
+        from uploader.tmall_label_selector import type_tmall_content_tag
+
+        editor = MagicMock()
+        editor.inner_html = AsyncMock(side_effect=["<p>文案</p>", "<p>文案新生</p>"])
+        editor.inner_text = AsyncMock(side_effect=["文案", "文案新生", *(["文案新生"] * 12)])
+        editor.evaluate = AsyncMock(return_value=False)
+        trigger = MagicMock()
+        trigger.click = AsyncMock()
+        trigger.is_visible = AsyncMock(return_value=True)
+        trigger_query = MagicMock()
+        trigger_query.count = AsyncMock(return_value=1)
+        trigger_query.nth.return_value = trigger
+        frame = MagicMock()
+        frame.get_by_text.return_value = trigger_query
+        page = MagicMock()
+        page.keyboard.type = AsyncMock()
+        page.keyboard.press = AsyncMock()
+
+        with patch(
+            "uploader.tmall_label_selector.focus_tmall_editor_end",
+            new=AsyncMock(return_value=editor),
+        ), patch("uploader.tmall_label_selector.asyncio.sleep", new=AsyncMock()):
+            with self.assertRaises(RuntimeError):
+                asyncio.run(type_tmall_content_tag(frame, page, "新生"))
 
     def test_tmall_custom_cover_uses_the_current_two_dialog_flow(self):
         cover = Path(self.temp_dir.name) / "20260811-093942.jpeg"
@@ -814,7 +888,7 @@ class PublishRequestValidationTests(unittest.TestCase):
         cover_dialog = locator()
         cover_dialog.get_by_text.return_value = query(cover_upload)
         opened_overlays = MagicMock()
-        opened_overlays.count = AsyncMock(side_effect=[0, 0, 1])
+        opened_overlays.count = AsyncMock(side_effect=[0, 0, 1, 0])
         opened_overlays.nth.return_value = cover_dialog
 
         frame = MagicMock()
@@ -835,11 +909,12 @@ class PublishRequestValidationTests(unittest.TestCase):
         selected_control.evaluate = AsyncMock()
         selected_control.is_checked = AsyncMock(return_value=True)
         picker_frame.locator.return_value = selected_control
-        page.frames = [picker_frame]
+        page.frames = [frame, picker_frame]
 
         upload_picker_file = AsyncMock()
         click_visible_frame_button = AsyncMock()
         select_cover_ratio_and_continue = AsyncMock()
+        visible_open_overlay_count = AsyncMock(side_effect=[0, 0])
 
         with (
             patch(
@@ -862,6 +937,10 @@ class PublishRequestValidationTests(unittest.TestCase):
                 "uploader.tmall_video_uploader.main._select_cover_ratio_and_continue",
                 new=select_cover_ratio_and_continue,
             ),
+            patch(
+                "uploader.tmall_video_uploader.main._visible_open_overlay_count",
+                new=visible_open_overlay_count,
+            ),
         ):
             asyncio.run(uploader._set_custom_cover(frame, page))
 
@@ -875,15 +954,21 @@ class PublishRequestValidationTests(unittest.TestCase):
         self.assertIn("expectedStem", selection_script)
         self.assertEqual(selection_stem, "mpau-cover-20260817-091530-a1b2c3d4e5f6")
         self.assertNotIn("document.images", selection_script)
+        self.assertIn("card.querySelector('img')", selection_script)
+        self.assertNotIn("PicList_pic_imgBox", selection_script)
         selected_control.evaluate.assert_awaited_once_with("(control) => control.click()")
         self.assertEqual(
             [call.args for call in click_visible_frame_button.await_args_list],
             [
                 ((picker_frame,), ("完成",)),
                 ((picker_frame,), ("确定",)),
-                ((picker_frame,), ("下一步", "完成", "确定")),
+                ((picker_frame, frame), ("下一步", "完成", "确定")),
             ],
         )
+        self.assertTrue(
+            click_visible_frame_button.await_args_list[-1].kwargs["top_overlay_only"]
+        )
+        self.assertEqual(visible_open_overlay_count.await_count, 2)
         frame.get_by_text.assert_called_once_with("智能封面图生成中", exact=False)
 
     def test_tmall_cover_crop_chooses_requested_one_to_one_card(self):
@@ -942,6 +1027,23 @@ class PublishRequestValidationTests(unittest.TestCase):
 
         uploader._crop_uploaded_images.assert_not_awaited()
 
+    def test_tmall_article_picker_names_are_unique_and_keep_order(self):
+        names = _article_picker_upload_names(
+            [Path("8.JPG"), Path("8.png"), Path("2.webp")],
+            now=datetime(2026, 9, 28, 10, 20, 30),
+            task_token="abc123",
+        )
+
+        self.assertEqual(
+            names,
+            [
+                "mpau-article-20260928-102030-abc123-01.jpg",
+                "mpau-article-20260928-102030-abc123-02.png",
+                "mpau-article-20260928-102030-abc123-03.webp",
+            ],
+        )
+        self.assertEqual(len(names), len(set(names)))
+
     def test_tmall_article_one_to_one_ratio_triggers_requested_crop(self):
         uploader = object.__new__(TmallArticle)
         uploader.cover_ratio = "1:1"
@@ -998,9 +1100,22 @@ class PublishRequestValidationTests(unittest.TestCase):
             edit_button = MagicMock()
             edit_button.count = AsyncMock(return_value=1)
             edit_button.is_visible = AsyncMock(return_value=True)
+            edit_button.is_enabled = AsyncMock(return_value=True)
 
             edit_locator = MagicMock()
             edit_locator.filter.return_value.first = edit_button
+
+            preview = MagicMock()
+            preview.first = preview
+            preview.count = AsyncMock(return_value=1)
+            preview.evaluate = AsyncMock(
+                return_value={
+                    "source": "https://img10.360buyimg.com/jdvideo/cover.jpg",
+                    "loaded": True,
+                    "width": 320,
+                    "height": 568,
+                }
+            )
 
             frame = MagicMock()
 
@@ -1009,6 +1124,8 @@ class PublishRequestValidationTests(unittest.TestCase):
                     return body
                 if selector == ".edit-cover-btn":
                     return edit_locator
+                if selector.startswith(".video-cover-wrapper"):
+                    return preview
                 raise AssertionError(f"unexpected selector: {selector}")
 
             frame.locator.side_effect = locator
@@ -1094,6 +1211,77 @@ class PublishRequestValidationTests(unittest.TestCase):
         self.assertEqual(raised.exception.video_id, "")
         self.assertEqual(raised.exception.preview_url, diagnostics.preview_url)
 
+    def test_jd_wait_for_video_uploaded_detects_cover_processing_stall_without_upload_signal(self):
+        uploader = object.__new__(JDVideo)
+        body = MagicMock()
+        body.inner_text = AsyncMock(return_value="封面解析中")
+        edit_button = MagicMock()
+        edit_button.count = AsyncMock(return_value=0)
+        edit_locator = MagicMock()
+        edit_locator.filter.return_value = edit_locator
+        edit_locator.first = edit_button
+        preview = MagicMock()
+        preview.first = preview
+        preview.count = AsyncMock(return_value=0)
+        frame = MagicMock()
+
+        def locator(selector):
+            if selector == "body":
+                return body
+            if selector == ".edit-cover-btn":
+                return edit_locator
+            if selector.startswith(".video-cover-wrapper"):
+                return preview
+            raise AssertionError(f"unexpected selector: {selector}")
+
+        frame.locator.side_effect = locator
+
+        with self.assertRaises(JdVideoProcessingStalledError):
+            asyncio.run(
+                uploader._wait_for_video_uploaded(
+                    frame,
+                    timeout_seconds=5,
+                    stall_seconds=0,
+                )
+            )
+
+    def test_jd_wait_for_video_uploaded_requires_loaded_cover_preview(self):
+        uploader = object.__new__(JDVideo)
+        body = MagicMock()
+        body.inner_text = AsyncMock(return_value="视频已就绪")
+        edit_button = MagicMock()
+        edit_button.count = AsyncMock(return_value=1)
+        edit_button.is_visible = AsyncMock(return_value=True)
+        edit_locator = MagicMock()
+        edit_locator.filter.return_value.first = edit_button
+        preview = MagicMock()
+        preview.first = preview
+        preview.count = AsyncMock(return_value=1)
+        preview.evaluate = AsyncMock(
+            return_value={"source": "", "loaded": False, "width": 0, "height": 0}
+        )
+        frame = MagicMock()
+
+        def locator(selector):
+            if selector == "body":
+                return body
+            if selector == ".edit-cover-btn":
+                return edit_locator
+            if selector.startswith(".video-cover-wrapper"):
+                return preview
+            raise AssertionError(f"unexpected selector: {selector}")
+
+        frame.locator.side_effect = locator
+
+        with self.assertRaises(JdVideoProcessingStalledError):
+            asyncio.run(
+                uploader._wait_for_video_uploaded(
+                    frame,
+                    timeout_seconds=5,
+                    stall_seconds=0,
+                )
+            )
+
     def test_jd_upload_diagnostics_capture_success_and_ignore_videojs_warning(self):
         callbacks = {}
         page = MagicMock()
@@ -1149,6 +1337,8 @@ class PublishRequestValidationTests(unittest.TestCase):
         trigger.nth.return_value = surface
         file_input = MagicMock()
         file_input.wait_for = AsyncMock()
+        # 京麦接收文件后会替换原 input，实时 locator 因而读到空 FileList。
+        file_input.evaluate = AsyncMock(return_value="")
         file_input.locator.return_value = trigger
         first = MagicMock()
         first.first = file_input
@@ -1281,6 +1471,80 @@ class PublishRequestValidationTests(unittest.TestCase):
         first_page.reload.assert_not_awaited()
         second_page.reload.assert_not_awaited()
         self.assertEqual(context.new_page.await_count, 2)
+
+    def test_jd_video_upload_reopens_page_after_upload_page_is_closed(self):
+        uploader = object.__new__(JDVideo)
+        uploader.file_path = "/tmp/demo.mp4"
+        first_page = MagicMock()
+        first_page.url = "https://dr.jd.com/jm/#/n/publish-video.html?platform=jm-pop"
+        first_page.goto = AsyncMock()
+        first_page.reload = AsyncMock()
+        first_page.close = AsyncMock()
+        first_page.is_closed.return_value = False
+        second_page = MagicMock()
+        second_page.url = first_page.url
+        second_page.goto = AsyncMock()
+        second_page.reload = AsyncMock()
+        context = MagicMock()
+        context.new_page = AsyncMock(side_effect=[first_page, second_page])
+        first_frame, second_frame = MagicMock(), MagicMock()
+
+        with (
+            patch(
+                "uploader.jd_video_uploader.main._wait_for_video_upload_surface",
+                new=AsyncMock(side_effect=[first_frame, second_frame]),
+            ),
+            patch(
+                "uploader.jd_video_uploader.main._choose_jd_video_file",
+                new=AsyncMock(),
+            ),
+            patch.object(
+                uploader,
+                "_wait_for_video_uploaded",
+                new=AsyncMock(
+                    side_effect=[
+                        JdVideoUploadRetryableError("发布页已关闭"),
+                        second_frame,
+                    ]
+                ),
+            ),
+        ):
+            page, frame = asyncio.run(uploader._open_page_and_upload_video(context))
+
+        self.assertIs(page, second_page)
+        self.assertIs(frame, second_frame)
+        first_page.close.assert_awaited_once()
+        self.assertEqual(context.new_page.await_count, 2)
+
+    def test_jd_video_upload_closes_final_stalled_page_before_failing(self):
+        uploader = object.__new__(JDVideo)
+        uploader.file_path = "/tmp/demo.mp4"
+        page = MagicMock()
+        page.url = "https://dr.jd.com/jm/#/n/publish-video.html?platform=jm-pop"
+        page.goto = AsyncMock()
+        page.reload = AsyncMock()
+        page.close = AsyncMock()
+        page.is_closed.return_value = False
+        context = MagicMock()
+        context.new_page = AsyncMock(return_value=page)
+        frame = MagicMock()
+
+        with (
+            patch("uploader.jd_video_uploader.main._wait_for_video_upload_surface", new=AsyncMock(return_value=frame)),
+            patch("uploader.jd_video_uploader.main._choose_jd_video_file", new=AsyncMock()),
+            patch.object(
+                uploader,
+                "_wait_for_video_uploaded",
+                new=AsyncMock(
+                    side_effect=JdVideoProcessingStalledError("4657567618", "封面解析中")
+                ),
+            ),
+        ):
+            with self.assertRaises(JdVideoProcessingStalledError):
+                asyncio.run(uploader._open_page_and_upload_video(context))
+
+        self.assertEqual(context.new_page.await_count, 2)
+        self.assertEqual(page.close.await_count, 2)
 
     def test_jd_set_custom_cover_recovers_from_iframe_reload(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2463,6 +2727,33 @@ class JdBatchWorkbookTests(unittest.TestCase):
 
         self.assertEqual(rows[0].request.creator_declaration, "含AI生成内容")
 
+    def test_optional_jd_tag_maps_to_local_and_agent_requests(self):
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.append(["视频路径", "标题", "京东标签"])
+        worksheet.append([
+            str(self.video),
+            "京东视频标题示例",
+            "兴趣标签 / 居家 / 健康环保家居",
+        ])
+        output = BytesIO()
+        workbook.save(output)
+        workbook.close()
+
+        local_rows = parse_jd_video_batch_workbook(
+            output.getvalue(), account="shop1", dry_run=True, headed=True
+        )
+        agent_rows = parse_remote_jd_video_batch_workbook(
+            output.getvalue(), account="shop1", dry_run=True, headed=True
+        )
+
+        for row in (*local_rows, *agent_rows):
+            self.assertEqual(row.request.jd_tag_type, "兴趣标签")
+            self.assertEqual(
+                row.request.jd_tag_path,
+                "兴趣标签 / 居家 / 健康环保家居",
+            )
+
     def test_blank_creator_declaration_is_rejected_when_column_exists(self):
         workbook = Workbook()
         worksheet = workbook.active
@@ -2596,6 +2887,22 @@ class SocialBatchWorkbookTests(unittest.TestCase):
             finally:
                 workbook.close()
 
+    def test_jd_web_templates_are_the_path_import_assistant_templates(self):
+        template_dir = (
+            Path(__file__).resolve().parents[1]
+            / "local_agent"
+            / "assets"
+            / "tmall_path_import"
+        )
+        self.assertEqual(
+            build_batch_template("jd", "video"),
+            (template_dir / "JdVideoTemplate.xlsx").read_bytes(),
+        )
+        self.assertEqual(
+            build_batch_template("jd", "article"),
+            (template_dir / "JdArticleTemplate.xlsx").read_bytes(),
+        )
+
 
 class TmallBatchApiTests(unittest.TestCase):
     def test_valid_workbook_creates_one_job_per_excel_row(self):
@@ -2694,6 +3001,55 @@ class TmallBatchApiTests(unittest.TestCase):
 
 
 class JdBatchApiTests(unittest.TestCase):
+    def test_jd_time_selector_uses_exact_title_match(self):
+        column = MagicMock()
+        candidates = MagicMock()
+        option = MagicMock()
+        candidates.count = AsyncMock(return_value=1)
+        candidates.first = option
+        option.scroll_into_view_if_needed = AsyncMock()
+        option.click = AsyncMock()
+        column.locator.return_value = candidates
+
+        with patch("uploader.jd_schedule_selector.asyncio.sleep", new=AsyncMock()):
+            asyncio.run(select_jd_time_value(column, 30, "分钟"))
+
+        selector = column.locator.call_args.args[0]
+        self.assertIn('title="30"', selector)
+        self.assertNotIn(":has-text", selector)
+        option.scroll_into_view_if_needed.assert_awaited_once()
+        option.click.assert_awaited_once()
+
+    def test_jd_tag_types_use_genre_not_experience(self):
+        self.assertEqual(
+            parse_jd_tag_path("体裁标签 / 家装建材 / 装修记录"),
+            ("体裁标签", "家装建材", "装修记录"),
+        )
+        with self.assertRaisesRegex(ValidationError, "兴趣标签.*体裁标签"):
+            parse_jd_tag_path("体验标签 / 家装建材 / 装修记录")
+
+    def test_jd_tag_paths_allow_three_interests_and_one_genre(self):
+        paths = parse_jd_tag_paths(
+            "兴趣标签 / 居家 / 健康环保家居\n"
+            "兴趣标签 / 数码 / 智能设备\n"
+            "兴趣标签 / 运动 / 户外运动\n"
+            "体裁标签 / 家装建材 / 装修记录"
+        )
+
+        self.assertEqual(len(paths), 4)
+
+    def test_jd_tag_paths_enforce_per_type_limits(self):
+        with self.assertRaisesRegex(ValidationError, "兴趣标签至多选择 3 个"):
+            parse_jd_tag_paths(
+                "\n".join(
+                    f"兴趣标签 / 分类{index} / 标签{index}" for index in range(4)
+                )
+            )
+        with self.assertRaisesRegex(ValidationError, "体裁标签至多选择 1 个"):
+            parse_jd_tag_paths(
+                "体裁标签 / 分类1 / 标签1\n体裁标签 / 分类2 / 标签2"
+            )
+
     def test_valid_article_workbook_creates_jd_article_job(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -2704,11 +3060,11 @@ class JdBatchApiTests(unittest.TestCase):
             worksheet = workbook.active
             worksheet.append([
                 "图片文件夹路径", "标题", "正文内容", "商品ID", "参与话题",
-                "定时发布", "自主原创", "创作者声明",
+                "京东标签", "定时发布", "自主原创", "创作者声明",
             ])
             worksheet.append([
                 str(image_dir), "京东图文标题", "京东图文正文", "12345", "数码先锋",
-                "", "否", "内容无需标注",
+                "兴趣标签 / 居家 / 健康环保家居", "", "否", "内容无需标注",
             ])
             content = BytesIO()
             workbook.save(content)
@@ -2741,6 +3097,10 @@ class JdBatchApiTests(unittest.TestCase):
                 self.assertEqual(created["payload"]["content_type"], "article")
                 self.assertEqual(created["payload"]["description"], "京东图文正文")
                 self.assertEqual(created["payload"]["activity_topic"], "数码先锋")
+                self.assertEqual(
+                    created["payload"]["jd_tag_path"],
+                    "兴趣标签 / 居家 / 健康环保家居",
+                )
             finally:
                 manager.shutdown()
 
@@ -2754,9 +3114,9 @@ class JdBatchApiTests(unittest.TestCase):
             video.write_bytes(b"video")
             workbook = Workbook()
             worksheet = workbook.active
-            worksheet.append(["视频路径", "标题", "商品ID", "定时发布", "自主原创", "创作者声明"])
-            worksheet.append([str(video), "京东视频标题示例", "12345", "", "是", "内容无需标注"])
-            worksheet.append([str(video), "京东夏日好物推荐", "", "", "否", "内容无需标注"])
+            worksheet.append(["视频路径", "标题", "商品ID", "京东标签", "定时发布", "自主原创", "创作者声明"])
+            worksheet.append([str(video), "京东视频标题示例", "12345", "兴趣标签 / 居家 / 健康环保家居", "", "是", "内容无需标注"])
+            worksheet.append([str(video), "京东夏日好物推荐", "", "体裁标签 / 家装建材 / 装修记录", "", "否", "内容无需标注"])
             content = BytesIO()
             workbook.save(content)
             workbook.close()
@@ -2786,6 +3146,14 @@ class JdBatchApiTests(unittest.TestCase):
                 self.assertEqual([job["platform"] for job in body["jobs"]], ["jd", "jd"])
                 self.assertEqual([job["source_row"] for job in body["jobs"]], [2, 3])
                 self.assertTrue(all(job["batch_id"] == body["batch_id"] for job in body["jobs"]))
+                created_payloads = [store.get_job(job["id"])["payload"] for job in body["jobs"]]
+                self.assertEqual(
+                    [(payload["jd_tag_type"], payload["jd_tag_path"]) for payload in created_payloads],
+                    [
+                        ("兴趣标签", "兴趣标签 / 居家 / 健康环保家居"),
+                        ("体裁标签", "体裁标签 / 家装建材 / 装修记录"),
+                    ],
+                )
                 for _ in range(50):
                     statuses = [store.get_job(job["id"])["status"] for job in body["jobs"]]
                     if all(status == "succeeded" for status in statuses):
@@ -3505,7 +3873,7 @@ class PlatformAdapterTests(unittest.TestCase):
             asyncio.run(upload_tmall_video(request, paths=paths, session_pool=Pool()))
 
         self.assertEqual(
-            uploader_type.call_args.kwargs["cover_image_path"], "/tmp/cover.png"
+            uploader_type.call_args.kwargs["cover_image_path"], str(Path("/tmp/cover.png"))
         )
 
     def test_jd_publish_adapter_calls_pooled_uploader(self):

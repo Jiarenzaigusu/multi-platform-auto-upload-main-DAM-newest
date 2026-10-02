@@ -7,11 +7,12 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 from loguru import logger
 
 from uploader.browser_session import (
+    BrowserSession,
     _browser_display_scale,
     launch_browser,
 )
@@ -119,6 +120,53 @@ class BrowserLaunchTests(unittest.TestCase):
         self.assertEqual(options["channel"], "msedge")
         self.assertIn("--force-device-scale-factor=0.700", options["args"])
         self.assertIn("--window-size=1480,1000", options["args"])
+        self.assertIn("--disable-background-timer-throttling", options["args"])
+        self.assertIn("--disable-backgrounding-occluded-windows", options["args"])
+        self.assertIn("--disable-renderer-backgrounding", options["args"])
+
+    def test_headed_publish_window_can_minimize_and_reveal(self):
+        async def scenario():
+            context = MagicMock()
+            cdp = MagicMock()
+            cdp.send = AsyncMock(
+                side_effect=[{"windowId": 42}, None, {"windowId": 42}, None]
+            )
+            cdp.detach = AsyncMock()
+            context.new_cdp_session = AsyncMock(return_value=cdp)
+            page = MagicMock()
+            page.is_closed.return_value = False
+            page.bring_to_front = AsyncMock()
+            session = BrowserSession(
+                FakePlaywright(),
+                Path("tmall.json"),
+                headless=False,
+                logger=MagicMock(),
+                platform_label="天猫",
+                viewport={"width": 1280, "height": 900},
+            )
+            session.context = context
+
+            await session.minimize_page(page)
+            await session.reveal_page(page)
+
+            self.assertEqual(
+                cdp.send.await_args_list,
+                [
+                    call("Browser.getWindowForTarget"),
+                    call(
+                        "Browser.setWindowBounds",
+                        {"windowId": 42, "bounds": {"windowState": "minimized"}},
+                    ),
+                    call("Browser.getWindowForTarget"),
+                    call(
+                        "Browser.setWindowBounds",
+                        {"windowId": 42, "bounds": {"windowState": "normal"}},
+                    ),
+                ],
+            )
+            page.bring_to_front.assert_awaited_once_with()
+
+        asyncio.run(scenario())
 
 class TmallSessionPoolTests(unittest.TestCase):
     def setUp(self) -> None:

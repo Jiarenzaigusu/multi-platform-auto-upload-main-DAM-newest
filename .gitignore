@@ -51,6 +51,9 @@ Thumbs.db
 # Local agent/workspace metadata
 .pi/
 
+# Local pnpm package store
+.pnpm-store/
+
 # Large media files
 *.mp4
 *.mov

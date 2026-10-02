@@ -111,6 +111,8 @@ class JdVideoUploadRequest:
     cover_image_file: Path | None = None
     goods_id: str = ""
     topic: str = ""
+    tag_type: str = ""
+    tag_path: str = ""
     schedule: datetime | None = None
     original: bool = False
     creator_declaration: str = ""
@@ -129,6 +131,8 @@ class JdArticleUploadRequest:
     description: str
     goods_id: str = ""
     topic: str = ""
+    tag_type: str = ""
+    tag_path: str = ""
     schedule: datetime | None = None
     original: bool = False
     creator_declaration: str = ""
@@ -419,6 +423,8 @@ async def upload_jd_video(
         account_file=str(account_file),
         goods_id=request.goods_id,
         topic=request.topic,
+        tag_type=request.tag_type,
+        tag_path=request.tag_path,
         schedule=request.schedule,
         original=request.original,
         creator_declaration=request.creator_declaration,
@@ -458,6 +464,8 @@ async def upload_jd_article(
         account_file=str(account_file),
         goods_id=request.goods_id,
         topic=request.topic,
+        tag_type=request.tag_type,
+        tag_path=request.tag_path,
         schedule=request.schedule,
         original=request.original,
         creator_declaration=request.creator_declaration,

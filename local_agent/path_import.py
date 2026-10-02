@@ -15,6 +15,24 @@ ROW_TAG = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}row"
 # Inline-string cells use t="inlineStr", but their value container is <is>.
 INLINE_TAG = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}is"
 TEXT_TAG = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t"
+VALUE_TAG = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}v"
+
+
+def _template_text(archive: zipfile.ZipFile) -> tuple[ET.Element, str]:
+    """Return the first worksheet XML and all strings referenced by the template."""
+    sheet_xml = archive.read("xl/worksheets/sheet1.xml")
+    root = ET.fromstring(sheet_xml)
+    # Templates may use inline strings (<is><t>), direct strings (t="str"
+    # with <v>), or a sharedStrings.xml table. Accept all three XLSX forms.
+    texts = [item.text or "" for item in root.iter(TEXT_TAG)]
+    texts.extend(item.text or "" for item in root.iter(VALUE_TAG))
+    try:
+        shared_strings = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+    except KeyError:
+        pass
+    else:
+        texts.extend(item.text or "" for item in shared_strings.iter(TEXT_TAG))
+    return root, " ".join(texts)
 
 
 def _install_staged_output(staged_output: Path, output: Path) -> None:
@@ -63,9 +81,7 @@ def _set_cell(root: ET.Element, reference: str, value: str) -> None:
 def import_workbook(template: Path, source: Path, output: Path, cover: Path | None) -> tuple[str, int, int]:
     """Fill a selected template and return (content_type, count, missing_covers)."""
     with zipfile.ZipFile(template) as archive:
-        sheet_xml = archive.read("xl/worksheets/sheet1.xml")
-        root = ET.fromstring(sheet_xml)
-        headers = " ".join(item.text or "" for item in root.iter(TEXT_TAG))
+        root, headers = _template_text(archive)
         is_article = "图片文件夹路径" in headers
         is_video = "视频路径" in headers
         if not is_article and not is_video:
@@ -146,7 +162,8 @@ def run_path_import(asset_directory: Path, parent=None) -> None:
             return
         cover = None
         with zipfile.ZipFile(template) as template_archive:
-            is_video = "视频路径" in template_archive.read("xl/worksheets/sheet1.xml").decode("utf-8", "ignore")
+            _root, template_text = _template_text(template_archive)
+            is_video = "视频路径" in template_text
         if is_video:
             if messagebox.askyesno("可选封面", "是否按同名文件导入封面？", parent=root):
                 cover_name = filedialog.askdirectory(title="第 3 步：选择封面文件夹", parent=root)

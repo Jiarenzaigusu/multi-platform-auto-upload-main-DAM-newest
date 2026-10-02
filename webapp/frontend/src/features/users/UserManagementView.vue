@@ -6,8 +6,11 @@ import { apiRequest } from '../../api-client.js'
 const props = defineProps({
   currentUserId: { type: String, required: true },
 })
+const emit = defineEmits(['brand-binding-changed'])
 
 const users = ref([])
+const brandAccess = ref({ configured: false, brands: [], bindings: {} })
+const bindingDrafts = reactive({})
 const loading = ref(true)
 const busyUserId = ref('')
 const creating = ref(false)
@@ -32,10 +35,36 @@ async function loadUsers() {
   error.value = ''
   try {
     users.value = await apiRequest('/api/admin/users')
+    brandAccess.value = await apiRequest('/api/admin/brand-access')
+    for (const user of users.value) {
+      bindingDrafts[user.id] = String(brandAccess.value.bindings[user.id] || '')
+    }
   } catch (requestError) {
     error.value = requestError.message
   } finally {
     loading.value = false
+  }
+}
+
+async function saveBrandBinding(user) {
+  busyUserId.value = user.id
+  error.value = ''
+  notice.value = ''
+  try {
+    const brandId = bindingDrafts[user.id]
+    await apiRequest(`/api/admin/users/${user.id}/brand-binding`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ brand_id: brandId ? Number(brandId) : null }),
+    })
+    brandAccess.value.bindings[user.id] = brandId ? Number(brandId) : null
+    if (user.id === props.currentUserId) emit('brand-binding-changed')
+    notice.value = `已更新 ${user.username} 的数据品牌权限。`
+  } catch (requestError) {
+    error.value = requestError.message
+    bindingDrafts[user.id] = String(brandAccess.value.bindings[user.id] || '')
+  } finally {
+    busyUserId.value = ''
   }
 }
 
@@ -185,8 +214,15 @@ onMounted(loadUsers)
                 <input v-model="user.display_name" maxlength="80" />
               </label>
               <label>
-                <span>绑定品牌名</span>
+                <span>账户展示品牌名（不授予数据权限）</span>
                 <input v-model="user.brand_name" maxlength="120" spellcheck="false" />
+              </label>
+              <label>
+                <span>数据品牌权限</span>
+                <select v-model="bindingDrafts[user.id]" :disabled="!brandAccess.configured">
+                  <option value="">未绑定</option>
+                  <option v-for="brand in brandAccess.brands" :key="brand.id" :value="String(brand.id)">{{ brand.name }}（ID {{ brand.id }}）</option>
+                </select>
               </label>
               <label>
                 <span>角色</span>
@@ -206,6 +242,7 @@ onMounted(loadUsers)
 
             <div class="user-save-row">
               <button class="user-save" :disabled="busyUserId === user.id" type="button" @click="saveUser(user)">保存资料</button>
+              <button class="user-save" :disabled="busyUserId === user.id || !brandAccess.configured" type="button" @click="saveBrandBinding(user)">保存数据品牌权限</button>
             </div>
 
             <div class="user-security">
@@ -225,7 +262,7 @@ onMounted(loadUsers)
       <form @submit.prevent="createUser">
         <label><span>用户名</span><input v-model="createForm.username" autocomplete="off" minlength="3" maxlength="64" required placeholder="例如 zhangsan" /></label>
         <label><span>显示名称</span><input v-model="createForm.displayName" autocomplete="off" maxlength="80" placeholder="例如 张三" /></label>
-        <label><span>绑定品牌名</span><input v-model="createForm.brandName" autocomplete="organization" maxlength="120" required spellcheck="false" placeholder="例如 Nike" /></label>
+        <label><span>账户展示品牌名</span><input v-model="createForm.brandName" autocomplete="organization" maxlength="120" required spellcheck="false" placeholder="例如 Nike" /></label>
         <label><span>初始密码</span><input v-model="createForm.password" autocomplete="new-password" minlength="10" maxlength="256" required type="password" /></label>
         <label><span>角色</span><select v-model="createForm.role"><option value="operator">操作员</option><option value="admin">管理员</option></select></label>
         <button :disabled="creating" type="submit">{{ creating ? '正在创建…' : '创建公司账号' }}</button>

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+from io import BytesIO
 import json
 import sqlite3
 import tempfile
@@ -10,12 +12,16 @@ import unittest
 from dataclasses import dataclass
 from http.cookies import SimpleCookie
 from pathlib import Path
+from urllib.parse import quote
 from unittest.mock import patch
+
+from openpyxl import Workbook
 
 from webapp.api.main import WebSettings, create_app, server_bind_address
 from webapp.api.models import validate_publish_request
 from webapp.api.tasks import TaskManager
 from webapp.auth import AuthStore
+from webapp.mysql_demo import MySQLSettings
 from webapp.workspaces import AppDataPaths, UserWorkspaceRegistry
 
 
@@ -53,8 +59,9 @@ class _AsgiClient:
         headers: dict[str, str] | None = None,
         json: dict | None = None,
         files: dict | None = None,
+        form: dict[str, str] | None = None,
     ):
-        return self.request("POST", path, headers=headers, json_body=json, files=files)
+        return self.request("POST", path, headers=headers, json_body=json, files=files, form=form)
 
     def patch(
         self,
@@ -73,6 +80,7 @@ class _AsgiClient:
         headers: dict[str, str] | None = None,
         json_body: dict | None = None,
         files: dict | None = None,
+        form: dict[str, str] | None = None,
         scheme: str = "http",
     ) -> _AsgiResponse:
         request_headers = {"host": "testserver", **(headers or {})}
@@ -80,10 +88,15 @@ class _AsgiClient:
         if json_body is not None:
             body = json.dumps(json_body).encode("utf-8")
             request_headers["content-type"] = "application/json"
-        elif files:
+        elif files or form:
             boundary = "mpau-test-boundary"
             chunks: list[bytes] = []
-            for field, (filename, content, content_type) in files.items():
+            for field, value in (form or {}).items():
+                chunks.extend([
+                    f"--{boundary}\r\n".encode(),
+                    f'Content-Disposition: form-data; name="{field}"\r\n\r\n{value}\r\n'.encode(),
+                ])
+            for field, (filename, content, content_type) in (files or {}).items():
                 chunks.extend(
                     [
                         f"--{boundary}\r\n".encode(),
@@ -195,6 +208,26 @@ class MultiUserApiTests(unittest.TestCase):
         self.registry.close()
         self.temp_dir.cleanup()
 
+    def test_deleted_sheet_plan_stays_deleted_when_history_is_scanned(self):
+        user = self.bootstrap_admin()
+        name = "浪琴周报"
+        folder = self.registry.get(user["id"]).paths.runtime / "sheet-fill-plans" / hashlib.sha256(b"unbranded").hexdigest()[:16]
+        tables = folder / "tables"
+        tables.mkdir(parents=True)
+        record = tables / f"{hashlib.sha256(name.casefold().encode()).hexdigest()}.json"
+        content = {"table_name": name, "plan": {"rules": []}}
+        record.write_text(json.dumps(content, ensure_ascii=False), encoding="utf-8")
+        (folder / "old-final.json").write_text(json.dumps({"rules": [{"target_semantic_path": [f"{name}.xlsx"]}]}, ensure_ascii=False), encoding="utf-8")
+
+        self.assertIn(name, self.client.get("/api/sheet-fill/tables").json()["tables"])
+        deleted = self.client.request("DELETE", f"/api/sheet-fill/table?name={quote(name)}", headers=self.csrf_headers())
+        self.assertEqual(deleted.status_code, 200, deleted.text)
+        self.assertFalse(record.exists())
+        self.assertNotIn(name, self.client.get("/api/sheet-fill/tables").json()["tables"])
+        self.assertEqual(self.client.get(f"/api/sheet-fill/table?name={quote(name)}").status_code, 404)
+        record.write_text(json.dumps(content, ensure_ascii=False), encoding="utf-8")
+        self.assertNotIn(name, self.client.get("/api/sheet-fill/tables").json()["tables"])
+
     def test_direct_http_listener_uses_deployment_environment(self):
         with patch.dict(
             "os.environ",
@@ -229,6 +262,125 @@ class MultiUserApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertFalse(response.json()["configured"])
         self.assertTrue(response.json()["empty"])
+
+    def test_dashboard_ai_requires_login_csrf_and_brand_data(self):
+        anonymous = self.client.post("/api/dashboard/analysis")
+        self.assertEqual(anonymous.status_code, 401, anonymous.text)
+        self.bootstrap_admin()
+        without_csrf = self.client.post("/api/dashboard/analysis")
+        self.assertEqual(without_csrf.status_code, 403, without_csrf.text)
+        response = self.client.post("/api/dashboard/analysis", headers=self.csrf_headers())
+        self.assertEqual(response.status_code, 422, response.text)
+
+    def test_dashboard_chat_requires_login_csrf_and_brand_data(self):
+        payload = {"question": "哪些作品点击高？", "period": "2026-08", "content_type": "image", "tag_id": "all"}
+        self.assertEqual(self.client.post("/api/dashboard/chat", json=payload).status_code, 401)
+        self.bootstrap_admin()
+        self.assertEqual(self.client.post("/api/dashboard/chat", json=payload).status_code, 403)
+        response = self.client.post("/api/dashboard/chat", headers=self.csrf_headers(), json=payload)
+        self.assertEqual(response.status_code, 422, response.text)
+
+    def test_brand_data_requires_admin_binding_and_filters_by_brand_id(self):
+        self.bootstrap_admin()
+        operator = self.create_user("samebrand")
+        database = self.app.state.mysql_database
+        database.settings = MySQLSettings(
+            host="db.internal", database="business", user="app", password="secret"
+        )
+        bindings = {}
+        calls = []
+
+        def execute(query, parameters=None):
+            values = tuple(parameters or ())
+            calls.append((query, values))
+            if query.startswith("SELECT id, name FROM brands"):
+                return [(1, "星巴克"), (2, "其他品牌")]
+            if query.startswith("SELECT user_id, brand_id"):
+                return list(bindings.items())
+            if query.startswith("SELECT id FROM brands"):
+                return [(values[0],)] if values[0] in {1, 2} else []
+            if query.startswith("INSERT INTO user_brand_bindings"):
+                bindings[values[0]] = values[1]
+                return []
+            if query.startswith("DELETE FROM user_brand_bindings"):
+                bindings.pop(values[0], None)
+                return []
+            if query.startswith("SELECT b.id, b.name"):
+                brand_id = bindings.get(values[0])
+                return [(brand_id, "星巴克" if brand_id == 1 else "其他品牌")] if brand_id else []
+            if query.startswith("SELECT 1 FROM user_brand_bindings"):
+                return []
+            if query.startswith("SELECT `年份`, `下载周期`, COUNT(*) FROM content_performance"):
+                return [(2026, "8月", 1)]
+            if query.startswith("SHOW COLUMNS FROM content_performance"):
+                return [("brand_id",), ("年份",), ("下载周期",), ("内容ID",), ("点击次数",)]
+            if "LIMIT 20001" in query:
+                return [(2026, "8月", "1383899085827225", 10)]
+            if "GROUP BY `年份`, `下载周期`, `汇总分类`" in query:
+                return [(2026, "8月", "图文", "", 1, 100, 120, 2, 39.5, 20, 10)]
+            if "FROM content_performance" in query and "COUNT(*)" in query:
+                return [(2026, "8月", 1, 50, 120, 39.5, 20, 100, 2, 30)]
+            if "FROM content_performance" in query:
+                return [("图文", "", "1383899085827225", "真实作品", "2026-07-30 16:44:48", 100, 39.5, 20, 10)]
+            raise AssertionError(query)
+
+        with patch.object(database, "execute", side_effect=execute):
+            self.login("samebrand", "operator-password-123")
+            unbound_access = self.client.get("/api/brand-access/me")
+            self.assertEqual(unbound_access.status_code, 200, unbound_access.text)
+            self.assertIsNone(unbound_access.json()["brand"])
+            unbound = self.client.get("/api/dashboard")
+            self.assertEqual(unbound.status_code, 403, unbound.text)
+            self.assertEqual(self.client.get("/api/sheet-fill/database-sources").status_code, 403)
+            self.assertEqual(self.client.get("/api/admin/brand-access").status_code, 403)
+            forbidden_binding = self.client.request(
+                "PUT", f"/api/admin/users/{operator['id']}/brand-binding",
+                headers=self.csrf_headers(), json_body={"brand_id": 1},
+            )
+            self.assertEqual(forbidden_binding.status_code, 403, forbidden_binding.text)
+            self.assertEqual(bindings, {})
+
+            self.login("admin", "admin-password-123")
+            response = self.client.request(
+                "PUT", f"/api/admin/users/{operator['id']}/brand-binding",
+                headers=self.csrf_headers(), json_body={"brand_id": 1},
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(bindings[operator["id"]], 1)
+
+            self.login("samebrand", "operator-password-123")
+            bound_access = self.client.get("/api/brand-access/me")
+            self.assertEqual(bound_access.status_code, 200, bound_access.text)
+            self.assertEqual(bound_access.json()["brand"], {"id": 1, "name": "星巴克"})
+            database_sources = self.client.get("/api/sheet-fill/database-sources")
+            self.assertEqual(database_sources.status_code, 200, database_sources.text)
+            self.assertEqual(database_sources.json()["brand"], "星巴克")
+            self.assertEqual(database_sources.json()["periods"][0]["key"], "2026-08")
+            template = Workbook()
+            template.active.append(["内容ID", "点击次数"])
+            output = BytesIO()
+            template.save(output)
+            inspected = self.client.post(
+                "/api/sheet-fill/inspect", headers=self.csrf_headers(),
+                files={"template": ("待填表.xlsx", output.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+                form={"database_source": "content_performance", "database_period": "2026-08"},
+            )
+            self.assertEqual(inspected.status_code, 200, inspected.text)
+            self.assertTrue(any(item["header"] == "点击次数" for item in inspected.json()["sources"]))
+            scoped = self.client.get("/api/dashboard")
+            self.assertEqual(scoped.status_code, 200, scoped.text)
+            self.assertEqual(scoped.json()["brand"]["id"], 1)
+            self.assertEqual(scoped.json()["summary"]["current"]["content_viewers"], 50)
+            self.assertEqual(scoped.json()["tags"]["image"][0]["samples"][0]["content_id"], "1383899085827225")
+            content_calls = [(query, values) for query, values in calls if "FROM content_performance" in query and values]
+            self.assertTrue(content_calls)
+            self.assertTrue(all(values[0] == 1 for _, values in content_calls))
+            private_detail = self.client.get("/api/guanghe/content/other-brand-content")
+            self.assertEqual(private_detail.status_code, 403, private_detail.text)
+
+            self.login("admin", "admin-password-123")
+            admin_unbound = self.client.get("/api/dashboard")
+            self.assertEqual(admin_unbound.status_code, 403, admin_unbound.text)
 
     def test_direct_http_ip_login_preserves_session_and_csrf_flow(self):
         direct_headers = {

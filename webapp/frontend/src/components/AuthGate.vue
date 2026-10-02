@@ -52,7 +52,7 @@ async function submit() {
     return
   }
   if ((setupRequired.value || registering.value) && !normalizeBrandName(form.brandName)) {
-    error.value = '请输入品牌名；后续品牌数据会按此账号归属隔离。'
+    error.value = '请输入账户展示品牌名；数据品牌权限由管理员设置。'
     return
   }
   form.brandName = normalizeBrandName(form.brandName)
@@ -138,7 +138,7 @@ onMounted(loadStatus)
           />
         </label>
         <label v-if="setupRequired || registering">
-          <span>绑定品牌名</span>
+          <span>账户展示品牌名</span>
           <input
             v-model="form.brandName"
             autocomplete="organization"
@@ -147,7 +147,7 @@ onMounted(loadStatus)
             spellcheck="false"
             placeholder="请输入系统中登记的品牌名，例如：Nike"
           />
-          <small>请按统一品牌名填写；大小写和多余空格会自动规范化。</small>
+          <small>仅用于账户资料；数据品牌权限由管理员设置。</small>
         </label>
         <label>
           <span>密码</span>

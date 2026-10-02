@@ -180,52 +180,62 @@ class MySQLConnectionDemoTests(unittest.TestCase):
 
 
 class DashboardRepositoryTests(unittest.TestCase):
-    def test_maps_daily_and_weekly_metrics_to_dashboard_payload(self):
+    def test_monthly_brand_metrics_and_tags_use_only_bound_brand(self):
         database = MagicMock()
-        database.settings.database = "movado_data"
-        daily_row = (
-            "2026-09-07", 122, 151, 13, 40, 1, 1, 2, 2, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0,
-        )
-        weekly_row = (
-            "2026-W35", "第35周", "光合数据总览", 957, 11, 246, 0, 0,
-            133, 47, 1407, 20, 426, 0, 6, 6, 4104, 343, 0.0835,
-        )
-        report_period = ("2026-08-31", "2026-09-06")
+        database.settings.database = "starbucks"
 
         def execute(query, parameters=None):
-            if "MAX(metric_date)" in query:
-                return [("2026-09-07",)]
-            if "CONCAT(YEAR(week_start)" in query:
-                return [(
-                    "2026-W35", "2026-08-31 — 2026-09-06", "光合数据", 798,
-                    0, 160, 0, 12000, 155, 155, 0, 160, 0, 0, 0, 0, 0, None,
-                )]
-            if "FROM guanghe_metrics" in query and "channel = '光合数据总览'" in query:
-                return [weekly_row]
-            if "GROUP BY week_start, week_end" in query:
-                return [report_period]
-            if "FROM subscription_daily_metrics" in query:
-                return [daily_row]
-            if "FROM weekly_report_summary" in query and "content_viewers" in query:
-                return [("光合数据", 798, 155, 12000, 160)]
-            if "FROM weekly_report_notes" in query:
-                return [("本周图文发布7条",)]
-            return []
+            self.assertEqual(parameters[0], 7)
+            if "GROUP BY `年份`, `下载周期`, `汇总分类`" in query:
+                return [
+                    (2026, "8月", "图文", "", 1, 100, 130, 4, 20, 12, 30),
+                    (2026, "8月", "往期视频", "", 1, 100, 120, 4, 19.5, 8, 20),
+                    (2026, "7月", "图文", "", 1, 90, 120, 3, 10, 9, 15),
+                ]
+            if "COUNT(*)" in query:
+                return [
+                    (2026, "8月", 2, 100, 250, 39.5, 20, 200, 8, 30),
+                    (2026, "7月", 1, 50, 120, 10, 9, 90, 3, 12),
+                ]
+            return [
+                ("图文", "", "123", "真实作品", "2025-11-29 21:00:00", 100, 20, 12, 30),
+                ("图文", "", "456", "另一篇图文", "2026-03-15 20:00:00", 50, 0, 1, 5),
+            ]
 
         database.execute.side_effect = execute
-        payload = DashboardRepository(database).load("week")
+        payload = DashboardRepository(database).load(7, "星巴克")
 
-        self.assertEqual(payload["source"]["database"], "movado_data")
-        self.assertEqual(payload["summary"]["current"]["content_viewers"], 798)
-        self.assertEqual(payload["trend"][0]["content_viewers"], 13)
-        self.assertEqual(payload["channels"][0]["name"], "光合数据")
-        self.assertEqual(payload["notes"][0]["text"], "本周图文发布7条")
+        self.assertEqual(payload["selected_period"], "2026-08")
+        self.assertEqual(payload["brand"], {"id": 7, "name": "星巴克"})
+        self.assertEqual(payload["summary"]["current"]["content_viewers"], 100)
+        self.assertEqual(payload["summary"]["current"]["impressions"], 250)
+        self.assertEqual(payload["comparisons"]["previous_week"]["values"]["content_viewers"], 50)
+        self.assertEqual(payload["tags"]["video"][0]["category"], "往期视频")
+        self.assertEqual(payload["tags"]["image"][0]["subcategory"], "")
+        self.assertEqual(payload["tags"]["image"][0]["samples"][0]["title"], "真实作品")
+        self.assertEqual(payload["tags"]["image"][0]["samples"][0]["exposure"], 100)
+        self.assertEqual(payload["tags"]["image"][0]["clicks"], 30)
+        self.assertEqual(payload["tags"]["image"][0]["trends"]["clicks"], [15, 30])
+        self.assertEqual(payload["tags"]["image"][0]["samples"][0]["clicks"], 30)
+        self.assertEqual(len(payload["tags"]["image"][0]["samples"]), 2)
+        self.assertIn("2025-11-29", payload["tags"]["image"][0]["samples"][0]["meta"])
+        self.assertTrue(all(call.args[1][0] == 7 for call in database.execute.call_args_list))
+
+    def test_samples_include_revenue_leader_outside_exposure_top_five(self):
+        database = MagicMock()
+        database.execute.side_effect = [
+            [(2026, "8月", "AI短视频", "", 6, 401, 500, 0, 500, 0, 0)],
+            [("AI短视频", "", str(index), f"作品{index}", None, exposure, revenue, 0, 0)
+             for index, (exposure, revenue) in enumerate([(100, 0), (90, 0), (80, 0), (70, 0), (60, 0), (1, 500)])],
+        ]
+        tags = DashboardRepository(database)._categories(7, "2026-08", None, [{"period_key": "2026-08", "label": "2026年8月"}])["tags"]
+        self.assertEqual({sample["content_id"] for sample in tags["video"][0]["samples"]}, {"0", "1", "2", "3", "4", "5"})
 
     def test_rejects_unknown_period(self):
         database = MagicMock()
+        database.execute.return_value = [(2026, "8月", 1, 1, 1, 1, 1, 1, 1, 1)]
         with self.assertRaises(ValueError):
-            DashboardRepository(database).load("month")
+            DashboardRepository(database).load(7, "星巴克", "2026-05")
 
 
 if __name__ == "__main__":

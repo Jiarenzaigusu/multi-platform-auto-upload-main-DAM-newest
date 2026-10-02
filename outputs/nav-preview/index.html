@@ -1,3 +1,5 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>侧边栏导航样式对照</title><style>
 :root {
   --font-sans: "Avenir Next", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
   --ink: #183033;
@@ -232,13 +234,6 @@ svg {
 .rail nav .nav-subsection {
   display: grid;
   gap: 5px;
-}
-
-.rail nav .sub-nav-entry {
-  min-height: 36px;
-  margin-left: 18px;
-  padding-left: 16px;
-  font-size: 12px;
 }
 
 .rail nav .nav-icon {
@@ -1607,11 +1602,6 @@ svg {
     width: 100%;
   }
 
-  .rail nav .sub-nav-entry {
-    min-height: 40px;
-    margin-left: 0;
-  }
-
   .rail-note {
     display: none;
   }
@@ -1775,3 +1765,139 @@ svg {
     grid-template-columns: 1fr !important;
   }
 }
+
+body { margin: 0; background: #eef2ec; }
+.preview-head { padding: 22px 26px 0; color: #183033; font-size: 15px; font-weight: 700; }
+.preview-head span { display: block; margin-top: 6px; color: #53676a; font-size: 12px; font-weight: 400; }
+.preview-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 260px)); gap: 20px; padding: 20px 26px 30px; align-items: start; }
+.preview-grid figure { margin: 0; display: grid; gap: 10px; }
+.preview-grid figcaption { color: #3c5c53; font-size: 12px; font-weight: 700; }
+.preview-grid figcaption em { display: block; margin-top: 3px; color: #7b8f86; font-style: normal; font-weight: 400; }
+.preview-grid .rail { position: static; height: auto; border-radius: 14px; overflow: hidden; padding: 18px 14px 16px; }
+.preview-grid .rail nav { margin-top: 18px; }
+
+.preview-legacy .nav-subsection .feature-nav-entry { margin-left: 18px; padding-left: 16px; min-height: 36px; font-size: 12px; }
+.preview-legacy .nav-subsection .feature-nav-entry.active { border-color: rgba(231, 237, 106, .55); color: #1a3634; background: var(--accent); box-shadow: 0 8px 16px rgba(0, 0, 0, .12); font-weight: 850; }
+
+</style></head><body>
+<p class="preview-head">侧边栏「数据看板 / 智能表格」样式对照<span>三栏：最初的整块实心胶囊、上一版的从属缩进、现在的同级同格式。样式直接取自项目 styles.css。</span></p>
+<div class="preview-grid">
+  <figure><figcaption>最初<em>子项整块实心强调色</em></figcaption><div class="preview-legacy"><aside class="rail">
+    <div class="brand"><span class="brand-mark">M</span><div><strong>智能发布中枢系统</strong></div></div>
+          <nav>
+        <button class="feature-nav-entry"  >
+          <span>AI 文案工坊</span>
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3c.6 3.3 2.7 5.4 6 6-3.3.6-5.4 2.7-6 6-.6-3.3-2.7-5.4-6-6 3.3-.6 5.4-2.7 6-6Z" /><path d="M18.5 15.5c.2 1.4 1.1 2.3 2.5 2.5-1.4.2-2.3 1.1-2.5 2.5-.2-1.4-1.1-2.3-2.5-2.5 1.4-.2 2.3-1.1 2.5-2.5Z" /></svg></span>
+        </button>
+        <button class="feature-nav-entry"  >
+          <span>发布工作台</span>
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 15V4m0 0L8 8m4-4 4 4" /><path d="M5 14v5h14v-5" /></svg></span>
+        </button>
+        <button class="feature-nav-entry"  >
+          <span>批量发布任务</span>
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="7" y="4" width="12" height="14" rx="2" /><path d="M15 18v2H5a2 2 0 0 1-2-2V8h4M10 9h6m-6 4h6" /></svg></span>
+        </button>
+        <div class="nav-subsection">
+          <button class="feature-nav-entry"  >
+            <span>数据看板</span>
+            <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 19V9m6 10V5m6 14v-7m4 7H2" /><path d="m4 7 6-4 6 7 4-3" /></svg></span>
+          </button>
+          <button class="feature-nav-entry"  >
+            <span>智能表格</span>
+            <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="16" rx="2" /><path d="M3.5 10h17M10.5 10v10" /></svg></span>
+          </button>
+        </div>
+        <button class="feature-nav-entry"  >
+          <span>LLM 适配器</span>
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.5" /><circle cx="18" cy="6" r="2.5" /><circle cx="12" cy="18" r="2.5" /><path d="m8 7.5 2.7 7.8m5.3-7.8-2.7 7.8M8.5 6h7" /></svg></span>
+        </button>
+        <button class="feature-nav-entry"  >
+          <span>任务与日志</span>
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6z" /><path d="M15 3v5h4M9 12h7m-7 4h7" /></svg></span>
+        </button>
+        <button  class="feature-nav-entry"  >
+          <span>用户与权限</span>
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3" /><path d="M3.5 19c.5-4 2.3-6 5.5-6s5 2 5.5 6M16 8h5m-2.5-2.5v5M16 15h5m-5 4h5" /></svg></span>
+        </button>
+      </nav>
+  </aside></div></figure>
+  <figure><figcaption>现在 · 选中数据看板<em>智能表格与其余菜单项格式一致</em></figcaption><aside class="rail">
+    <div class="brand"><span class="brand-mark">M</span><div><strong>智能发布中枢系统</strong></div></div>
+          <nav>
+        <button class="feature-nav-entry"  >
+          <span>AI 文案工坊</span>
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3c.6 3.3 2.7 5.4 6 6-3.3.6-5.4 2.7-6 6-.6-3.3-2.7-5.4-6-6 3.3-.6 5.4-2.7 6-6Z" /><path d="M18.5 15.5c.2 1.4 1.1 2.3 2.5 2.5-1.4.2-2.3 1.1-2.5 2.5-.2-1.4-1.1-2.3-2.5-2.5 1.4-.2 2.3-1.1 2.5-2.5Z" /></svg></span>
+        </button>
+        <button class="feature-nav-entry"  >
+          <span>发布工作台</span>
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 15V4m0 0L8 8m4-4 4 4" /><path d="M5 14v5h14v-5" /></svg></span>
+        </button>
+        <button class="feature-nav-entry"  >
+          <span>批量发布任务</span>
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="7" y="4" width="12" height="14" rx="2" /><path d="M15 18v2H5a2 2 0 0 1-2-2V8h4M10 9h6m-6 4h6" /></svg></span>
+        </button>
+        <div class="nav-subsection">
+          <button class="feature-nav-entry"  >
+            <span>数据看板</span>
+            <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 19V9m6 10V5m6 14v-7m4 7H2" /><path d="m4 7 6-4 6 7 4-3" /></svg></span>
+          </button>
+          <button class="feature-nav-entry"  >
+            <span>智能表格</span>
+            <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="16" rx="2" /><path d="M3.5 10h17M10.5 10v10" /></svg></span>
+          </button>
+        </div>
+        <button class="feature-nav-entry"  >
+          <span>LLM 适配器</span>
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.5" /><circle cx="18" cy="6" r="2.5" /><circle cx="12" cy="18" r="2.5" /><path d="m8 7.5 2.7 7.8m5.3-7.8-2.7 7.8M8.5 6h7" /></svg></span>
+        </button>
+        <button class="feature-nav-entry"  >
+          <span>任务与日志</span>
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6z" /><path d="M15 3v5h4M9 12h7m-7 4h7" /></svg></span>
+        </button>
+        <button  class="feature-nav-entry"  >
+          <span>用户与权限</span>
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3" /><path d="M3.5 19c.5-4 2.3-6 5.5-6s5 2 5.5 6M16 8h5m-2.5-2.5v5M16 15h5m-5 4h5" /></svg></span>
+        </button>
+      </nav>
+  </aside></figure>
+  <figure><figcaption>现在 · 选中智能表格<em>激活态与一级菜单完全相同</em></figcaption><aside class="rail">
+    <div class="brand"><span class="brand-mark">M</span><div><strong>智能发布中枢系统</strong></div></div>
+          <nav>
+        <button class="feature-nav-entry"  >
+          <span>AI 文案工坊</span>
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3c.6 3.3 2.7 5.4 6 6-3.3.6-5.4 2.7-6 6-.6-3.3-2.7-5.4-6-6 3.3-.6 5.4-2.7 6-6Z" /><path d="M18.5 15.5c.2 1.4 1.1 2.3 2.5 2.5-1.4.2-2.3 1.1-2.5 2.5-.2-1.4-1.1-2.3-2.5-2.5 1.4-.2 2.3-1.1 2.5-2.5Z" /></svg></span>
+        </button>
+        <button class="feature-nav-entry"  >
+          <span>发布工作台</span>
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 15V4m0 0L8 8m4-4 4 4" /><path d="M5 14v5h14v-5" /></svg></span>
+        </button>
+        <button class="feature-nav-entry"  >
+          <span>批量发布任务</span>
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="7" y="4" width="12" height="14" rx="2" /><path d="M15 18v2H5a2 2 0 0 1-2-2V8h4M10 9h6m-6 4h6" /></svg></span>
+        </button>
+        <div class="nav-subsection">
+          <button class="feature-nav-entry"  >
+            <span>数据看板</span>
+            <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 19V9m6 10V5m6 14v-7m4 7H2" /><path d="m4 7 6-4 6 7 4-3" /></svg></span>
+          </button>
+          <button class="feature-nav-entry"  >
+            <span>智能表格</span>
+            <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="16" rx="2" /><path d="M3.5 10h17M10.5 10v10" /></svg></span>
+          </button>
+        </div>
+        <button class="feature-nav-entry"  >
+          <span>LLM 适配器</span>
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.5" /><circle cx="18" cy="6" r="2.5" /><circle cx="12" cy="18" r="2.5" /><path d="m8 7.5 2.7 7.8m5.3-7.8-2.7 7.8M8.5 6h7" /></svg></span>
+        </button>
+        <button class="feature-nav-entry"  >
+          <span>任务与日志</span>
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6z" /><path d="M15 3v5h4M9 12h7m-7 4h7" /></svg></span>
+        </button>
+        <button  class="feature-nav-entry"  >
+          <span>用户与权限</span>
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3" /><path d="M3.5 19c.5-4 2.3-6 5.5-6s5 2 5.5 6M16 8h5m-2.5-2.5v5M16 15h5m-5 4h5" /></svg></span>
+        </button>
+      </nav>
+  </aside></figure>
+</div>
+</body></html>

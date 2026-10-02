@@ -6,11 +6,13 @@ import AuthGate from './components/AuthGate.vue'
 import DamAssetPicker from './components/DamAssetPicker.vue'
 import AiCopyView from './features/ai-copy/AiCopyView.vue'
 import DashboardView from './features/dashboard/DashboardView.vue'
+import SmartSheetView from './features/dashboard/SmartSheetView.vue'
 import LlmAdapterView from './features/llm-adapter/LlmAdapterView.vue'
 import UserManagementView from './features/users/UserManagementView.vue'
 
 const apiBase = import.meta.env.VITE_API_BASE_URL || ''
 const currentUser = ref(null)
+const brandAccess = ref({ loaded: false, configured: false, brand: null, error: false })
 const agentSetupOpen = ref(false)
 const agentStatus = reactive({
   checked: false,
@@ -477,6 +479,12 @@ const creatorDeclarationOptions = computed(() => platformMeta[form.platform]?.cr
 const isVideo = computed(() => form.contentType === 'video')
 const isArticle = computed(() => form.contentType === 'article')
 const isAdmin = computed(() => currentUser.value?.role === 'admin')
+const brandLabel = computed(() => {
+  if (!brandAccess.value.loaded) return '正在读取数据品牌'
+  if (brandAccess.value.error) return '数据品牌暂不可用'
+  if (!brandAccess.value.configured) return '数据品牌未配置'
+  return brandAccess.value.brand ? `数据品牌：${brandAccess.value.brand.name}` : '未绑定数据品牌'
+})
 const platformLabel = (platform) => platformMeta[platform]?.label || platform
 const batchPlatformLabel = computed(() => platformLabel(batchForm.platform))
 const batchContentTypeLabel = computed(() => batchForm.contentType === 'article' ? '图文' : '视频')
@@ -568,6 +576,7 @@ const visibleAccounts = computed(() => accounts.value.filter((item) => item.plat
 const batchAccounts = computed(() => accounts.value.filter((item) => item.platform === batchForm.platform))
 const viewTitle = computed(() => ({
   dashboard: '数据看板',
+  'smart-sheet': '智能表格',
   publish: '新建发布任务',
   'ai-copy': 'AI 文案工坊',
   'llm-adapter': 'LLM 适配器',
@@ -577,6 +586,7 @@ const viewTitle = computed(() => ({
 }[activeView.value] || '智能发布中枢系统'))
 const viewEyebrow = computed(() => ({
   dashboard: 'PERFORMANCE OVERVIEW',
+  'smart-sheet': 'SMART SPREADSHEET',
   'ai-copy': 'AI COPY STUDIO',
   'llm-adapter': 'LLM ROUTING DESK',
   users: 'ACCESS DIRECTORY',
@@ -1443,14 +1453,27 @@ function endAuthenticatedSession() {
   window.clearInterval(refreshTimer)
   refreshTimer = null
   currentUser.value = null
+  brandAccess.value = { loaded: false, configured: false, brand: null, error: false }
   activeView.value = 'publish'
   resetUserInterface()
+}
+
+async function refreshBrandAccess() {
+  const userId = currentUser.value?.id
+  if (!userId) return
+  try {
+    const result = await request('/api/brand-access/me')
+    if (currentUser.value?.id === userId) brandAccess.value = { ...result, loaded: true, error: false }
+  } catch {
+    if (currentUser.value?.id === userId) brandAccess.value = { loaded: true, configured: false, brand: null, error: true }
+  }
 }
 
 /** Initialize only the authenticated user's drafts, data, and refresh loop. */
 async function beginAuthenticatedSession(user) {
   endAuthenticatedSession()
   currentUser.value = user
+  refreshBrandAccess()
   activeView.value = 'publish'
   scheduleMinimum.value = formatLocalDateTime(minimumScheduleDate())
   await restorePublishDraft()
@@ -1509,10 +1532,16 @@ onBeforeUnmount(() => {
           <span>批量发布任务</span>
           <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="7" y="4" width="12" height="14" rx="2" /><path d="M15 18v2H5a2 2 0 0 1-2-2V8h4M10 9h6m-6 4h6" /></svg></span>
         </button>
-        <button class="feature-nav-entry" :class="{ active: activeView === 'dashboard' }" @click="activeView = 'dashboard'">
-          <span>数据看板</span>
-          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 19V9m6 10V5m6 14v-7m4 7H2" /><path d="m4 7 6-4 6 7 4-3" /></svg></span>
-        </button>
+        <div class="nav-subsection">
+          <button class="feature-nav-entry" :class="{ active: activeView === 'dashboard' }" @click="activeView = 'dashboard'">
+            <span>数据看板</span>
+            <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 19V9m6 10V5m6 14v-7m4 7H2" /><path d="m4 7 6-4 6 7 4-3" /></svg></span>
+          </button>
+          <button class="feature-nav-entry" :class="{ active: activeView === 'smart-sheet' }" @click="activeView = 'smart-sheet'">
+            <span>智能表格</span>
+            <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="16" rx="2" /><path d="M3.5 10h17M10.5 10v10" /></svg></span>
+          </button>
+        </div>
         <button class="feature-nav-entry" :class="{ active: activeView === 'llm-adapter' }" @click="activeView = 'llm-adapter'">
           <span>LLM 适配器</span>
           <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.5" /><circle cx="18" cy="6" r="2.5" /><circle cx="12" cy="18" r="2.5" /><path d="m8 7.5 2.7 7.8m5.3-7.8-2.7 7.8M8.5 6h7" /></svg></span>
@@ -1541,7 +1570,7 @@ onBeforeUnmount(() => {
           <h1>{{ viewTitle }}</h1>
         </div>
         <div class="session-actions">
-          <span><strong>{{ currentUser.display_name }}</strong><small>{{ currentUser.username }} · {{ currentUser.brand_name || '未绑定品牌' }} · {{ currentUser.role }}</small></span>
+          <span><strong>{{ currentUser.display_name }}</strong><small>{{ currentUser.username }} · {{ brandLabel }} · {{ currentUser.role }}</small></span>
           <button
             class="agent-connection-status"
             :class="{ online: agentStatus.online, offline: !agentStatus.online && agentStatus.checked && !agentStatus.unavailable, unknown: agentStatus.unavailable || !agentStatus.checked, updates: agentUpdateAvailable }"
@@ -1552,14 +1581,15 @@ onBeforeUnmount(() => {
             <i aria-hidden="true"></i>{{ agentStatusLabel }}
           </button>
           <button class="refresh agent-windows" :class="{ updates: agentUpdateAvailable }" type="button" @click="agentSetupOpen = true">Windows 助手</button>
-          <button v-if="!['dashboard', 'ai-copy', 'llm-adapter', 'users'].includes(activeView)" class="refresh" @click="refreshDashboard">刷新状态</button>
+          <button v-if="!['dashboard', 'smart-sheet', 'ai-copy', 'llm-adapter', 'users'].includes(activeView)" class="refresh" @click="refreshDashboard">刷新状态</button>
           <button class="refresh logout" type="button" @click="logout">退出</button>
         </div>
       </header>
 
-      <p v-if="notice && !['dashboard', 'ai-copy', 'llm-adapter'].includes(activeView)" :class="['notice', `notice-${noticeType}`]">{{ notice }}</p>
+      <p v-if="notice && !['dashboard', 'smart-sheet', 'ai-copy', 'llm-adapter'].includes(activeView)" :class="['notice', `notice-${noticeType}`]">{{ notice }}</p>
 
       <DashboardView v-if="activeView === 'dashboard'" />
+      <SmartSheetView v-else-if="activeView === 'smart-sheet'" />
 
       <AiCopyView
         v-else-if="activeView === 'ai-copy'"
@@ -1691,7 +1721,7 @@ onBeforeUnmount(() => {
 
       <LlmAdapterView v-else-if="activeView === 'llm-adapter'" />
 
-      <UserManagementView v-else-if="activeView === 'users'" :current-user-id="currentUser.id" />
+      <UserManagementView v-else-if="activeView === 'users'" :current-user-id="currentUser.id" @brand-binding-changed="refreshBrandAccess" />
 
       <section v-else-if="activeView === 'batch'" class="batch-layout">
         <form class="editor-card batch-card" novalidate @submit.prevent="submitBatch">

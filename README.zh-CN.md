@@ -213,40 +213,41 @@ MySQL 密码，并在服务生命周期内复用 `app.state.mysql_database`；�
 也可以用管理员账号登录后访问 `GET /api/mysql/demo`。该检查只执行
 `SELECT VERSION(), DATABASE()`，不会建表或修改数据。未配置 MySQL 时，现有服务仍可正常启动。
 
-### Movado 数据看板
+### 品牌数据看板
 
-数据看板页面会在登录后访问 `GET /api/dashboard?period=week`，只读以下 Movado 表：
+原有“数据看板”直接读取 MySQL 的 `content_performance`，页面保留趋势、内容标签分析和
+AI 内容分析。管理员在“用户与权限”中将账户绑定到 `brands` 的品牌 ID；
+`GET /api/dashboard` 只汇总该品牌的数据，未绑定账户返回 403。账户资料中的品牌名称
+不授予数据访问权限；页面右上角显示的是 MySQL 中实际绑定的数据品牌。
 
-- `guanghe_metrics`：周度光合数据，用于周度核心指标与渠道趋势；
-- `subscription_daily_metrics`：每日订阅/内容指标，用于日趋势和近 30 天聚合；
-- `weekly_report_summary`、`weekly_report_notes`：周报渠道拆解和运营备注。
+看板按表中的“年份 + 下载周期”汇总。当前数据的周期为 2026 年 6、7、8 月，所以页面按
+下载月份切换，显示上期对比；只有导入去年同月数据后才显示同比。趋势指标来自“查看人数”、
+“曝光次数”、“种草成交金额”、“商品点击人数”；标签板块按“汇总分类 + 二级分类”
+聚合，一级分类可展开二级分类（例如“种草短视频”下的“桌面”），并展示同品牌、同下载周期的真实内容案例。各内容人数直接求和，不代表去重人数。
+“内容发布时间”是作品发布时间，不用于决定下载周期。
 
-首次使用时，先将提供的 `movado_data.sql` 导入 MySQL（该文件会创建并填充
-`movado_data` 数据库），再把 `MPAU_MYSQL_DATABASE` 设置为 `movado_data`，并配置其余
-`MPAU_MYSQL_*` 连接变量。看板支持本周、上周、近 30 天；没有配置或没有数据时会显示
-明确的空态，不会用演示数字代替真实数据。
-
-例如：
+本机通过 SSH 代理访问 MySQL 时，可把连接变量放在项目根目录的 `.env`（该文件已被 Git
+忽略），并显式加载后启动服务：
 
 ```bash
-mysql -u root -p < /path/to/movado_data.sql
-export MPAU_MYSQL_HOST='127.0.0.1'
-export MPAU_MYSQL_PORT='3306'
-export MPAU_MYSQL_DATABASE='movado_data'
-export MPAU_MYSQL_USER='mpau_app'
-export MPAU_MYSQL_PASSWORD='数据库密码'
-mpau-web
+.venv/bin/python -m uvicorn webapp.api.main:app --env-file .env --host 127.0.0.1 --port 8788
 ```
 
-以 systemd 等方式在服务器直接运行本项目且 MySQL 也在同一台服务器时，使用
-`MPAU_MYSQL_HOST=127.0.0.1` 和 `MPAU_MYSQL_PORT=3306`。若项目在 Docker 内，
-容器中的 `127.0.0.1` 不是宿主机，应使用同一 Docker 网络内的 MySQL 服务名，或配置明确的宿主机网关地址。
-在本机测试服务器数据库时，需要选择以下一种方式：
+保持本地代理端口运行；更新 `.env` 后重启服务，新连接配置才会生效。
 
-- MySQL 已安全放行本机 IP：把 `MPAU_MYSQL_HOST` 设置为服务器地址，端口设置为对外映射端口；
-- 推荐使用 SSH 隧道：先把服务器的 `127.0.0.1:3306` 映射到本机 `13306`，再设置 `MPAU_MYSQL_HOST=127.0.0.1`、`MPAU_MYSQL_PORT=13306`。
+### 智能表格
 
-宝塔面板端口不等于 MySQL 或 SSH 端口，不能用作这里的 MySQL 端口。
+“智能表格”是“数据看板”下的独立页面，把原来嵌在看板里的表格填充模块移了出来，仍沿用
+同一套 LLM 字段识别与“待填模板 + 数据源”的填充流程。数据源有两种：
+
+- **上传 Excel 文件**：可多选，行为与原来一致。
+- **品牌数据库**：读取当前登录账户在 MySQL 中绑定的品牌数据。先用
+  `GET /api/sheet-fill/database-sources` 列出可用数据表与下载周期（含每个周期的记录数），
+  再由服务端按 `brand_id` 生成临时工作簿后进入同一套填充流程。
+
+数据库模式始终由后端追加品牌条件，网页提交的只是“数据表 + 下载周期”，不能指定
+`brand_id`；未绑定品牌的账户访问该接口返回 403。单个周期导出上限为 2 万行，超出时需要
+先选择具体下载周期。表头识别继续支持手动修正和“表格方案名”复用历史映射。
 
 ### Windows 助手浏览器显示尺寸
 

@@ -15,3 +15,11 @@ $env:MPAU_ALLOWED_ORIGINS = "http://你的服务器地址:8788,http://127.0.0.1:
 
 # Keep this false in normal operation. Set it to true only for the first remote administrator setup.
 $env:MPAU_ALLOW_REMOTE_BOOTSTRAP = "false"
+
+# Optional MySQL connection for new business features and /api/mysql/demo.
+$env:MPAU_MYSQL_HOST = "127.0.0.1"
+$env:MPAU_MYSQL_PORT = "3306"
+$env:MPAU_MYSQL_DATABASE = "数据库名"
+$env:MPAU_MYSQL_USER = "数据库用户"
+$env:MPAU_MYSQL_PASSWORD = "数据库密码"
+$env:MPAU_MYSQL_CONNECT_TIMEOUT = "5"

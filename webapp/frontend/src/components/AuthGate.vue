@@ -13,6 +13,7 @@ const error = ref('')
 const form = reactive({
   username: '',
   displayName: '',
+  brandName: '',
   password: '',
   confirmPassword: '',
 })
@@ -40,12 +41,21 @@ function switchMode(mode) {
   error.value = ''
 }
 
+function normalizeBrandName(value) {
+  return value.normalize('NFKC').trim().replace(/\s+/gu, ' ')
+}
+
 /** Bootstrap the first administrator, register an operator, or sign in. */
 async function submit() {
   if (registering.value && form.password !== form.confirmPassword) {
     error.value = '两次输入的密码不一致'
     return
   }
+  if ((setupRequired.value || registering.value) && !normalizeBrandName(form.brandName)) {
+    error.value = '请输入账户展示品牌名；数据品牌权限由管理员设置。'
+    return
+  }
+  form.brandName = normalizeBrandName(form.brandName)
   submitting.value = true
   error.value = ''
   try {
@@ -58,12 +68,14 @@ async function submit() {
       ? {
           username: form.username.trim(),
           display_name: form.displayName.trim(),
+          brand_name: form.brandName,
           password: form.password,
         }
       : registering.value
         ? {
             username: form.username.trim(),
             display_name: form.displayName.trim(),
+            brand_name: form.brandName,
             password: form.password,
           }
       : { username: form.username.trim(), password: form.password }
@@ -124,6 +136,18 @@ onMounted(loadStatus)
             maxlength="80"
             :placeholder="setupRequired ? '例如：电商运营管理员' : '例如：华东区运营'"
           />
+        </label>
+        <label v-if="setupRequired || registering">
+          <span>账户展示品牌名</span>
+          <input
+            v-model="form.brandName"
+            autocomplete="organization"
+            maxlength="120"
+            required
+            spellcheck="false"
+            placeholder="请输入系统中登记的品牌名，例如：Nike"
+          />
+          <small>仅用于账户资料；数据品牌权限由管理员设置。</small>
         </label>
         <label>
           <span>密码</span>

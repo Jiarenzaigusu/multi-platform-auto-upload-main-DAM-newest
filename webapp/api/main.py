@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import uuid
@@ -23,11 +24,12 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from utils.config import BASE_DIR
+from utils.log import logger
 from webapp.ai_copy import create_ai_copy_router
 from webapp.api.agent import create_agent_router
 from webapp.api.agent_batch import (
@@ -41,6 +43,7 @@ from webapp.api.agent_batch import (
     parse_remote_xiaohongshu_video_batch_workbook,
 )
 from webapp.api.batch import BatchValidationError
+from webapp.api.brand_data import create_brand_data_router
 from webapp.api.batch_douyin_article import parse_douyin_article_batch_workbook
 from webapp.api.batch_douyin_video import parse_douyin_video_batch_workbook
 from webapp.api.batch_jd_article import parse_jd_article_batch_workbook
@@ -79,7 +82,34 @@ from webapp.api.tasks import TaskManager
 from webapp.auth import AuthService, AuthStore, create_auth_router
 from webapp.auth.dependencies import require_operator, require_session, require_user
 from webapp.auth.middleware import AuthenticationMiddleware
-from webapp.llm_adapter import create_llm_adapter_router
+from webapp.dashboard import DashboardRepository
+from webapp.dashboard_agent import ChatRequest, ConversationStore, DashboardTools, answer_question
+from webapp.guanghe_api import GuangheApiError, content_detail
+from webapp.llm_adapter import OpenAICompatibleProvider, create_llm_adapter_router
+from webapp.mysql_demo import (
+    MySQLDatabase,
+    MySQLDemoError,
+    MySQLSettings,
+    prompt_for_mysql_password,
+)
+from webapp.sheet_database_source import export_content_source, list_content_periods
+from webapp.sheet_agent import (
+    apply_plan,
+    call_model,
+    convert_xls,
+    direct_coordinate_correction_plan,
+    direct_header_correction_plan,
+    fallback_append_plan,
+    matched_source_headers,
+    only_coordinate_target_mappings,
+    only_target_mappings,
+    plan_field_options,
+    profile_field_options,
+    remove_coordinate_mappings,
+    remove_target_mappings,
+    source_profile,
+    template_profile,
+)
 from webapp.workspaces import AppDataPaths, UserWorkspace, UserWorkspaceRegistry
 
 
@@ -414,6 +444,529 @@ def create_app(
             "execution_mode": "local_agent",
             "platforms": ["tmall", "jd", "xiaohongshu", "douyin"],
         }
+
+    @app.get("/api/mysql/demo")
+    def mysql_demo(request: Request, _: object = Depends(require_admin)) -> dict:
+        """Let an administrator verify the optional MySQL connection."""
+        if not settings.mysql.configured:
+            return {
+                "configured": False,
+                "connected": False,
+                "missing_settings": list(
+                    settings.mysql.missing_environment_variables
+                ),
+            }
+        try:
+            return request.app.state.mysql_database.check()
+        except MySQLDemoError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    @app.get("/api/dashboard")
+    def dashboard_data(
+        request: Request,
+        period: str = Query(default="latest"),
+        user: object = Depends(require_user),
+    ) -> dict:
+        """Return only the authenticated user's brand metrics."""
+        if not mysql_database.configured:
+            return {
+                "configured": False,
+                "connected": False,
+                "empty": True,
+                "missing_settings": list(
+                    mysql_database.settings.missing_environment_variables
+                ),
+            }
+        try:
+            binding = mysql_database.execute(
+                "SELECT b.id, b.name FROM user_brand_bindings AS ub "
+                "JOIN brands AS b ON b.id = ub.brand_id WHERE ub.user_id = %s",
+                (user.id,),
+            )
+            if not binding:
+                raise HTTPException(status_code=403, detail="当前账户尚未由管理员绑定数据品牌")
+            return dashboard_repository.load(binding[0][0], binding[0][1], period)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except MySQLDemoError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    @app.post("/api/dashboard/analysis")
+    def dashboard_analysis(request: Request, period: str = Query(default="latest"), user: object = Depends(require_user)) -> dict:
+        from webapp.content_analysis import generate_analysis
+        from webapp.llm_adapter.errors import LLMAdapterError
+
+        dashboard = dashboard_data(request, period, user)
+        if dashboard.get("empty") or not dashboard.get("summary"):
+            raise HTTPException(status_code=422, detail="当前周期暂无可分析的品牌数据")
+        provider = OpenAICompatibleProvider(current_workspace(request).llm_registry)
+        try:
+            return generate_analysis(dashboard, provider)
+        except LLMAdapterError as exc:
+            raise HTTPException(status_code=exc.status_code, detail="AI 分析暂不可用，请检查 LLM 适配器配置后重试；当前保留规则分析") from exc
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=502, detail="AI 分析格式或数据引用无效，请重试；当前保留规则分析") from exc
+
+    @app.get("/api/dashboard/chat")
+    def dashboard_chat_history(
+        request: Request,
+        period: str = Query(pattern=r"^\d{4}-\d{2}$"),
+        content_type: str = Query(pattern=r"^(image|video)$"),
+        tag_id: str = Query(default="all", max_length=200),
+        user: object = Depends(require_user),
+    ) -> dict:
+        dashboard = dashboard_data(request, period, user)
+        if dashboard.get("empty"):
+            raise HTTPException(status_code=422, detail="当前周期暂无可分析数据")
+        try:
+            DashboardTools(mysql_database, dashboard, content_type, tag_id)
+            store = ConversationStore(current_workspace(request).paths.runtime / "dashboard-chat.sqlite3")
+            conversation_id, messages = store.open(dashboard["brand"]["id"], period, content_type, tag_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"conversation_id": conversation_id, "messages": messages}
+
+    @app.post("/api/dashboard/chat")
+    def dashboard_chat(request: Request, payload: ChatRequest, user: object = Depends(require_user)) -> dict:
+        from webapp.llm_adapter.errors import LLMAdapterError
+
+        dashboard = dashboard_data(request, payload.period, user)
+        if dashboard.get("empty"):
+            raise HTTPException(status_code=422, detail="当前周期暂无可分析数据")
+        workspace = current_workspace(request)
+        try:
+            tools = DashboardTools(mysql_database, dashboard, payload.content_type, payload.tag_id)
+            store = ConversationStore(workspace.paths.runtime / "dashboard-chat.sqlite3")
+            conversation_id, history = store.open(dashboard["brand"]["id"], payload.period, payload.content_type, payload.tag_id, payload.conversation_id)
+            provider = OpenAICompatibleProvider(workspace.llm_registry)
+            answer, evidence = answer_question(provider, tools, history, payload.question)
+            store.append(conversation_id, payload.question, answer, evidence)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except LLMAdapterError as exc:
+            raise HTTPException(status_code=exc.status_code, detail="数据助手暂不可用，请检查 LLM 适配器配置后重试") from exc
+        except MySQLDemoError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        return {"conversation_id": conversation_id, "answer": answer, "evidence": evidence, "model": provider.model}
+
+    @app.get("/api/guanghe/content/{content_id}")
+    def guanghe_content(content_id: str, request: Request) -> dict:
+        user = require_user(request)
+        if not mysql_database.configured:
+            raise HTTPException(status_code=503, detail="请先配置 MySQL 连接")
+        try:
+            allowed = mysql_database.execute(
+                "SELECT 1 FROM user_brand_bindings AS ub "
+                "JOIN content_performance AS cp ON cp.brand_id = ub.brand_id "
+                "WHERE ub.user_id = %s AND cp.`内容ID` = %s LIMIT 1",
+                (user.id, content_id),
+            )
+            if not allowed:
+                raise HTTPException(status_code=403, detail="当前账户无权查看此品牌内容")
+            return content_detail(content_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except MySQLDemoError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except GuangheApiError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    def sheet_database_brand(request: Request) -> tuple[int, str]:
+        user = require_operator(request)
+        if not mysql_database.configured:
+            raise HTTPException(status_code=503, detail="请先配置 MySQL 连接")
+        try:
+            binding = mysql_database.execute(
+                "SELECT b.id, b.name FROM user_brand_bindings AS ub "
+                "JOIN brands AS b ON b.id = ub.brand_id WHERE ub.user_id = %s",
+                (user.id,),
+            )
+        except MySQLDemoError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        if not binding:
+            raise HTTPException(status_code=403, detail="当前账户尚未由管理员绑定数据品牌")
+        return int(binding[0][0]), str(binding[0][1])
+
+    @app.get("/api/sheet-fill/database-sources")
+    def sheet_database_sources(request: Request, _: UserWorkspace = Depends(operator_workspace)) -> dict:
+        brand_id, brand_name = sheet_database_brand(request)
+        try:
+            periods = list_content_periods(mysql_database, brand_id)
+        except MySQLDemoError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        return {
+            "brand": brand_name,
+            "sources": [{"key": "content_performance", "label": "内容表现数据"}],
+            "periods": periods,
+        }
+
+    async def prepare_sheet_database_source(request: Request, source: str, period: str, folder: Path) -> Path | None:
+        if not source:
+            return None
+        if source != "content_performance":
+            raise HTTPException(status_code=422, detail="不支持所选数据库数据源")
+        brand_id, brand_name = sheet_database_brand(request)
+        try:
+            return await asyncio.to_thread(
+                export_content_source, mysql_database, brand_id, brand_name,
+                period, folder / "数据库内容表现.xlsx",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except MySQLDemoError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    @app.post("/api/sheet-fill/inspect")
+    async def inspect_sheet_fields(
+        request: Request,
+        template: UploadFile = File(...),
+        sources: list[UploadFile] = File(default=[]),
+        database_source: str = Form(default=""),
+        database_period: str = Form(default="all"),
+        _: UserWorkspace = Depends(operator_workspace),
+    ) -> dict:
+        """List coordinate-qualified source and target headers for manual correction."""
+        if not sources and not database_source:
+            raise HTTPException(status_code=422, detail="请选择上传文件或数据库数据源")
+        with TemporaryDirectory(prefix="mpau-sheet-inspect-") as temp_dir:
+            folder = Path(temp_dir)
+            source_folder = folder / "sources"
+            source_folder.mkdir()
+
+            async def save(item: UploadFile, target: Path) -> Path:
+                content = await item.read(settings.max_batch_workbook_bytes + 1)
+                if len(content) > settings.max_batch_workbook_bytes:
+                    raise HTTPException(status_code=413, detail="表格超过上传大小限制")
+                path = target / Path(item.filename or "workbook.xlsx").name
+                path.write_bytes(content)
+                return path
+
+            template_folder = folder / "template"
+            template_folder.mkdir()
+            template_path = await save(template, template_folder)
+            source_paths = [await save(item, source_folder) for item in sources]
+            database_path = await prepare_sheet_database_source(request, database_source, database_period, source_folder)
+            if database_path:
+                source_paths.append(database_path)
+            prepared = [convert_xls(path, source_folder) for path in source_paths]
+            profile = {
+                "sources": [source_profile(path) for path in prepared],
+                "template": template_profile(template_path),
+            }
+            return profile_field_options(profile)
+
+    def sheet_table_record(request: Request, workspace: UserWorkspace, name: str) -> tuple[str, Path]:
+        normalized = " ".join((name or "").split()).strip()
+        if not normalized:
+            raise HTTPException(status_code=422, detail="请输入表格方案名")
+        if len(normalized) > 120:
+            raise HTTPException(status_code=422, detail="表格方案名不能超过 120 个字符")
+        user = require_operator(request)
+        brand_key = user.brand_key or "unbranded"
+        folder = workspace.paths.runtime / "sheet-fill-plans" / hashlib.sha256(brand_key.encode()).hexdigest()[:16] / "tables"
+        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        return normalized, folder / f"{hashlib.sha256(normalized.casefold().encode()).hexdigest()}.json"
+
+    @app.get("/api/sheet-fill/tables")
+    def list_sheet_tables(
+        request: Request,
+        workspace: UserWorkspace = Depends(operator_workspace),
+    ) -> dict:
+        _, sample = sheet_table_record(request, workspace, "_")
+        for history_path in sample.parent.parent.glob("*-final.json"):
+            try:
+                document = json.loads(history_path.read_text(encoding="utf-8"))
+                plan = document.get("plan", document)
+                first_rule = plan.get("rules", [])[0]
+                semantic_path = first_rule.get("target_semantic_path", [])
+                inferred = Path(semantic_path[0]).stem if semantic_path else str(first_rule.get("target_sheet", "")).strip()
+                inferred = inferred.removeprefix("已填充-")
+                if not inferred:
+                    continue
+                normalized, record_path = sheet_table_record(request, workspace, inferred)
+                if not record_path.exists() and not record_path.with_suffix('.deleted').exists():
+                    fields = plan_field_options(plan)
+                    record_path.write_text(json.dumps({
+                        "table_name": normalized,
+                        "brand_name": require_operator(request).brand_name,
+                        "plan": plan,
+                        "source_fields": fields["sources"],
+                        "target_fields": fields["targets"],
+                    }, ensure_ascii=False, indent=2), encoding="utf-8")
+            except (OSError, KeyError, IndexError, TypeError, json.JSONDecodeError):
+                continue
+        names = []
+        for path in sample.parent.glob("*.json"):
+            if path.with_suffix(".deleted").exists():
+                continue
+            try:
+                names.append(json.loads(path.read_text(encoding="utf-8"))["table_name"])
+            except (OSError, KeyError, json.JSONDecodeError):
+                continue
+        return {"tables": sorted(set(names), key=str.casefold)}
+
+    @app.get("/api/sheet-fill/table")
+    def load_sheet_table(
+        request: Request,
+        name: str = Query(...),
+        workspace: UserWorkspace = Depends(operator_workspace),
+    ) -> dict:
+        normalized, path = sheet_table_record(request, workspace, name)
+        if not path.is_file() or path.with_suffix(".deleted").exists():
+            raise HTTPException(status_code=404, detail=f"尚未创建表格方案：{normalized}")
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=500, detail="表格方案 JSON 无法读取") from exc
+        return {
+            "table_name": record["table_name"],
+            "sources": record.get("source_fields", []),
+            "targets": record.get("target_fields", []),
+            "rule_count": len(record.get("plan", {}).get("rules", [])),
+        }
+
+    @app.delete("/api/sheet-fill/table")
+    def delete_sheet_table(
+        request: Request,
+        name: str = Query(...),
+        workspace: UserWorkspace = Depends(operator_workspace),
+    ) -> dict:
+        normalized, path = sheet_table_record(request, workspace, name)
+        if not path.is_file() or path.with_suffix(".deleted").exists():
+            raise HTTPException(status_code=404, detail=f"尚未创建表格方案：{normalized}")
+        path.with_suffix('.deleted').touch()
+        path.unlink(missing_ok=True)
+        return {"deleted": normalized}
+
+    @app.post("/api/sheet-fill")
+    async def fill_spreadsheet(
+        request: Request,
+        template: UploadFile = File(...),
+        sources: list[UploadFile] = File(default=[]),
+        database_source: str = Form(default=""),
+        database_period: str = Form(default="all"),
+        source_header_corrections: str = Form(default=""),
+        target_header_corrections: str = Form(default=""),
+        field_corrections: str = Form(default="[]"),
+        table_name: str = Form(default=""),
+        workspace: UserWorkspace = Depends(operator_workspace),
+    ) -> Response:
+        """Map uploaded source workbooks into a template with the active LLM adapter."""
+        allowed = {".xlsx", ".xlsm", ".xls"}
+        if not sources and not database_source:
+            raise HTTPException(status_code=422, detail="请选择上传文件或数据库数据源")
+        uploads = [template, *sources]
+        if any(Path(item.filename or "").suffix.lower() not in allowed for item in uploads):
+            raise HTTPException(status_code=422, detail="仅支持 .xlsx、.xlsm 和 .xls 表格")
+        request_id = uuid.uuid4().hex[:8]
+        user = require_operator(request)
+        normalized_table_name, table_record_path = sheet_table_record(
+            request, workspace, table_name or Path(template.filename or "template.xlsx").stem
+        )
+        saved_record = None
+        if table_record_path.is_file():
+            try:
+                saved_record = json.loads(table_record_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise HTTPException(status_code=500, detail="已有表格方案 JSON 无法读取") from exc
+        provider = OpenAICompatibleProvider(workspace.llm_registry, timeout_seconds=120)
+        if saved_record is None and not provider.ready:
+            raise HTTPException(status_code=409, detail="新建表格方案前，请先配置并启用 LLM API Key")
+        brand_key = user.brand_key or "unbranded"
+        brand_folder = workspace.paths.runtime / "sheet-fill-plans" / hashlib.sha256(brand_key.encode()).hexdigest()[:16]
+        brand_folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        log_path = workspace.paths.job_logs / "sheet-fill-latest.json"
+        diagnostic = {
+            "request_id": request_id,
+            "status": "started",
+            "template": Path(template.filename or "template.xlsx").name,
+            "sources": [Path(item.filename or "workbook.xlsx").name for item in sources]
+            + (["数据库内容表现.xlsx"] if database_source else []),
+            "provider": provider.provider_label,
+            "model": provider.model,
+            "brand": user.brand_name or "未绑定品牌",
+            "table_name": normalized_table_name,
+        }
+
+        def save_model_output(stage: str, model_plan: dict) -> None:
+            payload = {
+                "request_id": request_id,
+                "brand_name": user.brand_name,
+                "brand_key": user.brand_key,
+                "stage": stage,
+                "model": provider.model,
+                "plan": model_plan,
+            }
+            (brand_folder / f"{request_id}-{stage}.json").write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+
+        def save_diagnostic() -> None:
+            log_path.write_text(json.dumps(diagnostic, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+
+        logger.info(
+            "表格填充[{}]开始：模板={}，数据源={}，模型={}",
+            request_id, diagnostic["template"], len(sources) + bool(database_source), provider.model,
+        )
+
+        try:
+            with TemporaryDirectory(prefix="mpau-sheet-fill-") as temp_dir:
+                folder = Path(temp_dir)
+                template_folder = folder / "template"
+                source_folder = folder / "sources"
+                template_folder.mkdir()
+                source_folder.mkdir()
+
+                async def save_upload(item: UploadFile, target_folder: Path) -> Path:
+                    original_name = Path(item.filename or "workbook.xlsx").name
+                    path = target_folder / original_name
+                    content = await item.read(settings.max_batch_workbook_bytes + 1)
+                    if len(content) > settings.max_batch_workbook_bytes:
+                        raise HTTPException(status_code=413, detail=f"表格不能超过 {settings.max_batch_workbook_bytes // 1024 // 1024} MB")
+                    path.write_bytes(content)
+                    return path
+
+                source_names = [Path(item.filename or "workbook.xlsx").name for item in sources]
+                if database_source:
+                    source_names.append("数据库内容表现.xlsx")
+                if len(source_names) != len(set(source_names)):
+                    raise HTTPException(status_code=422, detail="数据源中存在同名文件，请重命名后再上传")
+                template_path = await save_upload(template, template_folder)
+                source_paths = [await save_upload(item, source_folder) for item in sources]
+                database_path = await prepare_sheet_database_source(request, database_source, database_period, source_folder)
+                if database_path:
+                    source_paths.append(database_path)
+                prepared_sources = [convert_xls(path, source_folder) for path in source_paths]
+                profile = {
+                    "sources": [source_profile(path) for path in prepared_sources],
+                    "template": template_profile(template_path),
+                }
+                diagnostic["workbooks"] = {
+                    "sources": [
+                        {"file": item["file"], "sheets": [sheet["sheet"] for sheet in item["sheets"]]}
+                        for item in profile["sources"]
+                    ],
+                    "template_sheets": [sheet["sheet"] for sheet in profile["template"]["sheets"]],
+                }
+                if saved_record is not None:
+                    recorded_sources = {rule.get("source_file") for rule in saved_record.get("plan", {}).get("rules", [])}
+                    recorded_targets = {rule.get("target_sheet") for rule in saved_record.get("plan", {}).get("rules", [])}
+                    visible_targets = {sheet["sheet"] for sheet in profile["template"]["sheets"]}
+                    if not recorded_sources.issubset(source_names) or not recorded_targets.issubset(visible_targets):
+                        saved_record = None
+                if saved_record is None and not provider.ready:
+                    raise HTTPException(status_code=409, detail="该数据源需要新建映射方案，请先配置并启用 LLM API Key")
+                if saved_record is not None:
+                    plan = saved_record.get("plan", {"rules": []})
+                    diagnostic["reused_table_plan"] = True
+                else:
+                    with provider.session():
+                        plan = await asyncio.to_thread(call_model, profile, provider)
+                    save_model_output("initial", plan)
+                if not plan.get("rules"):
+                    plan = fallback_append_plan(profile)
+                    diagnostic["fallback"] = "deterministic_header_mapping"
+                corrections = json.loads(field_corrections or "[]")
+                if not isinstance(corrections, list):
+                    raise ValueError("字段修正格式无效")
+                options = profile_field_options(profile)
+                valid_sources = {(item["file"], item["sheet"], item["cell"], item["header"]) for item in options["sources"]}
+                valid_targets = {(item["sheet"], item["cell"], item["header"]) for item in options["targets"]}
+                metric_targets = {
+                    (item["sheet"], item["cell"], item["header"])
+                    for item in options["targets"] if item.get("kind") == "metric"
+                }
+                targets = [item.get("target") for item in corrections if item.get("target")]
+                pairs = [item for item in corrections if item.get("source") and item.get("target")]
+                if any((item["sheet"], item["cell"], item["header"]) not in valid_targets for item in targets):
+                    raise ValueError("待填表格修正位置已失效，请重新识别字段")
+                if any((item["source"]["file"], item["source"]["sheet"], item["source"]["cell"], item["source"]["header"]) not in valid_sources for item in pairs):
+                    raise ValueError("数据源修正位置已失效，请重新识别字段")
+                if targets:
+                    plan = remove_coordinate_mappings(plan, targets)
+                    column_pairs = [item for item in pairs if (
+                        item["target"]["sheet"], item["target"]["cell"], item["target"]["header"]
+                    ) not in metric_targets]
+                    metric_pairs = [item for item in pairs if item not in column_pairs]
+                    if column_pairs:
+                        plan["rules"].extend(direct_coordinate_correction_plan(column_pairs)["rules"])
+                    rematch_targets = [
+                        item["target"] for item in corrections
+                        if item.get("target") and (not item.get("source") or item in metric_pairs)
+                    ]
+                    if rematch_targets:
+                        if not provider.ready:
+                            raise ValueError("定点重新匹配需要先启用 LLM API Key")
+                        excluded = matched_source_headers(plan)
+                        instruction = (
+                            f"只重新匹配这些待填位置：{rematch_targets}。"
+                            f"用户指定的指标行与数据源字段配对：{metric_pairs}。这些配对必须使用 metric_fill，"
+                            "按日期轴及统计口径生成规则，不得用 append_rows 写入指标行。"
+                            f"不得使用已被其他规则占用的数据源表头：{excluded}。"
+                            "只有明细表的 append_rows 规则才使用 column_map，并包含准确的字段坐标。"
+                        )
+                        with provider.session():
+                            rematched = await asyncio.to_thread(call_model, profile, provider, instruction)
+                        save_model_output("rematch", rematched)
+                        plan["rules"].extend(only_coordinate_target_mappings(rematched, rematch_targets)["rules"])
+                    diagnostic["correction"] = "coordinate_mapping"
+                (brand_folder / f"{request_id}-final.json").write_text(
+                    json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                diagnostic["rule_count"] = len(plan.get("rules", []))
+                diagnostic["rules"] = plan.get("rules", [])
+                output_path = folder / f"已填充-{Path(template.filename or 'template.xlsx').stem}.xlsx"
+                audit = await asyncio.to_thread(apply_plan, template_path, prepared_sources, plan, output_path, 0.9)
+                changed_cells = sum(len(item.get("filled_cells", [])) for item in audit)
+                diagnostic["audit"] = audit
+                diagnostic["changed_cells"] = changed_cells
+                if not plan.get("rules"):
+                    raise RuntimeError("模型未找到可安全匹配的字段，请检查数据源与模板表头是否表达同一业务含义")
+                if not changed_cells:
+                    reasons = "；".join(
+                        str(item.get("reason_detail")) for item in audit
+                        if item.get("reason_detail")
+                    )
+                    raise RuntimeError(f"没有任何单元格被填充{f'：{reasons}' if reasons else ''}")
+                output = output_path.read_bytes()
+                table_record_path.write_text(json.dumps({
+                    "table_name": normalized_table_name,
+                    "brand_name": user.brand_name,
+                    "plan": plan,
+                    "source_fields": options["sources"],
+                    "target_fields": options["targets"],
+                }, ensure_ascii=False, indent=2), encoding="utf-8")
+                table_record_path.with_suffix(".deleted").unlink(missing_ok=True)
+                diagnostic["status"] = "success"
+                save_diagnostic()
+                logger.info(
+                    "表格填充[{}]完成：规则={}，填充单元格={}",
+                    request_id, diagnostic["rule_count"], changed_cells,
+                )
+        except HTTPException:
+            diagnostic["status"] = "failed"
+            diagnostic["error"] = "HTTP validation error"
+            save_diagnostic()
+            raise
+        except (KeyError, TypeError, ValueError, OSError, RuntimeError, json.JSONDecodeError) as exc:
+            diagnostic["status"] = "failed"
+            diagnostic["error"] = str(exc)
+            save_diagnostic()
+            logger.warning("表格填充[{}]失败：{}；诊断日志={}", request_id, exc, log_path)
+            raise HTTPException(status_code=422, detail=f"表格填充失败[{request_id}]：{exc}") from exc
+        except Exception as exc:
+            diagnostic["status"] = "failed"
+            diagnostic["error"] = f"{type(exc).__name__}: {exc}"
+            save_diagnostic()
+            logger.exception("表格填充[{}]异常；诊断日志={}", request_id, log_path)
+            raise HTTPException(status_code=500, detail=f"表格填充异常[{request_id}]，请查看诊断日志") from exc
+
+        filename = f"已填充-{Path(template.filename or 'template.xlsx').stem}.xlsx"
+        return Response(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
+        )
 
     @app.get("/api/dam/status")
     async def dam_status(request: Request, _: UserWorkspace = Depends(current_workspace)) -> dict:
@@ -1318,6 +1871,7 @@ def create_app(
             workspace=workspace,
         )
 
+    app.include_router(create_brand_data_router(mysql_database, auth_service))
     app.include_router(
         create_auth_router(
             auth_service,

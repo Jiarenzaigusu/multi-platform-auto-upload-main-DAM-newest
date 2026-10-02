@@ -30,6 +30,8 @@ def _user_response(user: User) -> UserResponse:
         username=user.username,
         display_name=user.display_name,
         role=user.role,
+        brand_name=user.brand_name,
+        brand_key=user.brand_key,
     )
 
 
@@ -40,6 +42,8 @@ def _admin_user_response(user: User) -> AdminUserResponse:
         username=user.username,
         display_name=user.display_name,
         role=user.role,
+        brand_name=user.brand_name,
+        brand_key=user.brand_key,
         status=user.status,
     )
 
@@ -109,6 +113,7 @@ def create_auth_router(
             user = service.bootstrap_admin(
                 username=payload.username,
                 display_name=payload.display_name,
+                brand_name=payload.brand_name,
                 password=payload.password,
             )
             session, token, csrf_token = service.authenticate(
@@ -156,6 +161,7 @@ def create_auth_router(
             user = service.register_operator(
                 username=payload.username,
                 display_name=payload.display_name,
+                brand_name=payload.brand_name,
                 password=payload.password,
                 ip_address=_client_ip(request),
             )
@@ -206,6 +212,7 @@ def create_auth_router(
                 actor_user_id=actor.id,
                 username=payload.username,
                 display_name=payload.display_name,
+                brand_name=payload.brand_name,
                 password=payload.password,
                 role=payload.role,
                 ip_address=_client_ip(request),
@@ -224,6 +231,7 @@ def create_auth_router(
                 actor_user_id=actor.id,
                 user_id=user_id,
                 display_name=payload.display_name,
+                brand_name=payload.brand_name,
                 role=payload.role,
                 status=payload.status,
                 ip_address=_client_ip(request),

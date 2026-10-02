@@ -17,7 +17,7 @@
 
 两个用户即使填写相同的店铺标识，也会解析到不同云端任务目录和不同本机 Cookie 目录。每个应用账号同时只允许连接一台本地代理；不同用户的浏览器负载由各自电脑承担，不占用云服务器 CPU 和内存。
 
-登录应用的用户仍可访问自己的云端任务和上传素材，但新登录产生的平台 Cookie 只保存在用户电脑。视频和可选的天猫自定义封面创建任务时先上传到云端，代理领取后再下载到本机临时目录，任务终态后删除单条发布的云端和本机临时副本。
+登录应用的用户仍可访问自己的云端任务和上传素材，但新登录产生的平台 Cookie 只保存在用户电脑。视频和可选的天猫/京东自定义封面创建任务时先上传到云端，代理领取后再下载到本机临时目录，任务终态后删除单条发布的云端和本机临时副本。
 
 ## 角色
 
@@ -179,6 +179,75 @@ Windows 助手安装包通过 `deploy/windows/output/` 只读挂载到容器；�
 | `MPAU_MAX_UPLOAD_REQUEST_BYTES` | `21474836480` | 单个 HTTP 上传请求上限 |
 | `MPAU_MAX_MEDIA_TOTAL_BYTES` | `107374182400` | 每个用户批量素材与待执行上传的总容量上限 |
 | `MPAU_MAX_MEDIA_FILES` | `1000` | 每个用户批量素材库最多保留的文件数 |
+| `MPAU_MYSQL_HOST` | 未配置 | 新业务 MySQL 地址；服务与 MySQL 同机时使用 `127.0.0.1` |
+| `MPAU_MYSQL_PORT` | `3306` | 新业务 MySQL 端口 |
+| `MPAU_MYSQL_DATABASE` | 未配置 | 新业务数据库名 |
+| `MPAU_MYSQL_USER` | 未配置 | 新业务数据库用户 |
+| `MPAU_MYSQL_PASSWORD` | 未配置 | 新业务数据库密码；不要提交到 Git |
+| `MPAU_MYSQL_CONNECT_TIMEOUT` | `5` | MySQL 连接与读写超时秒数 |
+
+### MySQL 连通性 Demo
+
+MySQL 是可选扩展，不替换现有的 SQLite 和任务状态文件。填写上述环境变量后，先在
+运行 FastAPI 的同一个 Python 环境安装 Demo 驱动，再执行只读连通性检查：
+
+```bash
+python -m pip install -r requirements-mysql-demo.txt
+export MPAU_MYSQL_HOST='MySQL 地址'
+export MPAU_MYSQL_PORT='3306'
+export MPAU_MYSQL_DATABASE='数据库名'
+export MPAU_MYSQL_USER='数据库用户'
+python -m webapp.mysql_demo
+```
+
+命令会在终端中隐藏输入 MySQL 密码，密码不会显示或进入 Shell 历史。服务器以服务方式
+无人值守运行时，才需要通过权限受限的环境文件设置 `MPAU_MYSQL_PASSWORD`。
+
+如果要让本机运行的整个 FastAPI 服务复用这条 MySQL 连接，请保持 SSH 隧道终端运行，
+在另一个终端设置 `MPAU_MYSQL_HOST=127.0.0.1`、`MPAU_MYSQL_PORT=13306` 等参数，
+然后使用 `mpau-web`（或 `python -m webapp.api.main`）启动服务。启动时会隐藏提示一次
+MySQL 密码，并在服务生命周期内复用 `app.state.mysql_database`；后续业务模块可以从该
+服务执行查询，不需要每个功能重新创建连接。直接使用 `uvicorn webapp.api.main:app`
+时不会弹出密码提示，需提前设置 `MPAU_MYSQL_PASSWORD`。
+
+也可以用管理员账号登录后访问 `GET /api/mysql/demo`。该检查只执行
+`SELECT VERSION(), DATABASE()`，不会建表或修改数据。未配置 MySQL 时，现有服务仍可正常启动。
+
+### 品牌数据看板
+
+原有“数据看板”直接读取 MySQL 的 `content_performance`，页面保留趋势、内容标签分析和
+AI 内容分析。管理员在“用户与权限”中将账户绑定到 `brands` 的品牌 ID；
+`GET /api/dashboard` 只汇总该品牌的数据，未绑定账户返回 403。账户资料中的品牌名称
+不授予数据访问权限；页面右上角显示的是 MySQL 中实际绑定的数据品牌。
+
+看板按表中的“年份 + 下载周期”汇总。当前数据的周期为 2026 年 6、7、8 月，所以页面按
+下载月份切换，显示上期对比；只有导入去年同月数据后才显示同比。趋势指标来自“查看人数”、
+“曝光次数”、“种草成交金额”、“商品点击人数”；标签板块按“汇总分类 + 二级分类”
+聚合，一级分类可展开二级分类（例如“种草短视频”下的“桌面”），并展示同品牌、同下载周期的真实内容案例。各内容人数直接求和，不代表去重人数。
+“内容发布时间”是作品发布时间，不用于决定下载周期。
+
+本机通过 SSH 代理访问 MySQL 时，可把连接变量放在项目根目录的 `.env`（该文件已被 Git
+忽略），并显式加载后启动服务：
+
+```bash
+.venv/bin/python -m uvicorn webapp.api.main:app --env-file .env --host 127.0.0.1 --port 8788
+```
+
+保持本地代理端口运行；更新 `.env` 后重启服务，新连接配置才会生效。
+
+### 智能表格
+
+“智能表格”是“数据看板”下的独立页面，把原来嵌在看板里的表格填充模块移了出来，仍沿用
+同一套 LLM 字段识别与“待填模板 + 数据源”的填充流程。数据源有两种：
+
+- **上传 Excel 文件**：可多选，行为与原来一致。
+- **品牌数据库**：读取当前登录账户在 MySQL 中绑定的品牌数据。先用
+  `GET /api/sheet-fill/database-sources` 列出可用数据表与下载周期（含每个周期的记录数），
+  再由服务端按 `brand_id` 生成临时工作簿后进入同一套填充流程。
+
+数据库模式始终由后端追加品牌条件，网页提交的只是“数据表 + 下载周期”，不能指定
+`brand_id`；未绑定品牌的账户访问该接口返回 403。单个周期导出上限为 2 万行，超出时需要
+先选择具体下载周期。表头识别继续支持手动修正和“表格方案名”复用历史映射。
 
 ### Windows 助手浏览器显示尺寸
 

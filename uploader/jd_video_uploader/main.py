@@ -41,6 +41,8 @@ from uploader.base_video import BaseVideoUploader
 from uploader.jd_session import JdBrowserSession
 from utils.log import jd_logger
 from utils.clipboard import dispatch_paste
+from uploader.jd_label_selector import select_jd_tag
+from uploader.jd_schedule_selector import select_jd_time_value
 
 # 京东京麦发布中心 URL，用于 Cookie 校验与登录入口
 JD_POST_CENTER_URL = "https://dr.jd.com/jm/#/n/post-center.html"
@@ -62,9 +64,11 @@ JD_MAX_GOODS_IDS = 10
 JD_COVER_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 JD_MAX_COVER_IMAGE_BYTES = 5 * 1024 * 1024
 # The first JD publish-page mount can expose its file input before the upload SDK
-# and cover-processing listeners are ready. Require a stable surface and recover
-# once from the known "video ID exists, cover still waits" half-finished state.
+# and cover-processing listeners are ready. Require a stable surface, allow the
+# micro-frontend a short settle window, and recover from any bounded upload stall.
 JD_UPLOAD_READY_STABLE_POLLS = 5
+JD_UPLOAD_SDK_SETTLE_SECONDS = 3
+JD_UPLOAD_EVENT_PROPAGATION_SECONDS = 1
 JD_VIDEO_PROCESSING_STALL_SECONDS = 60
 JD_VIDEO_UPLOAD_MAX_ATTEMPTS = 2
 JD_COVER_UPLOAD_MAX_ATTEMPTS = 2
@@ -84,7 +88,7 @@ class JdAuthenticationError(RuntimeError):
 
 
 class JdVideoProcessingStalledError(RuntimeError):
-    """JD uploaded the video but never advanced the cover-processing UI."""
+    """JD did not advance the video/cover processing UI within the stall window."""
 
     def __init__(self, video_id: str, detail: str, preview_url: str = ""):
         if video_id:
@@ -93,9 +97,13 @@ class JdVideoProcessingStalledError(RuntimeError):
             uploaded_state = f"已生成 OSS 视频预览 {preview_url}"
         else:
             uploaded_state = "视频文件已上传"
-        super().__init__(f"京东{uploaded_state}，但封面区域持续显示等待视频上传：{detail}")
+        super().__init__(f"京东{uploaded_state}，但视频/封面解析在限定时间内未完成：{detail}")
         self.video_id = video_id
         self.preview_url = preview_url
+
+
+class JdVideoUploadRetryableError(RuntimeError):
+    """The current JD upload page cannot make progress and should be recreated."""
 
 
 class JdUploadDiagnostics:
@@ -104,6 +112,7 @@ class JdUploadDiagnostics:
     def __init__(self) -> None:
         self.sign_succeeded = False
         self.preview_url = ""
+        self.video_id = ""
 
 
 def _msg(emoji: str, text: str) -> str:
@@ -143,6 +152,30 @@ def _is_jd_request_host(host: str) -> bool:
     return host == "jd.com" or host.endswith((".jd.com", ".jdcloudcs.com"))
 
 
+def _extract_jd_video_id(text: str) -> str:
+    """Extract a video id from visible text or JSON-like console output."""
+    match = re.search(
+        r"(?:视频\s*ID|视频编号|video[_\s-]*id)\s*[=:：\"']+\s*[\"']?(\d+)",
+        text or "",
+        re.IGNORECASE,
+    )
+    return match.group(1) if match else ""
+
+
+def _is_target_closed_error(exc: Exception) -> bool:
+    """Return whether Patchright lost the page/context during a poll."""
+    message = str(exc).lower()
+    return any(
+        hint in message
+        for hint in (
+            "target page, context or browser has been closed",
+            "target page has been closed",
+            "browser has been closed",
+            "context has been closed",
+        )
+    )
+
+
 def _attach_upload_diagnostics(page: Page, diagnostics: JdUploadDiagnostics) -> None:
     """Capture JD upload signals and log failures without exposing query tokens."""
     def log_response(response) -> None:
@@ -178,6 +211,9 @@ def _attach_upload_diagnostics(page: Page, diagnostics: JdUploadDiagnostics) -> 
     def log_console(message) -> None:
         text = message.text
         normalized = text.lower()
+        video_id = _extract_jd_video_id(text)
+        if video_id:
+            diagnostics.video_id = video_id
         if "onsign" in normalized and "success" in normalized:
             diagnostics.sign_succeeded = True
             jd_logger.info(_msg("🔑", "京东视频上传签名获取成功"))
@@ -198,9 +234,9 @@ def _attach_upload_diagnostics(page: Page, diagnostics: JdUploadDiagnostics) -> 
 
 def _is_publish_frame_reload_error(exc: Exception) -> bool:
     """判断异常是否像京麦发布 iframe 在上传处理中被重挂载。"""
-    message = str(exc).lower()
-    if "target page, context or browser has been closed" in message:
+    if _is_target_closed_error(exc):
         return False
+    message = str(exc).lower()
     return any(
         hint in message
         for hint in (
@@ -567,19 +603,57 @@ async def _wait_for_video_upload_surface(
                 )
                 stable_polls = stable_polls + 1 if same_node else 0
                 if stable_polls >= JD_UPLOAD_READY_STABLE_POLLS:
-                    jd_logger.info(_msg("✅", "京东视频上传组件已稳定就绪"))
+                    jd_logger.info(
+                        _msg(
+                            "✅",
+                            "京东视频上传 input 已稳定，等待上传 SDK 完成初始化",
+                        )
+                    )
+                    await asyncio.sleep(JD_UPLOAD_SDK_SETTLE_SECONDS)
                     return frame
             else:
                 stable_polls = 0
         except JdAuthenticationError:
             raise
         except Exception as exc:
+            if _is_target_closed_error(exc):
+                raise JdVideoUploadRetryableError(
+                    "京东视频上传页在上传组件初始化期间被关闭"
+                ) from exc
             if not _is_publish_frame_reload_error(exc):
                 stable_polls = 0
 
         await asyncio.sleep(0.5)
 
     raise RuntimeError("等待京东视频上传组件稳定就绪超时")
+
+
+async def _jd_file_input_has_file(file_input) -> bool | None:
+    """Read back the selected file when the live DOM exposes the FileList.
+
+    A few lightweight test doubles do not implement ``evaluate``; ``None``
+    keeps those callers compatible while a real page gets a useful guard
+    against a chooser being attached to a different upload input.
+    """
+    try:
+        selected_name = await file_input.evaluate(
+            """input => input.files && input.files.length
+                ? input.files[0].name
+                : ''"""
+        )
+    except (AttributeError, TypeError, PlaywrightError):
+        # 京麦接收文件后会立即卸载或替换原 input；此时旧 locator 无法回读，
+        # 不能据此判断文件选择失败。
+        return None
+    return bool(selected_name)
+
+
+async def _set_jd_video_file_and_verify(file_input, file_path: str) -> None:
+    """Set the video input and verify that the browser accepted a FileList."""
+    await file_input.set_input_files(file_path)
+    selected = await _jd_file_input_has_file(file_input)
+    if selected is False:
+        raise RuntimeError("京东视频 input 未接收到所选文件")
 
 
 async def _choose_jd_video_file(page: Page, frame: Frame, file_path: str) -> None:
@@ -623,7 +697,8 @@ async def _choose_jd_video_file(page: Page, frame: Frame, file_path: str) -> Non
 
     if not visible_surfaces:
         jd_logger.warning(_msg("⚠️", "未找到京东可见上传卡片，改用原生视频 input"))
-        await file_input.set_input_files(file_path)
+        await _set_jd_video_file_and_verify(file_input, file_path)
+        await asyncio.sleep(JD_UPLOAD_EVENT_PROPAGATION_SECONDS)
         return
 
     # The smallest visible wrapper is normally the real upload card rather than
@@ -636,6 +711,16 @@ async def _choose_jd_video_file(page: Page, frame: Frame, file_path: str) -> Non
                 await upload_surface.click(force=True, timeout=5000)
             chooser = await chooser_info.value
             await chooser.set_files(file_path)
+            selected = await _jd_file_input_has_file(file_input)
+            if selected is False:
+                # 京麦开始上传后会立刻用一个空 input 替换已选择文件的节点，
+                # 因而实时 locator 常会读到新 input 的空 FileList。文件选择器
+                # 已成功接收文件，后续由上传/封面状态轮询确认是否真正完成；
+                # 此处再次 set_input_files 会等待已卸载节点并阻断整个流程。
+                jd_logger.info(
+                    _msg("✅", "京东已接收视频文件，上传 input 已由页面重置")
+                )
+            await asyncio.sleep(JD_UPLOAD_EVENT_PROPAGATION_SECONDS)
             jd_logger.info(_msg("✅", "已通过京东原生文件选择流程提交视频"))
             return
         except PlaywrightError as exc:
@@ -652,7 +737,8 @@ async def _choose_jd_video_file(page: Page, frame: Frame, file_path: str) -> Non
             f"最后错误：{last_error or '页面未触发 file chooser'}",
         )
     )
-    await file_input.set_input_files(file_path)
+    await _set_jd_video_file_and_verify(file_input, file_path)
+    await asyncio.sleep(JD_UPLOAD_EVENT_PROPAGATION_SECONDS)
 
 
 class JDVideo(JDBaseUploader):
@@ -675,6 +761,8 @@ class JDVideo(JDBaseUploader):
         cover_image_path: str | None = None,
         goods_id: str | None = None,
         topic: str = "",
+        tag_type: str = "",
+        tag_path: str = "",
         schedule: datetime | None = None,
         original: bool = False,
         creator_declaration: str = "",
@@ -689,6 +777,8 @@ class JDVideo(JDBaseUploader):
         :param cover_image_path: 自定义封面图片路径（可选，最大 5 MiB）
         :param goods_id: 商品 ID（可选，支持逗号、空格或换行分隔，最多 10 个）
         :param topic: 参与话题名称（可选，精确匹配后选择）
+        :param tag_type: 京东标签一级类型（可选，兴趣标签 / 体裁标签）
+        :param tag_path: 京东三级标签路径（可选，用“/”分隔）
         :param schedule: 定时发布时间（None 立即发布）
         :param original: 是否开启"自主原创"开关
         :param creator_declaration: 创作者声明（必填）
@@ -701,6 +791,8 @@ class JDVideo(JDBaseUploader):
         self.title = title
         self.goods_id = (goods_id or "").strip()
         self.topic = (topic or "").strip()
+        self.tag_type = (tag_type or "").strip()
+        self.tag_path = (tag_path or "").strip()
         self.schedule = schedule
         self.original = original
         self.creator_declaration = creator_declaration.strip()
@@ -753,6 +845,49 @@ class JDVideo(JDBaseUploader):
         if not self.creator_declaration:
             raise ValueError("京东创作声明不能为空")
 
+    async def _jd_cover_preview_ready(self, frame: Frame) -> bool:
+        """Verify that the cover preview is a loaded media resource.
+
+        The edit-cover button can be mounted before the generated cover has a
+        usable URL. Require the preview node itself to report a non-empty source
+        and decoded dimensions before allowing the batch row to continue.
+        """
+        try:
+            preview = frame.locator(
+                ".video-cover-wrapper .preview-img, "
+                ".video-cover-wrapper img, "
+                ".video-cover-wrapper video"
+            ).first
+            if not await preview.count():
+                return False
+            try:
+                state = await preview.evaluate(
+                    """media => ({
+                        source: (media.currentSrc || media.getAttribute('src')
+                            || media.getAttribute('poster') || '').trim(),
+                        loaded: media.tagName === 'VIDEO'
+                            ? media.readyState >= 1
+                            : media.complete === true,
+                        width: media.naturalWidth || media.videoWidth || 0,
+                        height: media.naturalHeight || media.videoHeight || 0,
+                    })"""
+                )
+                return bool(
+                    isinstance(state, dict)
+                    and state.get("source")
+                    and state.get("loaded")
+                    and state.get("width", 0) > 0
+                    and state.get("height", 0) > 0
+                )
+            except (AttributeError, TypeError):
+                # Keep compatibility with small test doubles and old wrappers;
+                # a non-empty src is still better than trusting the button.
+                return bool(await preview.get_attribute("src"))
+        except Exception as exc:
+            if _is_target_closed_error(exc) or _is_publish_frame_reload_error(exc):
+                raise
+            return False
+
     async def _wait_for_video_uploaded(
         self,
         page_or_frame: Page | Frame,
@@ -782,31 +917,60 @@ class JDVideo(JDBaseUploader):
         reload_count = 0
         last_body_text = ""
         stable_ready_polls = 0
-        half_finished_since: float | None = None
+        upload_wait_started = loop.time()
 
         while loop.time() < deadline:
             try:
                 body_text = await _visible_text(current_frame)
                 last_body_text = body_text[-300:].strip()
-                if "上传失败" in body_text or "本地处理失败" in body_text:
+                if any(
+                    hint in body_text
+                    for hint in (
+                        "上传失败",
+                        "本地处理失败",
+                        "视频解析失败",
+                        "封面解析失败",
+                        "封面生成失败",
+                        "视频处理失败",
+                    )
+                ):
                     raise RuntimeError(f"京东视频上传失败：{last_body_text}")
-                video_id_match = re.search(r"视频\s*ID\s*[：:]\s*(\d+)", body_text, re.IGNORECASE)
-                cover_still_waiting = "等待视频上传" in body_text
+                video_id = _extract_jd_video_id(body_text)
+                if not video_id and diagnostics:
+                    video_id = diagnostics.video_id
                 preview_url = diagnostics.preview_url if diagnostics else ""
-                upload_completed = bool(video_id_match or preview_url)
                 edit_cover = await _pick_locator(
                     current_frame.locator(".edit-cover-btn").filter(has_text="修改封面")
                 )
                 processing = any(
                     hint in body_text
-                    for hint in ("等待视频上传", "视频上传中", "封面解析中", "视频解析中", "正在解析")
+                    for hint in (
+                        "等待视频上传",
+                        "视频上传中",
+                        "封面解析中",
+                        "视频解析中",
+                        "正在解析",
+                        "正在生成",
+                        "生成中",
+                        "处理中",
+                        "转码中",
+                    )
                 )
                 edit_ready = edit_cover is not None
+                if edit_ready:
+                    try:
+                        edit_ready = await edit_cover.is_enabled()
+                    except (AttributeError, TypeError):
+                        pass
+                preview_ready = await self._jd_cover_preview_ready(current_frame)
 
-                # The visible edit-cover control is the strongest UI signal.
-                # Evaluate it before the text-based stall detector so a hidden
-                # template string cannot override a ready cover editor.
-                stable_ready_polls = stable_ready_polls + 1 if edit_ready and not processing else 0
+                # The edit-cover control alone is not enough: Jingmai can mount
+                # it before the generated cover URL has decoded.
+                stable_ready_polls = (
+                    stable_ready_polls + 1
+                    if edit_ready and preview_ready and not processing
+                    else 0
+                )
                 if stable_ready_polls >= 2:
                     elapsed = max(0, timeout_seconds - int(deadline - loop.time()))
                     jd_logger.success(
@@ -817,24 +981,30 @@ class JDVideo(JDBaseUploader):
                     )
                     return current_frame
 
-                if upload_completed and cover_still_waiting:
-                    half_finished_since = half_finished_since or loop.time()
-                    if loop.time() - half_finished_since >= stall_seconds:
-                        raise JdVideoProcessingStalledError(
-                            video_id_match.group(1) if video_id_match else "",
-                            last_body_text or "页面没有更多状态信息",
-                            preview_url,
-                        )
-                else:
-                    half_finished_since = None
+                # Once the file has been handed to the browser, any state that
+                # fails to reach a loaded cover preview is bounded. This covers
+                # both the old "等待视频上传" label and newer "封面解析中"
+                # variants, as well as silent SDK failures with no visible text.
+                if loop.time() - upload_wait_started >= stall_seconds:
+                    raise JdVideoProcessingStalledError(
+                        video_id,
+                        last_body_text or "页面没有更多状态信息",
+                        preview_url,
+                    )
             except Exception as exc:
+                if _is_target_closed_error(exc):
+                    raise JdVideoUploadRetryableError(
+                        "京东视频上传或封面解析页被关闭，当前任务需要重新打开发布页"
+                    ) from exc
                 if not _is_publish_frame_reload_error(exc):
                     raise
                 reload_count += 1
                 if page is None:
                     raise RuntimeError("检测到京东发布 iframe 重载，但缺少页面对象，无法重新定位 iframe") from exc
                 if page.is_closed():
-                    raise RuntimeError("京东发布页已关闭，无法继续等待视频封面解析") from exc
+                    raise JdVideoUploadRetryableError(
+                        "京东发布页已关闭，当前任务需要重新打开发布页"
+                    ) from exc
                 if _url_host(page.url) in JD_AUTH_HOSTS:
                     raise JdAuthenticationError("京东 Cookie 已失效，请重新登录") from exc
                 jd_logger.warning(
@@ -1427,36 +1597,36 @@ class JDVideo(JDBaseUploader):
         await asyncio.sleep(0.5)
         jd_logger.info(_msg("📅", f"已选择日期: {target_date}"))
 
-        # 设小时和分钟。两列 ul 分别是小时（24 个 li）和分钟（60 个 li）
-        time_panel = frame.locator('.jd-picker-time-panel-column')
-        hour_col, minute_col = time_panel.nth(0), time_panel.nth(1)
+        actual = ""
+        for attempt in range(1, 4):
+            if attempt > 1:
+                jd_logger.warning(_msg("🕐", f"页面未接受目标时间，正在进行第 {attempt} 次精确选择"))
+                await date_input.click()
+                await frame.locator('.jd-picker-datetime-panel:visible').wait_for(state="visible", timeout=5000)
+                target_cell = frame.locator('.jd-picker-datetime-panel:visible').locator(f'td.jd-picker-cell[title="{target_date}"]').first
+                if await target_cell.count() and await target_cell.is_visible():
+                    await target_cell.click()
+                    await asyncio.sleep(0.3)
 
-        hour_li = hour_col.locator(f'li.jd-picker-time-panel-cell:has-text("{target_hour:02d}")').first
-        await hour_li.scroll_into_view_if_needed()
-        await hour_li.click()
-        jd_logger.info(_msg("🕐", f"已选择小时: {target_hour:02d}"))
-        await asyncio.sleep(0.3)
+            visible_panel = frame.locator('.jd-picker-datetime-panel:visible').first
+            time_panel = visible_panel.locator('.jd-picker-time-panel-column')
+            await select_jd_time_value(time_panel.nth(0), target_hour, "小时")
+            await select_jd_time_value(time_panel.nth(1), target_minute, "分钟")
+            jd_logger.info(_msg("🕐", f"已精确选择时间: {target_hour:02d}:{target_minute:02d}"))
 
-        minute_li = minute_col.locator(f'li.jd-picker-time-panel-cell:has-text("{target_minute:02d}")').first
-        await minute_li.scroll_into_view_if_needed()
-        await minute_li.click()
-        jd_logger.info(_msg("🕐", f"已选择分钟: {target_minute:02d}"))
-        await asyncio.sleep(0.3)
+            confirm_btn = visible_panel.locator('button').filter(has_text="确定").first
+            if not await confirm_btn.count():
+                confirm_btn = frame.locator('.jd-picker-ok button').first
+            await confirm_btn.click()
+            await asyncio.sleep(0.8)
+            actual = (await date_input.input_value()).strip()
+            if actual == expected_value:
+                jd_logger.success(_msg("📅", f"定时发布时间已设置: {actual}"))
+                return
 
-        # 点击日期面板右下角的「确定」按钮
-        confirm_btn = frame.locator('.jd-picker-datetime-panel').locator('button').filter(has_text="确定").first
-        if not await confirm_btn.count():
-            confirm_btn = frame.locator('.jd-picker-ok button').first
-        await confirm_btn.click()
-        await asyncio.sleep(0.8)
-
-        # 校验 input.value 与期望值一致
-        actual = (await date_input.input_value()).strip()
-        if actual != expected_value:
-            raise RuntimeError(
-                f"定时发布时间设置后校验失败：期望 {expected_value}，页面实际 {actual!r}。已停止发布以避免错误时间。"
-            )
-        jd_logger.success(_msg("📅", f"定时发布时间已设置: {actual}"))
+        raise RuntimeError(
+            f"定时发布时间设置后校验失败：期望 {expected_value}，页面实际 {actual!r}。已重试 3 次并停止发布以避免错误时间。"
+        )
 
     async def _handle_captcha(self, frame) -> None:
         """检测验证码弹窗，若出现则暂停并等待用户手动完成。
@@ -1593,21 +1763,41 @@ class JDVideo(JDBaseUploader):
                     diagnostics=diagnostics,
                 )
                 return page, frame
-            except JdVideoProcessingStalledError as exc:
-                if attempt >= JD_VIDEO_UPLOAD_MAX_ATTEMPTS:
+            except (JdVideoProcessingStalledError, JdVideoUploadRetryableError) as exc:
+                should_retry = attempt < JD_VIDEO_UPLOAD_MAX_ATTEMPTS
+                if not page.is_closed():
+                    await page.close()
+                if not should_retry:
                     raise
+                if isinstance(exc, JdVideoProcessingStalledError):
+                    reason = (
+                        "检测到京东视频上传已开始但封面解析未完成，"
+                        "正在关闭当前页面并用全新发布页重试一次"
+                    )
+                else:
+                    reason = (
+                        "检测到京东视频上传页无法继续，"
+                        "正在关闭当前页面并用全新发布页重试一次"
+                    )
                 jd_logger.warning(
                     _msg(
                         "🔁",
-                        f"检测到京东视频上传已完成"
-                        f"{f'（视频 ID {exc.video_id}）' if exc.video_id else ''}"
-                        "，但封面处理未启动，"
-                        "正在关闭当前页面并用全新发布页重试一次",
+                        f"{reason}"
+                        f"{f'（视频 ID {exc.video_id}）' if isinstance(exc, JdVideoProcessingStalledError) and exc.video_id else ''}",
                     )
                 )
-                if not page.is_closed():
-                    await page.close()
-            except Exception:
+            except Exception as exc:
+                if _is_target_closed_error(exc):
+                    if not page.is_closed():
+                        await page.close()
+                    if attempt >= JD_VIDEO_UPLOAD_MAX_ATTEMPTS:
+                        raise JdVideoUploadRetryableError(
+                            "京东视频发布页在上传过程中被关闭，重试次数已用尽"
+                        ) from exc
+                    jd_logger.warning(
+                        _msg("🔁", "京东视频发布页被关闭，正在用全新发布页重试一次")
+                    )
+                    continue
                 # Non-submit failures are handled by upload_in_session, which
                 # closes the session after capturing the task error.
                 raise
@@ -1648,6 +1838,12 @@ class JDVideo(JDBaseUploader):
             # 各步骤依次执行
             await self._add_goods(page, frame)
             await self._add_topic(frame)
+            await select_jd_tag(
+                frame,
+                tag_path=self.tag_path,
+                tag_type=self.tag_type,
+                logger=jd_logger,
+            )
             await self._select_creator_declaration(frame)
             await self._set_original(frame)
             await self._set_schedule(frame)
@@ -1758,10 +1954,12 @@ class JDVideo(JDBaseUploader):
         京东浏览器会话和已有页面，避免批量任务中的单条异常误伤其它窗口。
         """
         try:
-            # jd_setup has just verified this context. Persist that stable state
-            # before the publish page can rotate upload-scoped credentials.
+            # Rebuild a disconnected context before saving state. A previous
+            # stalled upload may have left the BrowserContext closed; saving it
+            # first would prevent the session pool from recovering lazily.
+            context = await session.ensure_open()
             await session.save_storage_state()
-            result = await self._upload_in_context(await session.ensure_open())
+            result = await self._upload_in_context(context)
         except PublishResultUncertainError:
             # The publish button was already clicked. Keep the visible page and
             # browser context so an operator can inspect Jingmai manually; the

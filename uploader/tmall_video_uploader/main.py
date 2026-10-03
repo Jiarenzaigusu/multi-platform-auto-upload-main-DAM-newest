@@ -23,6 +23,7 @@ from io import BytesIO
 import os
 import re
 import shutil
+import sys
 import tempfile
 import uuid
 from datetime import datetime
@@ -37,6 +38,7 @@ from patchright.async_api import (
 
 from uploader.errors import PublishResultUncertainError
 from uploader.tmall_label_selector import (
+    focus_tmall_editor_end,
     select_tmall_label_suggestion,
     type_tmall_content_tag,
 )
@@ -108,6 +110,7 @@ async def _click_visible_frame_button(
     description: str,
     timeout_seconds: int = 15,
     top_overlay_only: bool = False,
+    required_text: str | None = None,
 ) -> None:
     """点击任一 frame 中当前可见的指定按钮，避免依赖浮层坐标。
 
@@ -117,41 +120,106 @@ async def _click_visible_frame_button(
     """
     for _ in range(timeout_seconds * 2):
         for candidate in frames:
-            scope = candidate
+            scopes = [candidate]
             if top_overlay_only:
                 opened = candidate.locator(".next-overlay-wrapper.opened")
                 if await opened.count() == 0:
-                    continue
-                scope = opened.last
-            buttons = scope.locator('button, [role="button"], a')
-            for index in range(await buttons.count()):
-                button = buttons.nth(index)
-                if not await button.is_visible() or not await button.is_enabled():
-                    continue
-                actual_name = (await button.inner_text()).strip()
-                if not actual_name:
-                    actual_name = (await button.get_attribute("aria-label") or "").strip()
-                # 图库确认会显示“确定（1）”，括号数字是已选素材数，不属于操作名称。
-                normalized_name = re.sub(r"\s+", "", actual_name)
-                normalized_name = re.sub(r"[（(]\d+[）)]$", "", normalized_name).strip()
-                if normalized_name in names:
-                    # Next 组件的文字节点偶尔覆盖按钮命中区域；仅在已确认可用后
-                    # 强制点击实际按钮，不会绕过禁用态。
-                    await button.click(force=True)
-                    return
+                    # 花字弹窗有版本会直接挂在 frame 根节点，不带 Next
+                    # 的 opened wrapper；此时仍可在当前 frame 内按精确文案
+                    # 找到“确定”，而不会退回坐标点击。
+                    scopes = [candidate]
+                else:
+                    # 天猫会同时保留 backdrop、dialog 和动态 iframe wrapper，
+                    # 不假定最后一个 wrapper 就是包含业务按钮的那一层。
+                    scopes = [
+                        opened.nth(index)
+                        for index in range(await opened.count() - 1, -1, -1)
+                    ]
+            for scope in scopes:
+                if required_text:
+                    marker = scope.get_by_text(required_text, exact=False)
+                    marker_visible = False
+                    for marker_index in range(await marker.count()):
+                        if await marker.nth(marker_index).is_visible():
+                            marker_visible = True
+                            break
+                    if not marker_visible:
+                        continue
+
+                buttons = scope.locator('button, [role="button"], a')
+                for index in range(await buttons.count()):
+                    button = buttons.nth(index)
+                    if not await button.is_visible() or not await button.is_enabled():
+                        continue
+                    actual_name = (await button.inner_text()).strip()
+                    if not actual_name:
+                        actual_name = (await button.get_attribute("aria-label") or "").strip()
+                    # 图库确认会显示“确定（1）”，括号数字是已选素材数，不属于操作名称。
+                    normalized_name = re.sub(r"\s+", "", actual_name)
+                    normalized_name = re.sub(r"[（(]\d+[）)]$", "", normalized_name).strip()
+                    if normalized_name in names:
+                        # Next 组件的文字节点偶尔覆盖按钮命中区域；仅在已确认可用后
+                        # 强制点击实际按钮，不会绕过禁用态。
+                        await button.click(force=True)
+                        break
+                else:
+                    # 花字弹窗当前版本把操作控件渲染成带文字的 div/span，
+                    # 没有 button、role 或 a。仍限定在当前 opened wrapper 内，
+                    # 用精确可见文案点击其事件目标。
+                    for name in names:
+                        text_nodes = scope.get_by_text(name, exact=True)
+                        for index in range(await text_nodes.count()):
+                            text_node = text_nodes.nth(index)
+                            if not await text_node.is_visible():
+                                continue
+                            try:
+                                if not await text_node.is_enabled():
+                                    continue
+                            except Exception:
+                                # span/div 没有 enabled 属性，能见性已经足够。
+                                pass
+                            await text_node.click(force=True)
+                            break
+                        else:
+                            continue
+                        break
+
+                if required_text:
+                    for _ in range(20):
+                        marker_visible = False
+                        marker = scope.get_by_text(required_text, exact=False)
+                        for marker_index in range(await marker.count()):
+                            if await marker.nth(marker_index).is_visible():
+                                marker_visible = True
+                                break
+                        if not marker_visible:
+                            return
+                        await asyncio.sleep(0.25)
+                    raise RuntimeError(
+                        f"已点击{description}按钮，但“{required_text}”弹窗仍未关闭"
+                    )
+                return
         await asyncio.sleep(0.5)
     # 平台改版时保留可见操作文案，便于只调整语义名称，不需要恢复坐标点击。
     visible_actions: list[str] = []
     for candidate in frames:
         try:
-            scope = candidate
+            scopes = [candidate]
             if top_overlay_only:
                 opened = candidate.locator(".next-overlay-wrapper.opened")
                 if await opened.count() == 0:
-                    continue
-                scope = opened.last
-            actions = await scope.evaluate(
-                """() => [...document.querySelectorAll('button, [role="button"], a')]
+                    scopes = [candidate]
+                else:
+                    scopes = [
+                        opened.nth(index)
+                        for index in range(await opened.count() - 1, -1, -1)
+                    ]
+            actions = []
+            for scope in scopes:
+                actions.extend(await scope.evaluate(
+                    """() => [...document.querySelectorAll(
+                        'button, [role="button"], a, span, div'
+                    )]
                     .filter(element => {
                         const style = getComputedStyle(element);
                         const rect = element.getBoundingClientRect();
@@ -160,8 +228,8 @@ async def _click_visible_frame_button(
                     })
                     .map(element => (element.innerText || element.getAttribute('aria-label') || '')
                         .trim().replace(/\\s+/g, ' '))
-                    .filter(Boolean).slice(0, 30)"""
-            )
+                        .filter(Boolean).slice(0, 30)"""
+                ))
             if actions:
                 visible_actions.extend(actions)
         except Exception:
@@ -171,6 +239,20 @@ async def _click_visible_frame_button(
     raise RuntimeError(
         f"未找到可点击的{description}按钮（期望 {expected}；当前可见操作：{available}）"
     )
+
+
+async def _visible_open_overlay_count(frames) -> int:
+    """统计所有 frame 中真正可见的 Next opened 浮层。"""
+    total = 0
+    for candidate in tuple(frames):
+        try:
+            overlays = candidate.locator(".next-overlay-wrapper.opened")
+            for index in range(await overlays.count()):
+                if await overlays.nth(index).is_visible():
+                    total += 1
+        except Exception:
+            continue
+    return total
 
 
 def _is_cover_card_gray(red: int, green: int, blue: int) -> bool:
@@ -714,7 +796,7 @@ class TmallVideo(TmallBaseUploader):
     4. 填写标题/描述/话题标签
     5. 参与活动话题（可选）→ 添加音乐（可选）→ 关联商品
     6. 设置定时/立即发布 → 选择创作者声明 → 点击发布按钮
-    7. 等待平台成功/失败/跳转信号，30 秒内无信号则抛 PublishResultUncertainError
+     7. 等待平台明确成功/失败信号，30 秒内无信号则抛 PublishResultUncertainError
     """
 
     def __init__(
@@ -847,12 +929,12 @@ class TmallVideo(TmallBaseUploader):
         """等待视频上传完成，发布表单可编辑。
 
         判定信号：页面出现"重新上传"且包含"视频封面"字样。
-        若出现"上传失败"或"失败"字样则抛出异常。
-        超时 180 秒。
+        只在上传区域出现明确失败提示时抛出异常。
+        超时由 timeout_seconds 严格控制。
         """
-        for i in range(timeout_seconds // 2):
+        for i in range(timeout_seconds):
             body = await frame.locator("body").inner_text(timeout=3000)
-            if "上传失败" in body or "失败" in body:
+            if any(hint in body for hint in ("上传失败", "视频上传失败", "上传出错")):
                 raise RuntimeError("视频上传失败，请检查页面提示")
             if "重新上传" in body and "视频封面" in body:
                 tmall_logger.success(_msg("🥳", "视频上传完成，发布表单已可编辑"))
@@ -878,6 +960,7 @@ class TmallVideo(TmallBaseUploader):
         """
         cover_path = Path(self.cover_image_path)
         tmall_logger.info(_msg("🖼️", f"准备设置自定义封面: {cover_path.name}"))
+        initial_page_overlay_count = await _visible_open_overlay_count(page.frames)
         # 等待"编辑"封面按钮可点击
         edit_button = frame.locator('[data-autolog-container="coverOperate_edit"]').first
         await edit_button.wait_for(state="visible", timeout=90000)
@@ -978,8 +1061,10 @@ class TmallVideo(TmallBaseUploader):
         for _ in range(120):
             selected_cover = await picker_frame.evaluate(
                 r"""(expectedStem) => {
+                    // 平台 CSS-module 的哈希类名会变；与图文流程一致，按素材卡片
+                    // 的稳定语义结构定位，仍只接受唯一文件名精确命中的卡片。
                     const cards = [...document.querySelectorAll('label')].filter(card =>
-                        card.querySelector('.PicList_pic_imgBox__c0HXw img')
+                        card.querySelector('img')
                         && card.querySelector('input[type="checkbox"], input[type="radio"]')
                     );
                     const matches = cards.filter(card => {
@@ -1037,9 +1122,20 @@ class TmallVideo(TmallBaseUploader):
             tuple(reversed(page.frames)),
             ("下一步", "完成", "确定"),
             description="花字确认",
+            top_overlay_only=True,
+            required_text="添加花字",
         )
-        await asyncio.sleep(1)
-        await cover_dialog.wait_for(state="hidden", timeout=10000)
+        # 花字层可能挂在外层页面或另一个动态 iframe。所有 frame 的可见
+        # opened 数量都回落到进入封面流程前，才算真正完成。
+        for _ in range(40):
+            if (
+                await _visible_open_overlay_count(page.frames)
+                <= initial_page_overlay_count
+            ):
+                break
+            await asyncio.sleep(0.5)
+        else:
+            raise RuntimeError("天猫自定义封面确认后仍有花字浮层未关闭")
         tmall_logger.success(_msg("🖼️", f"自定义封面已设置: {cover_path.name}"))
 
     def _build_description(self) -> str:
@@ -1059,10 +1155,10 @@ class TmallVideo(TmallBaseUploader):
         return cleaned
 
     async def _fill_title_and_desc(self, frame, page: Page):
-        """填写视频标题与描述，然后通过原生标签模式添加内容标签。
+        """填写视频标题与描述；内容标签在其它标签完成后统一追加。
 
         描述区是淘宝"仓颉"富文本编辑器（contenteditable div），不是真正的 textarea。
-        先点击工具栏“内容标签”让仓颉进入标签态，再输入文本并以空格确认。
+        本步骤只建立并校验正文末尾选区，不在此处插入标签。
         """
         # 填写标题
         title_input = frame.locator('input[placeholder="加个标题让内容更吸引人"]').first
@@ -1076,7 +1172,8 @@ class TmallVideo(TmallBaseUploader):
         await desc_editor.click()
 
         # 清空已有内容（草稿可能自动保留上次输入）
-        await page.keyboard.press("Meta+A")
+        select_all = "Meta+A" if os.name == "posix" and sys.platform == "darwin" else "Control+A"
+        await page.keyboard.press(select_all)
         await page.keyboard.press("Delete")
 
         # 输入描述文本
@@ -1085,7 +1182,9 @@ class TmallVideo(TmallBaseUploader):
             await page.keyboard.type(desc[:1000])
             tmall_logger.info(_msg("✍️", f"视频描述已填写: {desc[:30]}"))
 
-        await self._add_content_tags(frame, page)
+        # 文案输入后立即把仓颉的内部选区同步到末尾，防止第一个
+        # 标签在工具栏抢走焦点后回落到文案中间。
+        await focus_tmall_editor_end(frame, page)
 
     async def _select_label_suggestion(
         self, frame, page: Page, *, toolbar_label: str, value: str
@@ -1300,22 +1399,35 @@ class TmallVideo(TmallBaseUploader):
         tmall_logger.info(_msg("🔎", f"已搜索话题关键词: {self.activity_topic}"))
         await asyncio.sleep(3)
 
-        # 找搜索结果第一张可点击卡片
-        # 结构：.topic-card--xxx > .topic-card-select--xxx（cursor:pointer）
-        result_card = dialog.locator('[class*="topic-card-select--"]').first
-        count = await result_card.count()
-        if count == 0:
+        # 结构：.topic-card--xxx > .topic-card-select--xxx（cursor:pointer）。
+        # 搜索结果必须与输入关键词匹配，不能仅取排序第一项，否则模糊搜索
+        # 可能把内容加入到同名/相近的错误活动中。
+        cards = dialog.locator('[class*="topic-card-select--"]')
+        normalized_query = _normalize_option_text(self.activity_topic).lower()
+        result_card = None
+        topic_name = ""
+        for card_index in range(await cards.count()):
+            candidate = cards.nth(card_index)
+            if not await candidate.is_visible():
+                continue
+            candidate_text = (await candidate.inner_text()).strip()
+            candidate_name = await candidate.evaluate(
+                "el => (el.getAttribute('data-autolog') || el.innerText || '')"
+                ".split(':').pop().split('\\n')[0].trim()"
+            )
+            searchable = _normalize_option_text(f"{candidate_name} {candidate_text}").lower()
+            if normalized_query and normalized_query in searchable:
+                result_card = candidate
+                topic_name = candidate_name or candidate_text
+                break
+        if result_card is None:
             # 无结果时取消对话框并报错
             await dialog.locator(".next-btn-normal").filter(has_text="取消").first.click()
             raise ValueError(
-                f"话题活动搜索关键词 '{self.activity_topic}' 无结果。"
+                f"话题活动搜索结果中没有匹配“{self.activity_topic}”的活动。"
                 "请核实关键词是否正确，或不传 --activity-topic 使用平台推荐话题。"
             )
 
-        # 提取话题名称用于日志
-        topic_name = await result_card.evaluate(
-            "el => (el.getAttribute('data-autolog') || el.innerText || '').split(':').pop().split('\\n')[0].trim()"
-        )
         await result_card.click()
         await asyncio.sleep(1)
         tmall_logger.info(_msg("📣", f"已选择话题: {topic_name}"))
@@ -1811,9 +1923,12 @@ class TmallVideo(TmallBaseUploader):
         """等待发布后的平台确认信号。
 
         30 秒内轮询检测：
-        - 成功：页面出现"发布成功"等提示，或页面跳转到非登录/鉴权页
+        - 成功：页面出现"发布成功"等明确提示
         - 失败：页面出现"发布失败"等提示
         - 无信号：抛出 PublishResultUncertainError
+
+        ``initial_url`` 保留在接口中用于兼容已有调用方；URL 变化本身不再
+        作为成功依据。
 
         :returns: 确认信息字符串（用于日志）
         """
@@ -1822,15 +1937,6 @@ class TmallVideo(TmallBaseUploader):
 
         for _ in range(timeout_seconds):
             await asyncio.sleep(1)
-            current_url = page.url
-            # 页面跳转到非登录/鉴权页视为成功
-            if (
-                current_url != initial_url
-                and not _is_login_page_url(current_url)
-                and not _is_auth_page_url(current_url)
-            ):
-                return f"页面已跳转：{current_url}"
-
             # 读取 frame 与 page 的文本，检测成功/失败提示
             try:
                 frame_text = await frame.locator("body").inner_text(timeout=3000)
@@ -1858,6 +1964,8 @@ class TmallVideo(TmallBaseUploader):
     async def _upload_in_context(
         self,
         context: BrowserContext,
+        *,
+        session: TmallBrowserSession | None = None,
     ) -> dict:
         """在指定 BrowserContext 中执行完整的发布流程。
 
@@ -1884,6 +1992,8 @@ class TmallVideo(TmallBaseUploader):
 
         try:
             page = await context.new_page()
+            if session is not None:
+                await session.minimize_page(page)
             await page.goto(TMALL_VIDEO_PUBLISH_URL, wait_until="domcontentloaded")
             if _is_login_page_url(page.url) or _is_auth_page_url(page.url):
                 raise TmallAuthenticationError("天猫 Cookie 已失效，请重新登录")
@@ -1908,6 +2018,7 @@ class TmallVideo(TmallBaseUploader):
             await self._fill_title_and_desc(frame, page)
             await self._add_brand_tag(frame, page)
             await self._add_activity_topic(frame, page)
+            await self._add_content_tags(frame, page)
             await self._add_music(frame)
             await self._add_goods(frame)
             await self._set_schedule(frame, page)
@@ -1958,12 +2069,17 @@ class TmallVideo(TmallBaseUploader):
         finally:
             # 成功后保存 storage_state（更新 Cookie）
             if success:
-                await context.storage_state(path=self.account_file)
+                if session is not None:
+                    await session.save_storage_state()
+                else:
+                    await context.storage_state(path=self.account_file)
                 tmall_logger.success(_msg("🥳", "cookie 更新完毕"))
             # 页面保留供人工复核
             if page:
                 try:
                     if not page.is_closed():
+                        if session is not None:
+                            await session.reveal_page(page)
                         tmall_logger.info(
                             _msg(
                                 "📌",
@@ -1981,7 +2097,7 @@ class TmallVideo(TmallBaseUploader):
         """
         context = await session.ensure_open()
         try:
-            result = await self._upload_in_context(context)
+            result = await self._upload_in_context(context, session=session)
         except TmallAuthenticationError:
             session.mark_authenticated(False)
             raise

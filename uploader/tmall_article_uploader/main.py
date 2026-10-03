@@ -9,6 +9,10 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import shutil
+import sys
+import tempfile
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -21,6 +25,7 @@ from patchright.async_api import (
 
 from uploader.errors import PublishResultUncertainError
 from uploader.tmall_label_selector import (
+    focus_tmall_editor_end,
     select_tmall_label_suggestion,
     type_tmall_content_tag,
 )
@@ -54,6 +59,21 @@ class TmallAuthenticationError(RuntimeError):
 
 def _msg(emoji: str, text: str) -> str:
     return f"{emoji} {text}"
+
+
+def _article_picker_upload_names(
+    source_paths: list[Path],
+    *,
+    now: datetime | None = None,
+    task_token: str | None = None,
+) -> list[str]:
+    """生成素材库可见且保持原顺序的唯一图文文件名。"""
+    timestamp = (now or datetime.now()).strftime("%Y%m%d-%H%M%S")
+    token = task_token or uuid.uuid4().hex[:12]
+    return [
+        f"mpau-article-{timestamp}-{token}-{index:02d}{path.suffix.lower()}"
+        for index, path in enumerate(source_paths, start=1)
+    ]
 
 
 def _article_image_count_has_updated(body_text: str, expected_images: int) -> bool:
@@ -542,10 +562,10 @@ class TmallArticle:
         return cleaned
 
     async def _fill_title_and_desc(self, frame, page: Page):
-        """填写内容标题与描述，并通过原生标签模式添加内容标签。
+        """填写内容标题与描述；内容标签在其它标签完成后统一追加。
 
         描述区是淘宝"仓颉"富文本编辑器（contenteditable div），不是真正的 textarea。
-        先点击工具栏“内容标签”让仓颉进入标签态，再输入文本并以空格确认。
+        本步骤只建立并校验正文末尾选区，不在此处插入标签。
         """
         # 填写标题
         title_input = frame.locator('input[placeholder="加个标题让内容更吸引人"]').first
@@ -559,7 +579,8 @@ class TmallArticle:
         await desc_editor.click()
 
         # 清空已有内容（草稿可能自动保留上次输入）
-        await page.keyboard.press("Meta+A")
+        select_all = "Meta+A" if os.name == "posix" and sys.platform == "darwin" else "Control+A"
+        await page.keyboard.press(select_all)
         await page.keyboard.press("Delete")
 
         # 输入描述文本
@@ -568,6 +589,12 @@ class TmallArticle:
             await page.keyboard.type(desc[:1000])
             tmall_logger.info(_msg("✍️", f"内容描述已填写: {desc[:30]}"))
 
+        # 先将仓颉记录的选区固定在文案末尾；每个标签输入前还会
+        # 再次校正，避免工具栏焦点切换恢复到旧光标位置。
+        await focus_tmall_editor_end(frame, page)
+
+    async def _add_content_tags(self, frame, page: Page) -> None:
+        """在品牌与活动话题完成后，将内容标签追加到最终文案末尾。"""
         tags = self._normalized_tags()
         for index, tag in enumerate(tags, start=1):
             tmall_logger.info(_msg("🏷️", f"小人正在添加第 {index} 个内容标签: #{tag}"))
@@ -1362,15 +1389,24 @@ class TmallArticle:
         if picker_frame is None:
             raise RuntimeError("未找到天猫图文图片库 iframe，无法上传图片")
 
-        await _upload_article_picker_files(page, picker_frame, self.image_paths)
-
-        # 文件传输完成会先显示上传结果，“完成”后才会返回可勾选的图片库。
-        await _click_visible_article_frame_button(
-            (picker_frame,), ("完成",), description="图片上传完成", timeout_seconds=120
-        )
-
         expected_images = len(self.image_paths)
-        expected_image_stems = [Path(image_path).stem.casefold() for image_path in self.image_paths]
+        source_paths = [Path(image_path) for image_path in self.image_paths]
+        # 素材库永久保留历史图片，批量目录又经常使用 1.jpg、2.jpg 等重复名称。
+        # 上传唯一命名的临时副本，才能在“完成”返回图库后精确选中本次素材。
+        with tempfile.TemporaryDirectory(prefix="mpau-article-") as staging_dir:
+            upload_names = _article_picker_upload_names(source_paths)
+            staged_paths: list[str] = []
+            for source_path, upload_name in zip(source_paths, upload_names, strict=True):
+                staged_path = Path(staging_dir) / upload_name
+                shutil.copy2(source_path, staged_path)
+                staged_paths.append(str(staged_path))
+            await _upload_article_picker_files(page, picker_frame, staged_paths)
+
+            # 文件传输完成会先显示上传结果，“完成”后才会返回可勾选的图片库。
+            await _click_visible_article_frame_button(
+                (picker_frame,), ("完成",), description="图片上传完成", timeout_seconds=120
+            )
+            expected_image_stems = [Path(path).stem.casefold() for path in staged_paths]
         selected_images = None
         # “完成”后图库仍会逐张回写。持续等待每个唯一文件名真实出现，不能以
         # 固定时长代替这个确认，避免只选到先挂载的一部分图片。
@@ -1380,8 +1416,9 @@ class TmallArticle:
                     // 图库会在新图片之间插入历史素材，不能按卡片位置选择。Web
                     // 暂存层已将每张图改为含任务唯一标识的文件名；这里必须只接受
                     // 卡片文本中恰好出现一个完整文件名 stem 的素材，命中不唯一就中止。
+                    // 平台 CSS-module 的哈希类名会变；用卡片的稳定语义结构定位。
                     const cards = [...document.querySelectorAll('label')].filter(card =>
-                        card.querySelector('.PicList_pic_imgBox__c0HXw img')
+                        card.querySelector('img')
                         && card.querySelector('input[type="checkbox"], input[type="radio"]')
                     );
                     const usedCards = new Set();
@@ -1547,7 +1584,12 @@ class TmallArticle:
             return
         await self._crop_uploaded_images(frame, self.cover_ratio)
 
-    async def _upload_in_context(self, context: BrowserContext) -> dict:
+    async def _upload_in_context(
+        self,
+        context: BrowserContext,
+        *,
+        session: TmallBrowserSession | None = None,
+    ) -> dict:
         """执行完整的天猫图文发布流程。"""
         tmall_logger.info(_msg("🧍", "小人先检查 cookie 和图文图片"))
         await self.validate_upload_args()
@@ -1556,6 +1598,8 @@ class TmallArticle:
         page = None
         try:
             page = await context.new_page()
+            if session is not None:
+                await session.minimize_page(page)
             await page.goto(TMALL_ARTICLE_PUBLISH_URL, wait_until="domcontentloaded")
             if _is_login_page_url(page.url) or _is_auth_page_url(page.url):
                 raise TmallAuthenticationError("天猫 Cookie 已失效，请重新登录")
@@ -1566,6 +1610,7 @@ class TmallArticle:
             await self._fill_title_and_desc(frame, page)
             await self._add_brand_tag(frame, page)
             await self._add_activity_topic(frame, page)
+            await self._add_content_tags(frame, page)
             await self._add_music(frame)
             await self._add_goods(frame)
             await self._set_schedule(frame, page)
@@ -1600,13 +1645,15 @@ class TmallArticle:
             if success:
                 await context.storage_state(path=self.account_file)
             if page and not page.is_closed():
+                if session is not None:
+                    await session.reveal_page(page)
                 tmall_logger.info(_msg("📌", "图文发布页面已保留供人工复核"))
 
     async def upload_in_session(self, session: TmallBrowserSession) -> dict:
         """通过天猫共享浏览器会话执行图文发布。"""
         context = await session.ensure_open()
         try:
-            result = await self._upload_in_context(context)
+            result = await self._upload_in_context(context, session=session)
         except TmallAuthenticationError:
             session.mark_authenticated(False)
             raise

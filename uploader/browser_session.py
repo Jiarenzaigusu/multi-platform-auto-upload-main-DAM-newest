@@ -102,6 +102,10 @@ def _browser_launch_args(*, headless: bool) -> list[str]:
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-features=msEdgeFirstRunExperience",
+        # 发布窗口最小化时仍保持页面计时器、渲染与上传处理正常运行。
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
     ]
 
 
@@ -267,6 +271,54 @@ class BrowserSession:
             with suppress(FileNotFoundError):
                 temporary_file.unlink()
         self.touch()
+
+    async def set_page_window_state(self, page, state: str) -> None:
+        """通过 CDP 设置页面所属原生窗口状态。"""
+        if self.headless or not self.context:
+            return
+        if state not in {"normal", "minimized"}:
+            raise ValueError(f"不支持的浏览器窗口状态：{state}")
+        cdp = None
+        try:
+            cdp = await self.context.new_cdp_session(page)
+            window = await cdp.send("Browser.getWindowForTarget")
+            window_id = window.get("windowId")
+            if window_id is None:
+                raise RuntimeError("浏览器未返回窗口标识")
+            await cdp.send(
+                "Browser.setWindowBounds",
+                {"windowId": window_id, "bounds": {"windowState": state}},
+            )
+            action = "最小化后台执行" if state == "minimized" else "恢复显示"
+            self.logger.info(f"{self.platform_label}发布窗口已{action}")
+        except Exception as exc:
+            self.logger.warning(
+                f"无法将{self.platform_label}发布窗口切换为{state}状态：{exc}"
+            )
+        finally:
+            if cdp is not None:
+                with suppress(Exception):
+                    await cdp.detach()
+
+    async def minimize_page(self, page) -> None:
+        """最小化可见发布窗口；无头会话不操作。"""
+        await self.set_page_window_state(page, "minimized")
+
+    async def reveal_page(self, page) -> None:
+        """恢复发布窗口并激活最终页面，供人工复核。"""
+        if self.headless or not self.context:
+            return
+        target = page
+        if target is None or target.is_closed():
+            target = next(
+                (candidate for candidate in reversed(self.context.pages) if not candidate.is_closed()),
+                None,
+            )
+        if target is None:
+            return
+        await self.set_page_window_state(target, "normal")
+        with suppress(Exception):
+            await target.bring_to_front()
 
     async def close(self) -> None:
         """关闭 BrowserContext 与 Browser，并重置鉴权缓存。

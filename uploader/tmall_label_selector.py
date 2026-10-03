@@ -6,7 +6,11 @@ import sys
 
 
 async def focus_tmall_editor_end(frame, page):
-    """Use native pointer/key events to put the Cangjie caret at the end."""
+    """Put the Cangjie caret at the editor's actual DOM end.
+
+    仓颉不会可靠保存脚本创建的 DOM Range。使用原生“全选后向右收起”把
+    选区折叠到编辑器末尾，使其内部缓存和浏览器可见光标保持一致。
+    """
     editor = frame.locator('div[data-cangjie-content="true"]').first
     await editor.wait_for(state="visible", timeout=10000)
 
@@ -16,11 +20,13 @@ async def focus_tmall_editor_end(frame, page):
     # label insertion position.
     await page.keyboard.press("Escape")
     await editor.click()
+    select_all = "Meta+A" if sys.platform == "darwin" else "Control+A"
+    await page.keyboard.press(select_all)
+    # 在浏览器编辑器中，右方向键会把非折叠选区收起到右端。仓颉末尾可能
+    # 存在不可见辅助 DOM，不能再用 Range.toString() 判断视觉光标位置；
+    # 标签插入是否成功由后续 HTML/文本变化单独校验。
     await page.keyboard.press("ArrowRight")
-    shortcut = "Meta+ArrowDown" if sys.platform == "darwin" else "Control+End"
-    await page.keyboard.press(shortcut)
-    # Move out of a possible trailing structured node into the editable tail.
-    await page.keyboard.press("ArrowRight")
+    await asyncio.sleep(0.1)
     return editor
 
 
@@ -33,6 +39,53 @@ async def _visible_toolbar_trigger(frame, toolbar_label: str):
                 return candidate
         await asyncio.sleep(0.25)
     raise RuntimeError(f"未找到可点击的“{toolbar_label}”入口")
+
+
+async def _editor_has_structured_tag(editor, tag: str) -> bool:
+    """Return whether *tag* is represented by a non-text label node.
+
+    Cangjie implementations have changed their generated class names several
+    times.  The stable signals are a tag/label/topic data marker, a
+    non-editable inline node, or a link-like inline node inside the editor.
+    Checking this after the input is committed prevents a plain-text write from
+    being reported as a successful content-label insertion.
+    """
+    try:
+        return bool(
+            await editor.evaluate(
+                r"""(root, expected) => {
+                  const normalize = (value) => (value || '')
+                    .replace(/^#\s*/, '')
+                    .replace(/\s+/g, '')
+                    .toLocaleLowerCase();
+                  const wanted = normalize(expected);
+                  return [...root.querySelectorAll('*')].some((node) => {
+                    const text = normalize(node.textContent);
+                    if (text !== wanted) return false;
+                    const attrs = [...node.attributes].map((attr) =>
+                      `${attr.name}=${attr.value}`.toLocaleLowerCase()
+                    ).join(' ');
+                    const className = typeof node.className === 'string'
+                      ? node.className.toLocaleLowerCase() : '';
+                    return node.getAttribute('contenteditable') === 'false'
+                      || node.getAttribute('role') === 'link'
+                      || node.tagName === 'A'
+                      // Cangjie currently renders a committed content tag as
+                      // an exact-text leaf span, but its CSS-module class has
+                      // no stable semantic name.  Plain editor text remains a
+                      // direct text node of a block element, so this does not
+                      // accept a normal paragraph as a tag.
+                      || (node.tagName === 'SPAN' && node.childElementCount === 0)
+                      || /(tag|topic|label|hashtag|cangjie)/i.test(`${attrs} ${className}`);
+                  });
+                }""",
+                tag,
+            )
+        )
+    except Exception:
+        # Older wrappers/test doubles may not support evaluate.  The caller
+        # still performs the independent tail-position check below.
+        return False
 
 
 async def type_tmall_content_tag(frame, page, tag: str) -> None:
@@ -71,11 +124,27 @@ async def type_tmall_content_tag(frame, page, tag: str) -> None:
             raise RuntimeError(f"进入“内容标签”后无法输入“{tag}”")
         break
 
-    # Cangjie may convert the label before the next DOM sample. Space closes
-    # the current label mode, so a second DOM transition is not required.
+    # Space commits the current label mode.  Verify both that the label is at
+    # the editor tail (the original bug was insertion at a stale caret) and
+    # that Cangjie created a structured label node rather than plain text.
     await asyncio.sleep(0.5)
     await page.keyboard.press("Space")
-    await asyncio.sleep(0.5)
+    tail_seen = False
+    for _ in range(12):
+        final_text = await editor.inner_text()
+        # Cangjie may append zero-width cursor markers or a non-breaking space
+        # after the committed label; these are layout markers, not content.
+        normalized_tail = (final_text or '').rstrip(
+            ' \t\r\n\u00a0\u200b\u200c\u200d\ufeff'
+        )
+        if normalized_tail.endswith(tag):
+            tail_seen = True
+            if await _editor_has_structured_tag(editor, tag):
+                return
+        await asyncio.sleep(0.25)
+    if tail_seen:
+        raise RuntimeError(f"内容标签“{tag}”已在文案末尾，但未转换为可识别的标签节点")
+    raise RuntimeError(f"内容标签“{tag}”未提交到文案末尾")
 
 
 async def select_tmall_label_suggestion(

@@ -34,6 +34,7 @@ def _column_width(field: str) -> int:
         "brand_tag": 18,
         "goods_id": 22,
         "activity_topic": 18,
+        "jd_tag_path": 36,
         "music_name": 18,
         "schedule": 20,
         "creator_declaration": 18,

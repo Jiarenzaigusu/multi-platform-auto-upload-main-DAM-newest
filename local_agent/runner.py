@@ -393,6 +393,8 @@ class AgentJobRunner:
                 description=payload["description"],
                 goods_id=payload["goods_id"],
                 topic=payload["activity_topic"],
+                tag_type=payload.get("jd_tag_type", ""),
+                tag_path=payload.get("jd_tag_path", ""),
                 schedule=schedule,
                 original=bool(payload["original"]),
                 creator_declaration=payload.get(
@@ -413,6 +415,8 @@ class AgentJobRunner:
                 title=payload["title"],
                 goods_id=payload["goods_id"],
                 topic=payload["activity_topic"],
+                tag_type=payload.get("jd_tag_type", ""),
+                tag_path=payload.get("jd_tag_path", ""),
                 schedule=schedule,
                 original=bool(payload["original"]),
                 creator_declaration=payload.get(

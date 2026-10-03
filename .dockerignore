@@ -10,3 +10,12 @@ logs
 webapp/frontend/node_modules
 webapp/frontend/dist
 deploy/windows/output
+
+# Local secrets and development artifacts
+.env
+*.env
+outputs
+release
+.workbuddy
+*.egg-info
+*.log

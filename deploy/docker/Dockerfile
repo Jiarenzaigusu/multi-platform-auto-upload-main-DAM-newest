@@ -22,7 +22,7 @@ ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
     UV_INDEX_URL=${UV_INDEX_URL}
 WORKDIR /src
 
-COPY pyproject.toml uv.lock requirements-mysql-demo.txt README.zh-CN.md ./
+COPY pyproject.toml uv.lock README.zh-CN.md ./
 COPY local_agent/ local_agent/
 COPY uploader/ uploader/
 COPY utils/ utils/
@@ -33,7 +33,6 @@ COPY --from=frontend-builder /src/webapp/frontend/dist /src/webapp/frontend/dist
 # the runtime image.
 RUN pip install --no-cache-dir uv==0.12.7 \
     && uv sync --frozen --no-dev --no-editable --extra web \
-    && uv pip install --python /opt/venv/bin/python -r requirements-mysql-demo.txt \
     && rm -rf "$UV_CACHE_DIR"
 
 FROM python:3.12-slim-bookworm AS runtime

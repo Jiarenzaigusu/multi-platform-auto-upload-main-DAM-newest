@@ -80,7 +80,7 @@ from webapp.api.platforms import delete_account_cookie
 from webapp.api.store import TERMINAL_STATUSES
 from webapp.api.tasks import TaskManager
 from webapp.auth import AuthService, AuthStore, create_auth_router
-from webapp.auth.dependencies import require_operator, require_session, require_user
+from webapp.auth.dependencies import require_admin, require_operator, require_session, require_user
 from webapp.auth.middleware import AuthenticationMiddleware
 from webapp.dashboard import DashboardRepository
 from webapp.dashboard_agent import ChatRequest, ConversationStore, DashboardTools, answer_question
@@ -139,6 +139,8 @@ class WebSettings:
         "http://localhost:8788",
         "http://127.0.0.1:8788",
     )
+    mysql: MySQLSettings = MySQLSettings()
+
     @classmethod
     def from_environment(cls) -> "WebSettings":
         """Load deployment settings while retaining safe local defaults."""
@@ -198,6 +200,7 @@ class WebSettings:
             in {"1", "true", "yes", "on"},
             allowed_hosts=allowed_hosts,
             allowed_origins=allowed_origins,
+            mysql=MySQLSettings.from_environment(),
         )
 
 
@@ -315,11 +318,15 @@ def create_app(
         AuthStore(data_paths.auth_database),
         session_seconds=settings.session_seconds,
     )
+    mysql_database = MySQLDatabase(settings.mysql)
+    dashboard_repository = DashboardRepository(mysql_database)
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         try:
             yield
         finally:
+            mysql_database.close()
             workspace_registry.close()
 
     app = FastAPI(title="MPAU Commerce Console", version="0.1.0", lifespan=lifespan)
@@ -327,6 +334,7 @@ def create_app(
     app.state.data_paths = data_paths
     app.state.workspace_registry = workspace_registry
     app.state.auth_service = auth_service
+    app.state.mysql_database = mysql_database
     dam_sessions: dict[str, DamSettings] = {}
     dam_sessions_lock = Lock()
     trusted_browser_origins = set(settings.allowed_origins)

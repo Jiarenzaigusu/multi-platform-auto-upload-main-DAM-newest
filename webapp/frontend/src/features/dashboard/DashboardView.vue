@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { apiRequest } from '../../api-client.js'
 import TagAnalysisPanel from './TagAnalysisPanel.vue'
+import SubcategoryAnalysisPanel from './SubcategoryAnalysisPanel.vue'
 import AssistantRichText from './AssistantRichText.vue'
 import { analyzeContent } from './content-analysis.js'
 
@@ -237,6 +238,7 @@ onMounted(loadDashboard)
           <div class="ai-analysis-footnote"><span>数据状态</span><strong>{{ data?.source?.latest_period ? `已基于 ${dateLabel} 的品牌数据分析` : '等待数据库数据' }}</strong><em>{{ aiResult ? `AI 分析 · ${aiResult.provider} · ${aiResult.model}` : '当前为规则分析，未调用 AI 模型' }}；汇总人数未跨内容去重；下载周期不等于发布时间；种草成交不等于直接购买归因</em></div>
         </article>
       </div>
+      <SubcategoryAnalysisPanel :data="data" />
     </template>
 
     <div v-if="assistantOpen" class="assistant-backdrop" @click="assistantOpen = false"></div>

@@ -35,6 +35,11 @@ RUN pip install --no-cache-dir uv==0.12.7 \
     && uv sync --frozen --no-dev --no-editable --extra web \
     && rm -rf "$UV_CACHE_DIR"
 
+# Check the installed application before replacing the running service.
+RUN cd /tmp \
+    && MPAU_DATA_DIR=/tmp/mpau-startup-check /opt/venv/bin/python -c "from webapp.api.main import app; assert app.state.mysql_database is not None" \
+    && rm -rf /tmp/mpau-startup-check
+
 FROM python:3.12-slim-bookworm AS runtime
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \

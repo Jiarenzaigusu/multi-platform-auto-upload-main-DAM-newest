@@ -19,3 +19,4 @@ release
 .workbuddy
 *.egg-info
 *.log
+backups

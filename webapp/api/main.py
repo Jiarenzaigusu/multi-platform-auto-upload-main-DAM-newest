@@ -499,6 +499,16 @@ def create_app(
         except MySQLDemoError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
+    @app.get("/api/dashboard/category-insights")
+    def dashboard_category_insights(request: Request, period: str = Query(default="latest"), user: object = Depends(require_user)) -> dict:
+        from webapp.category_insights import cached_category_insights
+
+        dashboard = dashboard_data(request, period, user)
+        if dashboard.get("empty") or not dashboard.get("summary"):
+            return {"status": "empty", "scopes": {}}
+        workspace = current_workspace(request)
+        return cached_category_insights(dashboard, OpenAICompatibleProvider(workspace.llm_registry), workspace.paths.runtime / "category-insights.sqlite3")
+
     @app.post("/api/dashboard/analysis")
     def dashboard_analysis(request: Request, period: str = Query(default="latest"), user: object = Depends(require_user)) -> dict:
         from webapp.content_analysis import generate_analysis

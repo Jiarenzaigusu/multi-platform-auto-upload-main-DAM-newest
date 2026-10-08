@@ -188,9 +188,9 @@ class DashboardRepositoryTests(unittest.TestCase):
             self.assertEqual(parameters[0], 7)
             if "GROUP BY `年份`, `下载周期`, `汇总分类`" in query:
                 return [
-                    (2026, "8月", "图文", "", 1, 100, 130, 4, 20, 12, 30),
-                    (2026, "8月", "往期视频", "", 1, 100, 120, 4, 19.5, 8, 20),
-                    (2026, "7月", "图文", "", 1, 90, 120, 3, 10, 9, 15),
+                    (2026, "8月", "图文", "", 2, 100, 130, 4, 20, 12, 30, 1),
+                    (2026, "8月", "往期视频", "", 1, 100, 120, 4, 19.5, 8, 20, 0),
+                    (2026, "7月", "图文", "", 1, 90, 120, 3, 10, 9, 15, 0),
                 ]
             if "COUNT(*)" in query:
                 return [
@@ -198,14 +198,20 @@ class DashboardRepositoryTests(unittest.TestCase):
                     (2026, "7月", 1, 50, 120, 10, 9, 90, 3, 12),
                 ]
             return [
-                ("图文", "", "123", "真实作品", "2025-11-29 21:00:00", 100, 20, 12, 30),
-                ("图文", "", "456", "另一篇图文", "2026-03-15 20:00:00", 50, 0, 1, 5),
+                ("图文", "", "123", "真实作品", "2025-11-29 21:00:00", 100, 20, 12, 30, "是"),
+                ("图文", "", "456", "另一篇图文", "2026-03-15 20:00:00", 50, 0, 1, 5, "否"),
             ]
 
         database.execute.side_effect = execute
         payload = DashboardRepository(database).load(7, "星巴克")
 
         self.assertEqual(payload["selected_period"], "2026-08")
+        image_tag = payload["tags"]["image"][0]
+        self.assertEqual(image_tag["contentCount"], 2)
+        self.assertEqual(image_tag["viralCount"], 1)
+        self.assertEqual(image_tag["trends"]["viralCount"], [0, 1])
+        self.assertEqual([sample["viralCount"] for sample in image_tag["samples"]], [1, 0])
+        self.assertIn("TRIM(`是否爆文`) = '是'", database.execute.call_args_list[1].args[0])
         self.assertEqual(payload["brand"], {"id": 7, "name": "星巴克"})
         self.assertEqual(payload["summary"]["current"]["content_viewers"], 100)
         self.assertEqual(payload["summary"]["current"]["impressions"], 250)
@@ -224,8 +230,8 @@ class DashboardRepositoryTests(unittest.TestCase):
     def test_samples_include_revenue_leader_outside_exposure_top_five(self):
         database = MagicMock()
         database.execute.side_effect = [
-            [(2026, "8月", "AI短视频", "", 6, 401, 500, 0, 500, 0, 0)],
-            [("AI短视频", "", str(index), f"作品{index}", None, exposure, revenue, 0, 0)
+            [(2026, "8月", "AI短视频", "", 6, 401, 500, 0, 500, 0, 0, 0)],
+            [("AI短视频", "", str(index), f"作品{index}", None, exposure, revenue, 0, 0, "否")
              for index, (exposure, revenue) in enumerate([(100, 0), (90, 0), (80, 0), (70, 0), (60, 0), (1, 500)])],
         ]
         tags = DashboardRepository(database)._categories(7, "2026-08", None, [{"period_key": "2026-08", "label": "2026年8月"}])["tags"]

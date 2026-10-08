@@ -1,8 +1,7 @@
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { apiRequest } from '../../api-client.js'
 import TagAnalysisPanel from './TagAnalysisPanel.vue'
-import SubcategoryAnalysisPanel from './SubcategoryAnalysisPanel.vue'
 import AssistantRichText from './AssistantRichText.vue'
 import { analyzeContent } from './content-analysis.js'
 
@@ -12,6 +11,28 @@ const comparison = ref('previous')
 const loading = ref(true)
 const error = ref('')
 const data = ref(null)
+const categoryInsights = ref({})
+const categoryInsightStatus = ref('loading')
+let categoryInsightRequest = 0
+let categoryInsightTimer
+let categoryInsightBusy = false
+async function loadCategoryInsights() {
+  if (!data.value?.selected_period || categoryInsightBusy) return
+  const requestedPeriod = data.value.selected_period
+  const requestId = ++categoryInsightRequest
+  categoryInsightBusy = true
+  try {
+    const result = await apiRequest(`/api/dashboard/category-insights?period=${encodeURIComponent(requestedPeriod)}`)
+    if (requestId !== categoryInsightRequest || requestedPeriod !== data.value?.selected_period) return
+    categoryInsights.value = result.scopes || {}
+    categoryInsightStatus.value = result.status
+  } catch {
+    if (requestId === categoryInsightRequest) categoryInsightStatus.value = 'error'
+  } finally {
+    categoryInsightBusy = false
+    if (requestedPeriod !== data.value?.selected_period) loadCategoryInsights()
+  }
+}
 const aiResult = ref(null)
 const aiLoading = ref(false)
 const aiError = ref('')
@@ -81,6 +102,9 @@ async function loadDashboard() {
   error.value = ''
   try {
     data.value = await apiRequest(`/api/dashboard?period=${encodeURIComponent(period.value || 'latest')}`)
+    categoryInsights.value = {}
+    categoryInsightStatus.value = 'loading'
+    loadCategoryInsights()
     if (!period.value && data.value.selected_period) period.value = data.value.selected_period
   } catch (requestError) {
     error.value = requestError.message
@@ -174,7 +198,11 @@ async function sendAssistantQuestion() {
 
 watch([assistantOpen, period, assistantScope, () => data.value?.selected_period], loadAssistantHistory)
 watch(period, (next) => { if (next && next !== data.value?.selected_period) loadDashboard() })
-onMounted(loadDashboard)
+onMounted(() => {
+  loadDashboard()
+  categoryInsightTimer = setInterval(loadCategoryInsights, 60000)
+})
+onUnmounted(() => { clearInterval(categoryInsightTimer); categoryInsightRequest += 1 })
 </script>
 
 <template>
@@ -224,7 +252,7 @@ onMounted(loadDashboard)
 
       </div>
 
-    <TagAnalysisPanel :tag-groups="data?.tags" :period-label="dateLabel" @scope-change="assistantScope = $event" />
+    <TagAnalysisPanel :category-insights="categoryInsights" :insight-status="categoryInsightStatus" :tag-groups="data?.tags" :period-label="dateLabel" @scope-change="assistantScope = $event" />
 
     <template v-if="current">
       <div class="dashboard-grid dashboard-bottom-grid ai-analysis-grid">
@@ -233,12 +261,11 @@ onMounted(loadDashboard)
           <p v-if="aiError" class="ai-analysis-error" role="alert">{{ aiError }}</p>
           <div class="ai-analysis-suite-body">
             <div class="ai-content-overview"><span class="ai-content-overview-icon">✦</span><div><strong>本周期分析结论</strong><p>{{ aiContentSummary }}</p><div class="ai-overview-stats"><span><small>查看人数合计</small><b>{{ formatNumber(valueFor('content_viewers')) }}</b></span><span><small>商品点击人数合计</small><b>{{ formatNumber(valueFor('product_click_users')) }}</b></span><span><small>种草成交金额</small><b>{{ formatMoney(valueFor('revenue')) }}</b></span></div></div></div>
-            <div class="ai-report-panel"><div class="ai-report-panel-head"><strong>五个维度 · 判断与动作</strong><small>根据当前看板可用字段分析</small></div><div class="ai-report-list"><div v-for="item in aiAnalysis" :key="item.title" class="ai-report-row"><span class="ai-analysis-icon">{{ item.icon }}</span><div><div v-if="item.dimension" class="ai-dimension-label">{{ item.dimension }}</div><div class="ai-report-row-title"><strong>{{ item.title }}</strong><em>{{ item.tag }}</em></div><p>{{ item.text }}</p><details v-if="item.evidence?.length" class="ai-evidence"><summary>查看数据依据</summary><p v-for="(entry, index) in item.evidence" :key="index">{{ entry }}</p></details></div></div><div v-if="!aiAnalysis.length" class="activity-empty">连接数据库后，将展示五个维度的分析与数据覆盖情况。</div></div></div>
+            <div class="ai-report-panel"><div class="ai-report-panel-head"><strong>五个维度 · 判断与动作</strong></div><div class="ai-report-list"><div v-for="item in aiAnalysis" :key="item.title" class="ai-report-row"><span class="ai-analysis-icon">{{ item.icon }}</span><div><div v-if="item.dimension" class="ai-dimension-label">{{ item.dimension }}</div><div class="ai-report-row-title"><strong>{{ item.title }}</strong><em>{{ item.tag }}</em></div><p>{{ item.text }}</p><details v-if="item.evidence?.length" class="ai-evidence"><summary>查看数据依据</summary><p v-for="(entry, index) in item.evidence" :key="index">{{ entry }}</p></details></div></div><div v-if="!aiAnalysis.length" class="activity-empty">连接数据库后，将展示五个维度的分析与数据覆盖情况。</div></div></div>
           </div>
           <div class="ai-analysis-footnote"><span>数据状态</span><strong>{{ data?.source?.latest_period ? `已基于 ${dateLabel} 的品牌数据分析` : '等待数据库数据' }}</strong><em>{{ aiResult ? `AI 分析 · ${aiResult.provider} · ${aiResult.model}` : '当前为规则分析，未调用 AI 模型' }}；汇总人数未跨内容去重；下载周期不等于发布时间；种草成交不等于直接购买归因</em></div>
         </article>
       </div>
-      <SubcategoryAnalysisPanel :data="data" />
     </template>
 
     <div v-if="assistantOpen" class="assistant-backdrop" @click="assistantOpen = false"></div>

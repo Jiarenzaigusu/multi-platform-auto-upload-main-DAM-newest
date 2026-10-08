@@ -243,19 +243,7 @@ onMounted(loadStatus)
       </form>
     </article>
 
-    <aside class="llm-adapter-notes">
-      <p>ADAPTER RULES</p>
-      <h2>一条清楚的模型通道</h2>
-      <div class="llm-route-visual">
-        <span>AI COPY</span><i></i><strong>{{ status.active?.label || 'NO MODEL' }}</strong>
-      </div>
-      <ol>
-        <li><b>01</b><span><strong>严格单选</strong>同时只激活一个模型，但每个模型可分别保存 API Key。</span></li>
-        <li><b>02</b><span><strong>先验后切</strong>连接验证通过后才替换当前模型，失败不会影响原配置。</span></li>
-        <li><b>03</b><span><strong>密钥不回传</strong>状态接口只显示供应商、模型与地址，不返回 API Key。</span></li>
-        <li><b>04</b><span><strong>本机私有存储</strong>服务重启后自动恢复；可随时删除指定模型的 API Key。</span></li>
-      </ol>
-    </aside>
+
   </section>
 </template>
 

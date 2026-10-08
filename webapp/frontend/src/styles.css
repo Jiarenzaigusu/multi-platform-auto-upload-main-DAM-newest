@@ -492,10 +492,16 @@ svg {
 .batch-layout,
 .jobs-layout,
 .users-layout,
-.llm-adapter-layout,
 .ai-copy-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 18px;
+  align-items: start;
+}
+
+.llm-adapter-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 18px;
   align-items: start;
 }

@@ -1,4 +1,5 @@
 <script setup>
+import { contentDetailUrl } from './contentLinks.js'
 import { computed, ref, watch } from 'vue'
 import CategoryOpportunity from './CategoryOpportunity.vue'
 
@@ -155,9 +156,7 @@ function formatPercent(value) {
   return value == null ? '暂无对比' : ((Number(value) * 100).toFixed(1) + '%')
 }
 function contentUrl(sample) {
-  const type = activeType.value === 'image' ? 'article' : 'video'
-  return 'https://creator.guanghe.taobao.com/page/unify/contentDetail?contentId='
-    + encodeURIComponent(sample.content_id) + '&tab=1&mode=0&contentType=' + type + '&source=guanghe'
+  return contentDetailUrl(sample.content_id, activeType.value)
 }
 </script>
 

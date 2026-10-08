@@ -538,11 +538,16 @@ def create_app(
         if dashboard.get("empty"):
             raise HTTPException(status_code=422, detail="当前周期暂无可分析数据")
         try:
-            DashboardTools(mysql_database, dashboard, content_type, tag_id)
+            tools = DashboardTools(mysql_database, dashboard, content_type, tag_id)
             store = ConversationStore(current_workspace(request).paths.runtime / "dashboard-chat.sqlite3")
             conversation_id, messages = store.open(dashboard["brand"]["id"], period, content_type, tag_id)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        references = tools.content_references([message['content'] for message in messages if message['role'] == 'assistant'])
+        for message in messages:
+            if message['role'] == 'assistant' and references:
+                message['evidence'] = [entry for entry in message['evidence'] if entry.get('tool') != 'get_content_references']
+                message['evidence'].append({'tool': 'get_content_references', 'result': references})
         return {"conversation_id": conversation_id, "messages": messages}
 
     @app.post("/api/dashboard/chat")
@@ -559,6 +564,9 @@ def create_app(
             conversation_id, history = store.open(dashboard["brand"]["id"], payload.period, payload.content_type, payload.tag_id, payload.conversation_id)
             provider = OpenAICompatibleProvider(workspace.llm_registry)
             answer, evidence = answer_question(provider, tools, history, payload.question)
+            references = tools.content_references([answer])
+            if references:
+                evidence.append({'tool': 'get_content_references', 'result': references})
             store.append(conversation_id, payload.question, answer, evidence)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc

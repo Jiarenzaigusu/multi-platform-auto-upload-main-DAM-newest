@@ -158,6 +158,31 @@ class DashboardTools:
         rows = self.database.execute('SELECT `年份`, `下载周期`, `曝光人数`, `商品点击人数`, `种草成交金额` FROM content_performance WHERE brand_id = %s AND `内容ID` = %s ORDER BY `年份` DESC, CAST(REPLACE(`下载周期`, \'月\', \'\') AS UNSIGNED) DESC LIMIT 12', (self.brand_id, content_id))
         return [{'year': row[0], 'cycle': row[1], 'exposure_users': _number(row[2]), 'product_click_users': _number(row[3]), 'revenue': _number(row[4])} for row in rows]
 
+    def content_references(self, answers: list[str]) -> list[dict]:
+        """Resolve quoted work names against the current authorized scope."""
+        labels = set()
+        for answer in answers:
+            labels.update(re.findall(r'[「『《“"]([^「」『』《》“”"\n]{2,200})[」』》”"]', answer))
+        if not labels:
+            return []
+        where, args = self._where()
+        rows = self.database.execute(f'SELECT `内容ID`, `内容名称` FROM content_performance WHERE {where}', args)
+
+        def normalized(value: str) -> str:
+            return ''.join(char.lower() for char in value if char.isalnum())
+
+        references = []
+        for label in sorted(labels):
+            key = normalized(label)
+            if len(key) < 4:
+                continue
+            exact = {str(row[0]): str(row[1]) for row in rows if row[0] and normalized(str(row[1] or '')) == key}
+            matches = exact or {str(row[0]): str(row[1]) for row in rows if row[0] and key in normalized(str(row[1] or ''))}
+            if len(matches) == 1:
+                content_id, title = next(iter(matches.items()))
+                references.append({'content_id': content_id, 'title': title, 'label': label})
+        return references
+
     def run(self, name: str, arguments: dict) -> Any:
         if name not in {'get_metrics', 'compare_periods', 'get_categories', 'rank_contents', 'get_content_history'}:
             raise ValueError('不支持的数据工具')
@@ -169,7 +194,7 @@ class DashboardTools:
 
 
 def answer_question(provider: ChatProvider, tools: DashboardTools, history: list[dict], question: str) -> tuple[str, list[dict]]:
-    messages: list[dict] = [{'role': 'system', 'content': f'''你是品牌内容数据助手。当前固定范围：{tools.dashboard['brand']['name']}，{tools.period} 下载周期，{tools.scope_label}。只用数据工具获得事实；先调用至少一个工具。不要要求或执行任意 SQL，不要改变品牌或范围。数字由工具计算，回答注明口径。汇总人数未跨内容去重，种草成交不等于直接购买归因。原因只能写成待验证假设。没有活动资料或外部来源时，不编造近期促销。引用作品时优先使用工具返回的作品名称，不要只写作品 ID；名称缺失时才使用 ID。回答先给结论，再用最多三个最关键的数字说明依据，通常控制在 250 字以内。不要输出明细表、逐条数据、原始 JSON 或代码块；完整查询结果已放在可展开的“查看数据依据”中。用户明确索要明细时可适当增加数字，但仍应概括优先。'''}]
+    messages: list[dict] = [{'role': 'system', 'content': f'''你是品牌内容数据助手。当前固定范围：{tools.dashboard['brand']['name']}，{tools.period} 下载周期，{tools.scope_label}。只用数据工具获得事实；先调用至少一个工具。不要要求或执行任意 SQL，不要改变品牌或范围。数字由工具计算，回答注明口径。汇总人数未跨内容去重，种草成交不等于直接购买归因。原因只能写成待验证假设。没有活动资料或外部来源时，不编造近期促销。引用作品时优先使用工具返回的作品名称，不要只写作品 ID；名称缺失时才使用 ID。回答必须保留清晰排版：第一段用 **结论：……** 加粗；空一行后写“依据（当前下载周期、分析范围）：”，另起行用 - 列出 1—3 条关键依据；最后空一行写“口径说明：……”。不要将所有内容挤成一个段落。通常控制在 400 字以内，最多 500 字。不要输出明细表、逐条数据、原始 JSON 或代码块；完整查询结果已放在可展开的“查看数据依据”中。用户明确索要明细时可适当增加数字，但仍应概括优先。'''}]
     messages.extend({'role': item['role'], 'content': item['content'][:4000]} for item in history[-8:])
     messages.append({'role': 'user', 'content': question})
     evidence: list[dict] = []
@@ -217,7 +242,7 @@ def _concise_answer(provider: ChatProvider, answer: str) -> str:
     if len(answer) <= 500 and '```' not in answer and not any(line.lstrip().startswith('|') for line in answer.splitlines()):
         return answer
     reply = provider.chat([
-        {'role': 'system', 'content': '将下面的分析压缩成面向业务用户的简短中文回答。先给结论，保留 1—3 个最重要的数字和必要口径，最多 300 字。不要表格、逐条明细、JSON、代码块或 Markdown 标题。不要新增事实或推测。完整数据可在“查看数据依据”中展开。'},
+        {'role': 'system', 'content': '将下面的分析压缩成面向业务用户的简短中文回答。保留排版：第一段用 **结论：……** 加粗；空一行后写“依据：”，另起行用 - 列出 1—3 条关键依据；最后空一行写“口径说明：……”。保留最重要的数字和必要口径，最多 400 字。不要挤成一个段落。不要表格、逐条明细、JSON、代码块或 Markdown 标题。不要新增事实或推测。完整数据可在“查看数据依据”中展开。'},
         {'role': 'user', 'content': answer[:12000]},
     ], temperature=0.1)
     concise = str(reply.get('content') or '').strip()

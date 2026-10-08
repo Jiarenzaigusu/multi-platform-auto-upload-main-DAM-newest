@@ -847,6 +847,25 @@ def only_coordinate_target_mappings(plan, targets):
     return {"rules": rules}
 
 
+def unmapped_coordinate_targets(plan, targets):
+    """Return selectable targets that are not currently written by any rule."""
+    mapped = set()
+    for rule in plan.get("rules", []):
+        target_sheet = rule.get("target_sheet")
+        if rule.get("mode") == "append_rows":
+            mapped.update(
+                (target_sheet, item.get("target_header_cell"))
+                for item in rule.get("column_map", [])
+                if item.get("target_header_cell")
+            )
+        elif rule.get("target_label_cell"):
+            mapped.add((target_sheet, rule["target_label_cell"]))
+    return [
+        item for item in targets
+        if (item.get("sheet"), item.get("cell")) not in mapped
+    ]
+
+
 def direct_coordinate_correction_plan(pairs):
     grouped = {}
     for pair in pairs:

@@ -109,6 +109,7 @@ from webapp.sheet_agent import (
     remove_target_mappings,
     source_profile,
     template_profile,
+    unmapped_coordinate_targets,
 )
 from webapp.workspaces import AppDataPaths, UserWorkspace, UserWorkspaceRegistry
 
@@ -908,16 +909,28 @@ def create_app(
                     metric_pairs = [item for item in pairs if item not in column_pairs]
                     if column_pairs:
                         plan["rules"].extend(direct_coordinate_correction_plan(column_pairs)["rules"])
-                    rematch_targets = [
+                    explicitly_rematched = [
                         item["target"] for item in corrections
                         if item.get("target") and (not item.get("source") or item in metric_pairs)
                     ]
+                    # A manual correction must not turn an incomplete baseline plan into a
+                    # permanently partial saved plan.  Ask the model to recover every other
+                    # currently-unmapped target while preserving existing and explicit rules.
+                    missing_targets = unmapped_coordinate_targets(plan, options["targets"])
+                    rematch_by_coordinate = {
+                        (item["sheet"], item["cell"]): item
+                        for item in [
+                            *(missing_targets if provider.ready else []),
+                            *explicitly_rematched,
+                        ]
+                    }
+                    rematch_targets = list(rematch_by_coordinate.values())
                     if rematch_targets:
                         if not provider.ready:
                             raise ValueError("定点重新匹配需要先启用 LLM API Key")
                         excluded = matched_source_headers(plan)
                         instruction = (
-                            f"只重新匹配这些待填位置：{rematch_targets}。"
+                            f"补齐这些当前尚未映射的待填位置：{rematch_targets}。"
                             f"用户指定的指标行与数据源字段配对：{metric_pairs}。这些配对必须使用 metric_fill，"
                             "按日期轴及统计口径生成规则，不得用 append_rows 写入指标行。"
                             f"不得使用已被其他规则占用的数据源表头：{excluded}。"

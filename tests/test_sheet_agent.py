@@ -17,6 +17,7 @@ from webapp.sheet_agent import (
     remove_target_mappings,
     source_profile,
     template_profile,
+    unmapped_coordinate_targets,
 )
 from webapp.sheet_database_source import export_content_source
 
@@ -133,6 +134,30 @@ def test_coordinate_mapping_distinguishes_duplicate_headers(tmp_path):
     apply_plan(template, [source], plan, output, 0.9)
 
     assert load_workbook(output).active["A2"].value == 2
+
+
+def test_unmapped_coordinate_targets_keeps_only_targets_missing_from_plan():
+    plan = {"rules": [
+        {
+            "mode": "append_rows", "target_sheet": "明细",
+            "column_map": [{"target_header_cell": "B3"}],
+        },
+        {
+            "mode": "metric_fill", "target_sheet": "周报",
+            "target_label_cell": "A8",
+        },
+    ]}
+    targets = [
+        {"sheet": "明细", "cell": "B3", "header": "名称"},
+        {"sheet": "明细", "cell": "C3", "header": "金额"},
+        {"sheet": "周报", "cell": "A8", "header": "曝光次数"},
+        {"sheet": "周报", "cell": "A9", "header": "播放人数"},
+    ]
+
+    assert unmapped_coordinate_targets(plan, targets) == [
+        {"sheet": "明细", "cell": "C3", "header": "金额"},
+        {"sheet": "周报", "cell": "A9", "header": "播放人数"},
+    ]
 
 
 def test_find_header_accepts_model_coordinate_prefix(tmp_path):

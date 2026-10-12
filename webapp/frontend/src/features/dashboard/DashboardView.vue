@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { apiRequest } from '../../api-client.js'
 import TagAnalysisPanel from './TagAnalysisPanel.vue'
 import AssistantRichText from './AssistantRichText.vue'
@@ -11,6 +11,28 @@ const comparison = ref('previous')
 const loading = ref(true)
 const error = ref('')
 const data = ref(null)
+const categoryInsights = ref({})
+const categoryInsightStatus = ref('loading')
+let categoryInsightRequest = 0
+let categoryInsightTimer
+let categoryInsightBusy = false
+async function loadCategoryInsights() {
+  if (!data.value?.selected_period || categoryInsightBusy) return
+  const requestedPeriod = data.value.selected_period
+  const requestId = ++categoryInsightRequest
+  categoryInsightBusy = true
+  try {
+    const result = await apiRequest(`/api/dashboard/category-insights?period=${encodeURIComponent(requestedPeriod)}`)
+    if (requestId !== categoryInsightRequest || requestedPeriod !== data.value?.selected_period) return
+    categoryInsights.value = result.scopes || {}
+    categoryInsightStatus.value = result.status
+  } catch {
+    if (requestId === categoryInsightRequest) categoryInsightStatus.value = 'error'
+  } finally {
+    categoryInsightBusy = false
+    if (requestedPeriod !== data.value?.selected_period) loadCategoryInsights()
+  }
+}
 const aiResult = ref(null)
 const aiLoading = ref(false)
 const aiError = ref('')
@@ -22,6 +44,18 @@ const assistantBusy = ref(false)
 const assistantError = ref('')
 let assistantRequest = 0
 const assistantScope = ref({ type: 'image', tagId: 'all', label: '全部图文' })
+const assistantSuggestions = [
+  '本周期整体表现怎么样？',
+  '哪些作品的内容查看人数最高？',
+  '商品点击表现最好的内容有哪些？',
+  '哪些内容值得继续做？',
+  '与上期相比，变化最大的是哪里？',
+  '这个分类有哪些高点击作品？',
+  '哪些内容的曝光转化效率最高？',
+  '哪些作品需要优先优化？',
+  '不同内容分类的表现有什么差异？',
+  '下个周期建议重点做什么？',
+]
 const assistantPreview = (content) => content.replace(/\*\*|__|`|^#{1,3}\s+/gm, '').replace(/\s+/g, ' ').slice(0, 180).trim()
 let analysisRequest = 0
 const metricOptions = [
@@ -80,6 +114,9 @@ async function loadDashboard() {
   error.value = ''
   try {
     data.value = await apiRequest(`/api/dashboard?period=${encodeURIComponent(period.value || 'latest')}`)
+    categoryInsights.value = {}
+    categoryInsightStatus.value = 'loading'
+    loadCategoryInsights()
     if (!period.value && data.value.selected_period) period.value = data.value.selected_period
   } catch (requestError) {
     error.value = requestError.message
@@ -173,7 +210,11 @@ async function sendAssistantQuestion() {
 
 watch([assistantOpen, period, assistantScope, () => data.value?.selected_period], loadAssistantHistory)
 watch(period, (next) => { if (next && next !== data.value?.selected_period) loadDashboard() })
-onMounted(loadDashboard)
+onMounted(() => {
+  loadDashboard()
+  categoryInsightTimer = setInterval(loadCategoryInsights, 60000)
+})
+onUnmounted(() => { clearInterval(categoryInsightTimer); categoryInsightRequest += 1 })
 </script>
 
 <template>
@@ -223,18 +264,18 @@ onMounted(loadDashboard)
 
       </div>
 
-    <TagAnalysisPanel :tag-groups="data?.tags" :period-label="dateLabel" @scope-change="assistantScope = $event" />
+    <TagAnalysisPanel :category-insights="categoryInsights" :insight-status="categoryInsightStatus" :tag-groups="data?.tags" :period-label="dateLabel" @scope-change="assistantScope = $event" />
 
     <template v-if="current">
       <div class="dashboard-grid dashboard-bottom-grid ai-analysis-grid">
         <article class="dashboard-card ai-analysis-suite-card">
-          <header class="dashboard-card-head"><div><p class="card-eyebrow">AI CONTENT ANALYSIS · BETA</p><h3>本周期速览</h3><p>查看当前周期的分析，或打开数据助手继续追问</p></div><button class="assistant-inline-button" type="button" @click="assistantOpen = true">打开对话助手</button><button class="ai-generate-button" type="button" :disabled="aiLoading || loading" @click="generateAiAnalysis">{{ aiLoading ? '分析中…' : aiResult ? '重新分析' : '生成 AI 分析' }}</button></header>
+          <header class="dashboard-card-head"><div><p class="card-eyebrow">AI CONTENT ANALYSIS · BETA</p><h3>本周期五维分析</h3><p>评估内容表现与种草链路，查看已有证据及待补数据</p></div><button class="assistant-inline-button" type="button" @click="assistantOpen = true">打开对话助手</button><button class="ai-generate-button" type="button" :disabled="aiLoading || loading" @click="generateAiAnalysis">{{ aiLoading ? '分析中…' : aiResult ? '重新分析' : '生成 AI 分析' }}</button></header>
           <p v-if="aiError" class="ai-analysis-error" role="alert">{{ aiError }}</p>
           <div class="ai-analysis-suite-body">
-            <div class="ai-content-overview"><span class="ai-content-overview-icon">✦</span><div><strong>本周期品牌判断</strong><p>{{ aiContentSummary }}</p><div class="ai-overview-stats"><span><small>内容触达</small><b>{{ formatNumber(valueFor('content_viewers')) }}</b></span><span><small>商品点击</small><b>{{ formatNumber(valueFor('product_click_users')) }}</b></span><span><small>引导成交</small><b>{{ formatMoney(valueFor('revenue')) }}</b></span></div></div></div>
-            <div class="ai-report-panel"><div class="ai-report-panel-head"><strong>关键洞察与动作</strong><small>根据当前可用数据归纳</small></div><div class="ai-report-list"><div v-for="item in aiAnalysis" :key="item.title" class="ai-report-row"><span class="ai-analysis-icon">{{ item.icon }}</span><div><div class="ai-report-row-title"><strong>{{ item.title }}</strong><em>{{ item.tag }}</em></div><p>{{ item.text }}</p><details v-if="item.evidence?.length" class="ai-evidence"><summary>查看数据依据</summary><p v-for="(entry, index) in item.evidence" :key="index">{{ entry }}</p></details></div></div><div v-if="!aiAnalysis.length" class="activity-empty">连接数据库后，将生成内容表现与发布建议。</div></div></div>
+            <div class="ai-content-overview"><span class="ai-content-overview-icon">✦</span><div><strong>本周期分析结论</strong><p>{{ aiContentSummary }}</p><div class="ai-overview-stats"><span><small>查看人数合计</small><b>{{ formatNumber(valueFor('content_viewers')) }}</b></span><span><small>商品点击人数合计</small><b>{{ formatNumber(valueFor('product_click_users')) }}</b></span><span><small>种草成交金额</small><b>{{ formatMoney(valueFor('revenue')) }}</b></span></div></div></div>
+            <div class="ai-report-panel"><div class="ai-report-panel-head"><strong>五个维度 · 判断与动作</strong></div><div class="ai-report-list"><div v-for="item in aiAnalysis" :key="item.title" class="ai-report-row"><span class="ai-analysis-icon">{{ item.icon }}</span><div><div v-if="item.dimension" class="ai-dimension-label">{{ item.dimension }}</div><div class="ai-report-row-title"><strong>{{ item.title }}</strong><em>{{ item.tag }}</em></div><p>{{ item.text }}</p><details v-if="item.evidence?.length" class="ai-evidence"><summary>查看数据依据</summary><p v-for="(entry, index) in item.evidence" :key="index">{{ entry }}</p></details></div></div><div v-if="!aiAnalysis.length" class="activity-empty">连接数据库后，将展示五个维度的分析与数据覆盖情况。</div></div></div>
           </div>
-          <div class="ai-analysis-footnote"><span>数据状态</span><strong>{{ data?.source?.latest_period ? `已基于 ${dateLabel} 的品牌数据分析` : '等待数据库数据' }}</strong><em>{{ aiResult ? `AI 分析 · ${aiResult.provider} · ${aiResult.model}` : '当前为规则分析，未调用 AI 模型' }}；汇总人数未跨内容去重，种草成交不等于直接购买归因</em></div>
+          <div class="ai-analysis-footnote"><span>数据状态</span><strong>{{ data?.source?.latest_period ? `已基于 ${dateLabel} 的品牌数据分析` : '等待数据库数据' }}</strong><em>{{ aiResult ? `AI 分析 · ${aiResult.provider} · ${aiResult.model}` : '当前为规则分析，未调用 AI 模型' }}；汇总人数未跨内容去重；下载周期不等于发布时间；种草成交不等于直接购买归因</em></div>
         </article>
       </div>
     </template>
@@ -242,10 +283,12 @@ onMounted(loadDashboard)
     <div v-if="assistantOpen" class="assistant-backdrop" @click="assistantOpen = false"></div>
     <aside id="dashboard-assistant" class="assistant-drawer" :class="{ open: assistantOpen }" :aria-hidden="!assistantOpen" aria-label="问数据助手" :inert="!assistantOpen">
       <header class="assistant-drawer-header"><div class="assistant-header-row"><div><small>DATA ASSISTANT · LIVE</small><h3>问数据助手</h3></div><button type="button" aria-label="关闭数据助手" @click="assistantOpen = false">×</button></div><div class="assistant-scope"><span>当前分析范围</span><strong>{{ data?.brand?.name || '当前品牌' }} · {{ dateLabel || '未选择周期' }} · {{ assistantScope.label }}</strong><small>切换看板周期或标签后，范围会同步更新。</small></div></header>
+      <details class="assistant-suggestion-panel" open>
+        <summary><strong>常用问题</strong><span>{{ assistantSuggestions.length }} 个选项 <i aria-hidden="true">⌄</i></span></summary>
+        <div class="assistant-suggestions"><button v-for="question in assistantSuggestions" :key="question" type="button" @click="assistantDraft = question">{{ question }}</button></div>
+      </details>
       <div class="assistant-conversation">
-        <div class="assistant-welcome"><span>✦</span><h4>从当前数据开始提问</h4><p>可以围绕趋势、内容分类或具体作品继续追问。回答会附上本次查询的数据依据。</p></div>
-        <div class="assistant-suggestions"><button v-for="question in ['哪些内容值得继续做？', '与上期相比，变化最大的是哪里？', '这个分类有哪些高点击作品？']" :key="question" type="button" @click="assistantDraft = question">{{ question }}</button></div>
-        <div v-for="(message, index) in assistantMessages" :key="index" class="assistant-message" :class="message.role"><details v-if="message.role === 'assistant' && message.content.length > 500" class="assistant-long-answer"><summary><span class="assistant-answer-preview">{{ assistantPreview(message.content) }}… 展开完整回答</span><span class="assistant-answer-collapse">收起回答</span></summary><AssistantRichText :text="message.content" /></details><AssistantRichText v-else-if="message.role === 'assistant'" :text="message.content" /><p v-else>{{ message.content }}</p><details v-if="message.evidence?.length"><summary>查看数据依据</summary><pre v-for="(item, evidenceIndex) in message.evidence" :key="evidenceIndex">{{ item.tool }}：{{ JSON.stringify(item.result, null, 2) }}</pre></details></div>
+        <div v-for="(message, index) in assistantMessages" :key="index" class="assistant-message" :class="message.role"><details v-if="message.role === 'assistant' && message.content.length > 500" class="assistant-long-answer"><summary><span class="assistant-answer-preview">{{ assistantPreview(message.content) }}… 展开完整回答</span><span class="assistant-answer-collapse">收起回答</span></summary><AssistantRichText :text="message.content" :evidence="message.evidence" :content-type="assistantScope.type" /></details><AssistantRichText v-else-if="message.role === 'assistant'" :text="message.content" :evidence="message.evidence" :content-type="assistantScope.type" /><p v-else>{{ message.content }}</p><details v-if="message.evidence?.length"><summary>查看数据依据</summary><pre v-for="(item, evidenceIndex) in message.evidence" :key="evidenceIndex">{{ item.tool }}：{{ JSON.stringify(item.result, null, 2) }}</pre></details></div>
         <div v-if="aiResult && !assistantMessages.length" class="assistant-current-analysis"><strong>本周期已有分析</strong><p>{{ aiResult.summary }}</p><small>来源：当前看板的 AI 内容分析</small></div>
       </div>
       <form class="assistant-compose" @submit.prevent="sendAssistantQuestion"><label for="assistant-question">向数据助手提问</label><textarea id="assistant-question" v-model="assistantDraft" rows="3" placeholder="例如：这个分类为什么点击高？" /><div><small>{{ assistantError || (assistantBusy ? '正在查询数据并生成回答…' : '按当前品牌、周期和标签范围查询') }}</small><button type="submit" :disabled="assistantBusy || !assistantDraft.trim() || !assistantConversationId">{{ assistantBusy ? '处理中' : '发送' }}</button></div></form>
@@ -269,11 +312,15 @@ onMounted(loadDashboard)
 .assistant-scope span, .assistant-scope small { color: #81927b; font-size: 11px; }
 .assistant-scope strong { color: #365a3e; font-size: 13px; }
 .assistant-conversation { flex: 1; overflow-y: auto; padding: 20px 16px; }
-.assistant-welcome { padding: 18px; border: 1px solid #e1e9da; border-radius: 13px; background: white; }
-.assistant-welcome span { color: #86a050; font-size: 20px; }
-.assistant-welcome h4 { margin: 9px 0; color: #294c42; }
-.assistant-welcome p, .assistant-current-analysis p { color: #6f8378; font-size: 12px; line-height: 1.65; }
-.assistant-suggestions { display: grid; gap: 8px; margin: 16px 0; }
+.assistant-current-analysis p { color: #6f8378; font-size: 12px; line-height: 1.65; }
+.assistant-suggestion-panel { flex: 0 0 auto; margin: -1px 16px 0; border: 1px solid #dce6d3; border-radius: 0 0 11px 11px; background: #fbfcf7; box-shadow: 0 5px 14px rgba(41, 76, 66, .08); overflow: hidden; }
+.assistant-suggestion-panel summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 12px; color: #365a3e; cursor: pointer; list-style: none; user-select: none; }
+.assistant-suggestion-panel summary::-webkit-details-marker { display: none; }
+.assistant-suggestion-panel summary strong { font-size: 13px; }
+.assistant-suggestion-panel summary span { display: inline-flex; align-items: center; gap: 6px; color: #81927b; font-size: 11px; }
+.assistant-suggestion-panel summary i { font-size: 15px; font-style: normal; transition: transform .18s ease; }
+.assistant-suggestion-panel[open] summary i { transform: rotate(180deg); }
+.assistant-suggestions { display: grid; gap: 8px; max-height: min(288px, 36vh); padding: 0 10px 10px; overflow-y: auto; }
 .assistant-suggestions button { padding: 10px; border: 1px solid #dde7d2; border-radius: 9px; background: white; color: #456451; text-align: left; cursor: pointer; }
 .assistant-message { margin: 12px 0; padding: 12px; border: 1px solid #e1e9da; border-radius: 10px; background: white; color: #3c6248; font-size: 12px; }
 .assistant-message.user { margin-left: 25px; background: #eff5dc; }
@@ -326,7 +373,9 @@ onMounted(loadDashboard)
 .ai-analysis-suite-card .ai-report-row p { color: #627b68; font-size: 13px; line-height: 1.7; }
 .ai-analysis-suite-card .ai-evidence { font-size: 12px; }
 .ai-analysis-suite-card .ai-overview-stats small { font-size: 11px; }
-.ai-analysis-suite-card .ai-overview-stats b { font-size: 14px; }
+.ai-analysis-suite-card .ai-overview-stats b { font-size: 14px; overflow: visible; white-space: normal; overflow-wrap: anywhere; }
+.ai-overview-stats { grid-template-columns: 1fr; }
+.ai-dimension-label { margin-bottom: 5px; color: #708562; font-size: 11px; font-weight: 700; }
 .primary-kpis .dashboard-kpi { min-height: 148px; padding: 14px 16px; }.primary-kpis .dashboard-kpi > strong { margin: 11px 0 7px; font-size: clamp(27px, 2.4vw, 33px); }.primary-kpis .kpi-label { font-size: 12px; }.primary-kpis .kpi-symbol { width: 23px; height: 23px; }.primary-kpis .kpi-foot { font-size: 9px; }.primary-kpis .kpi-spark, .primary-kpis .mini-bars { bottom: 12px; }.primary-kpis .goal-meter { bottom: 16px; }.secondary-metrics > span, .secondary-metrics div { padding-top: 8px; padding-bottom: 8px; }.secondary-metrics strong { font-size: 12px; }.trend-card { padding-top: 32px; padding-bottom: 32px; }.trend-card .line-chart { height: 320px; margin-top: 23px; }.trend-card .line-chart::before { inset: 24px 0 51px 34px; }.trend-card .line-chart svg { inset: 24px 0 50px 34px; height: calc(100% - 74px); }.trend-card .chart-y-axis { top: 18px; bottom: 51px; }.trend-card .chart-x-axis { bottom: 16px; }
 @media (max-width: 1120px) { .dashboard-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }.secondary-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }.secondary-metrics > span { display: none; }.secondary-metrics div:nth-child(odd) { border-left: 0; }.dashboard-main-grid, .dashboard-bottom-grid { grid-template-columns: 1fr; }.ai-analysis-suite-body { grid-template-columns: 1fr; } }
 @media (max-width: 700px) { .dashboard-intro { align-items: flex-start; flex-direction: column; }.dashboard-controls { width: 100%; justify-items: stretch; }.period-switch { justify-content: space-between; }.period-switch button { flex: 1; }.dashboard-kpis, .secondary-metrics { grid-template-columns: 1fr; }.secondary-metrics div { border-top: 1px solid #e4eae4; border-left: 0; }.dashboard-card { padding: 16px 14px; }.trend-card { padding-top: 23px; padding-bottom: 23px; }.trend-card .line-chart { height: 250px; margin-top: 17px; }.trend-options { justify-items: start; max-width: 100%; overflow-x: auto; }.metric-switch { margin-top: 8px; }.dashboard-card-head { flex-wrap: wrap; }.trend-body { grid-template-columns: 1fr; }.trend-comparison-panel { margin-top: 4px; }.ai-content-grid, .ai-analysis-suite-body .ai-content-grid, .ai-report-list { grid-template-columns: 1fr; }.ai-analysis-footnote { align-items: flex-start; flex-wrap: wrap; }.ai-analysis-footnote em { width: 100%; margin-left: 0; }.chart-legend { margin-left: 30px; }.platform-filter { justify-content: flex-start; max-width: none; }.dashboard-state { align-items: flex-start; flex-wrap: wrap; } }

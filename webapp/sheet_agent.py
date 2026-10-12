@@ -526,8 +526,38 @@ def progress(message):
     print(f"PROGRESS:{message}", flush=True)
 
 
+def visible_sheet_names(path: Path):
+    """Read only the workbook metadata needed to validate a saved plan."""
+    workbook = load_workbook(path, read_only=True, data_only=False)
+    try:
+        return {sheet.title for sheet in workbook.worksheets if sheet.sheet_state == "visible"}
+    finally:
+        workbook.close()
+
+
+def can_fast_reuse_plan(saved_record, source_names, target_sheet_names, corrections):
+    """Return whether a saved plan can bypass expensive semantic profiling."""
+    if not saved_record or corrections:
+        return False
+    rules = saved_record.get("plan", {}).get("rules", [])
+    if not rules:
+        return False
+    recorded_sources = {rule.get("source_file") for rule in rules}
+    recorded_targets = {rule.get("target_sheet") for rule in rules}
+    return recorded_sources.issubset(set(source_names)) and recorded_targets.issubset(set(target_sheet_names))
+
+
 def find_header(ws, wanted, row):
-    referenced = re.fullmatch(r"([A-Za-z]{1,3}\d+):(.*)", str(wanted or "").strip())
+    wanted_text = str(wanted or "").strip()
+    coordinate = re.fullmatch(r"([A-Za-z]{1,3})(\d+)", wanted_text)
+    if coordinate:
+        cell = ws[wanted_text.upper()]
+        if cell.row != row:
+            raise ValueError(f"{ws.title} {cell.coordinate} 不在第 {row} 行表头中")
+        if norm(cell.value) == "":
+            raise ValueError(f"{ws.title} {cell.coordinate} 表头为空")
+        return cell.column
+    referenced = re.fullmatch(r"([A-Za-z]{1,3}\d+):(.*)", wanted_text)
     if referenced:
         cell = ws[referenced.group(1).upper()]
         header = referenced.group(2).strip()
@@ -535,9 +565,9 @@ def find_header(ws, wanted, row):
             raise ValueError(f"{ws.title} {cell.coordinate} 表头校验失败：{header}")
         return cell.column
     for c in range(1, ws.max_column + 1):
-        if norm(ws.cell(row, c).value) == norm(wanted):
+        if norm(ws.cell(row, c).value) == norm(wanted_text):
             return c
-    raise ValueError(f"{ws.title} 第 {row} 行找不到字段：{wanted}")
+    raise ValueError(f"{ws.title} 第 {row} 行找不到字段：{wanted_text}")
 
 
 def mapped_header_column(ws, item, prefix, row):
@@ -845,6 +875,25 @@ def only_coordinate_target_mappings(plan, targets):
             continue
         rules.append(updated)
     return {"rules": rules}
+
+
+def unmapped_coordinate_targets(plan, targets):
+    """Return selectable targets that are not currently written by any rule."""
+    mapped = set()
+    for rule in plan.get("rules", []):
+        target_sheet = rule.get("target_sheet")
+        if rule.get("mode") == "append_rows":
+            mapped.update(
+                (target_sheet, item.get("target_header_cell"))
+                for item in rule.get("column_map", [])
+                if item.get("target_header_cell")
+            )
+        elif rule.get("target_label_cell"):
+            mapped.add((target_sheet, rule["target_label_cell"]))
+    return [
+        item for item in targets
+        if (item.get("sheet"), item.get("cell")) not in mapped
+    ]
 
 
 def direct_coordinate_correction_plan(pairs):

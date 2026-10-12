@@ -11,6 +11,8 @@ services:
     restart: unless-stopped
     env_file:
       - docker.env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "${MPAU_HOST_PORT:-8788}:8788"
     volumes:

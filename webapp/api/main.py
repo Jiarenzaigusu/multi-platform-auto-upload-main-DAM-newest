@@ -4,6 +4,8 @@ import asyncio
 import hashlib
 import json
 import os
+import re
+import shutil
 import uuid
 from threading import Lock
 from contextlib import asynccontextmanager
@@ -80,7 +82,7 @@ from webapp.api.platforms import delete_account_cookie
 from webapp.api.store import TERMINAL_STATUSES
 from webapp.api.tasks import TaskManager
 from webapp.auth import AuthService, AuthStore, create_auth_router
-from webapp.auth.dependencies import require_operator, require_session, require_user
+from webapp.auth.dependencies import require_admin, require_operator, require_session, require_user
 from webapp.auth.middleware import AuthenticationMiddleware
 from webapp.dashboard import DashboardRepository
 from webapp.dashboard_agent import ChatRequest, ConversationStore, DashboardTools, answer_question
@@ -95,6 +97,7 @@ from webapp.mysql_demo import (
 from webapp.sheet_database_source import export_content_source, list_content_periods
 from webapp.sheet_agent import (
     apply_plan,
+    can_fast_reuse_plan,
     call_model,
     convert_xls,
     direct_coordinate_correction_plan,
@@ -109,8 +112,22 @@ from webapp.sheet_agent import (
     remove_target_mappings,
     source_profile,
     template_profile,
+    unmapped_coordinate_targets,
+    visible_sheet_names,
 )
 from webapp.workspaces import AppDataPaths, UserWorkspace, UserWorkspaceRegistry
+
+
+def sheet_plan_storage_path(path: Path) -> Path:
+    """Allow deeply nested plan files on Windows without changing their names."""
+    if os.name != "nt":
+        return path
+    absolute = str(path.absolute())
+    if absolute.startswith("\\\\?\\"):
+        return Path(absolute)
+    if absolute.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + absolute[2:])
+    return Path("\\\\?\\" + absolute)
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +156,8 @@ class WebSettings:
         "http://localhost:8788",
         "http://127.0.0.1:8788",
     )
+    mysql: MySQLSettings = MySQLSettings()
+
     @classmethod
     def from_environment(cls) -> "WebSettings":
         """Load deployment settings while retaining safe local defaults."""
@@ -198,6 +217,7 @@ class WebSettings:
             in {"1", "true", "yes", "on"},
             allowed_hosts=allowed_hosts,
             allowed_origins=allowed_origins,
+            mysql=MySQLSettings.from_environment(),
         )
 
 
@@ -315,11 +335,15 @@ def create_app(
         AuthStore(data_paths.auth_database),
         session_seconds=settings.session_seconds,
     )
+    mysql_database = MySQLDatabase(settings.mysql)
+    dashboard_repository = DashboardRepository(mysql_database)
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         try:
             yield
         finally:
+            mysql_database.close()
             workspace_registry.close()
 
     app = FastAPI(title="MPAU Commerce Console", version="0.1.0", lifespan=lifespan)
@@ -327,6 +351,7 @@ def create_app(
     app.state.data_paths = data_paths
     app.state.workspace_registry = workspace_registry
     app.state.auth_service = auth_service
+    app.state.mysql_database = mysql_database
     dam_sessions: dict[str, DamSettings] = {}
     dam_sessions_lock = Lock()
     trusted_browser_origins = set(settings.allowed_origins)
@@ -491,6 +516,16 @@ def create_app(
         except MySQLDemoError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
+    @app.get("/api/dashboard/category-insights")
+    def dashboard_category_insights(request: Request, period: str = Query(default="latest"), user: object = Depends(require_user)) -> dict:
+        from webapp.category_insights import cached_category_insights
+
+        dashboard = dashboard_data(request, period, user)
+        if dashboard.get("empty") or not dashboard.get("summary"):
+            return {"status": "empty", "scopes": {}}
+        workspace = current_workspace(request)
+        return cached_category_insights(dashboard, OpenAICompatibleProvider(workspace.llm_registry), workspace.paths.runtime / "category-insights.sqlite3")
+
     @app.post("/api/dashboard/analysis")
     def dashboard_analysis(request: Request, period: str = Query(default="latest"), user: object = Depends(require_user)) -> dict:
         from webapp.content_analysis import generate_analysis
@@ -519,11 +554,16 @@ def create_app(
         if dashboard.get("empty"):
             raise HTTPException(status_code=422, detail="当前周期暂无可分析数据")
         try:
-            DashboardTools(mysql_database, dashboard, content_type, tag_id)
+            tools = DashboardTools(mysql_database, dashboard, content_type, tag_id)
             store = ConversationStore(current_workspace(request).paths.runtime / "dashboard-chat.sqlite3")
             conversation_id, messages = store.open(dashboard["brand"]["id"], period, content_type, tag_id)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        references = tools.content_references([message['content'] for message in messages if message['role'] == 'assistant'])
+        for message in messages:
+            if message['role'] == 'assistant' and references:
+                message['evidence'] = [entry for entry in message['evidence'] if entry.get('tool') != 'get_content_references']
+                message['evidence'].append({'tool': 'get_content_references', 'result': references})
         return {"conversation_id": conversation_id, "messages": messages}
 
     @app.post("/api/dashboard/chat")
@@ -540,6 +580,9 @@ def create_app(
             conversation_id, history = store.open(dashboard["brand"]["id"], payload.period, payload.content_type, payload.tag_id, payload.conversation_id)
             provider = OpenAICompatibleProvider(workspace.llm_registry)
             answer, evidence = answer_question(provider, tools, history, payload.question)
+            references = tools.content_references([answer])
+            if references:
+                evidence.append({'tool': 'get_content_references', 'result': references})
             store.append(conversation_id, payload.question, answer, evidence)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -664,6 +707,7 @@ def create_app(
         user = require_operator(request)
         brand_key = user.brand_key or "unbranded"
         folder = workspace.paths.runtime / "sheet-fill-plans" / hashlib.sha256(brand_key.encode()).hexdigest()[:16] / "tables"
+        folder = sheet_plan_storage_path(folder)
         folder.mkdir(parents=True, exist_ok=True, mode=0o700)
         return normalized, folder / f"{hashlib.sha256(normalized.casefold().encode()).hexdigest()}.json"
 
@@ -831,45 +875,72 @@ def create_app(
                     source_names.append("数据库内容表现.xlsx")
                 if len(source_names) != len(set(source_names)):
                     raise HTTPException(status_code=422, detail="数据源中存在同名文件，请重命名后再上传")
+                corrections = json.loads(field_corrections or "[]")
+                if not isinstance(corrections, list):
+                    raise ValueError("字段修正格式无效")
                 template_path = await save_upload(template, template_folder)
                 source_paths = [await save_upload(item, source_folder) for item in sources]
                 database_path = await prepare_sheet_database_source(request, database_source, database_period, source_folder)
                 if database_path:
                     source_paths.append(database_path)
                 prepared_sources = [convert_xls(path, source_folder) for path in source_paths]
-                profile = {
-                    "sources": [source_profile(path) for path in prepared_sources],
-                    "template": template_profile(template_path),
-                }
-                diagnostic["workbooks"] = {
-                    "sources": [
-                        {"file": item["file"], "sheets": [sheet["sheet"] for sheet in item["sheets"]]}
-                        for item in profile["sources"]
-                    ],
-                    "template_sheets": [sheet["sheet"] for sheet in profile["template"]["sheets"]],
-                }
-                if saved_record is not None:
-                    recorded_sources = {rule.get("source_file") for rule in saved_record.get("plan", {}).get("rules", [])}
-                    recorded_targets = {rule.get("target_sheet") for rule in saved_record.get("plan", {}).get("rules", [])}
-                    visible_targets = {sheet["sheet"] for sheet in profile["template"]["sheets"]}
-                    if not recorded_sources.issubset(source_names) or not recorded_targets.issubset(visible_targets):
-                        saved_record = None
-                if saved_record is None and not provider.ready:
-                    raise HTTPException(status_code=409, detail="该数据源需要新建映射方案，请先配置并启用 LLM API Key")
-                if saved_record is not None:
+                reuse_candidate = bool(
+                    saved_record
+                    and saved_record.get("plan", {}).get("rules")
+                    and not corrections
+                )
+                target_sheet_names = (
+                    await asyncio.to_thread(visible_sheet_names, template_path)
+                    if reuse_candidate else set()
+                )
+                fast_reuse = reuse_candidate and can_fast_reuse_plan(
+                    saved_record, source_names, target_sheet_names, corrections,
+                )
+                if fast_reuse:
                     plan = saved_record.get("plan", {"rules": []})
                     diagnostic["reused_table_plan"] = True
+                    diagnostic["fast_reuse"] = True
+                    diagnostic["workbooks"] = {
+                        "sources": [{"file": name} for name in source_names],
+                        "template_sheets": sorted(target_sheet_names),
+                    }
+                    options = {
+                        "sources": saved_record.get("source_fields", []),
+                        "targets": saved_record.get("target_fields", []),
+                    }
+                    if not options["sources"] and not options["targets"]:
+                        options = plan_field_options(plan)
                 else:
-                    with provider.session():
-                        plan = await asyncio.to_thread(call_model, profile, provider)
-                    save_model_output("initial", plan)
-                if not plan.get("rules"):
-                    plan = fallback_append_plan(profile)
-                    diagnostic["fallback"] = "deterministic_header_mapping"
-                corrections = json.loads(field_corrections or "[]")
-                if not isinstance(corrections, list):
-                    raise ValueError("字段修正格式无效")
-                options = profile_field_options(profile)
+                    profile = {
+                        "sources": [source_profile(path) for path in prepared_sources],
+                        "template": template_profile(template_path),
+                    }
+                    diagnostic["workbooks"] = {
+                        "sources": [
+                            {"file": item["file"], "sheets": [sheet["sheet"] for sheet in item["sheets"]]}
+                            for item in profile["sources"]
+                        ],
+                        "template_sheets": [sheet["sheet"] for sheet in profile["template"]["sheets"]],
+                    }
+                    if saved_record is not None:
+                        recorded_sources = {rule.get("source_file") for rule in saved_record.get("plan", {}).get("rules", [])}
+                        recorded_targets = {rule.get("target_sheet") for rule in saved_record.get("plan", {}).get("rules", [])}
+                        visible_targets = {sheet["sheet"] for sheet in profile["template"]["sheets"]}
+                        if not recorded_sources.issubset(source_names) or not recorded_targets.issubset(visible_targets):
+                            saved_record = None
+                    if saved_record is None and not provider.ready:
+                        raise HTTPException(status_code=409, detail="该数据源需要新建映射方案，请先配置并启用 LLM API Key")
+                    if saved_record is not None:
+                        plan = saved_record.get("plan", {"rules": []})
+                        diagnostic["reused_table_plan"] = True
+                    else:
+                        with provider.session():
+                            plan = await asyncio.to_thread(call_model, profile, provider)
+                        save_model_output("initial", plan)
+                    if not plan.get("rules"):
+                        plan = fallback_append_plan(profile)
+                        diagnostic["fallback"] = "deterministic_header_mapping"
+                    options = profile_field_options(profile)
                 valid_sources = {(item["file"], item["sheet"], item["cell"], item["header"]) for item in options["sources"]}
                 valid_targets = {(item["sheet"], item["cell"], item["header"]) for item in options["targets"]}
                 metric_targets = {
@@ -890,16 +961,28 @@ def create_app(
                     metric_pairs = [item for item in pairs if item not in column_pairs]
                     if column_pairs:
                         plan["rules"].extend(direct_coordinate_correction_plan(column_pairs)["rules"])
-                    rematch_targets = [
+                    explicitly_rematched = [
                         item["target"] for item in corrections
                         if item.get("target") and (not item.get("source") or item in metric_pairs)
                     ]
+                    # A manual correction must not turn an incomplete baseline plan into a
+                    # permanently partial saved plan.  Ask the model to recover every other
+                    # currently-unmapped target while preserving existing and explicit rules.
+                    missing_targets = unmapped_coordinate_targets(plan, options["targets"])
+                    rematch_by_coordinate = {
+                        (item["sheet"], item["cell"]): item
+                        for item in [
+                            *(missing_targets if provider.ready else []),
+                            *explicitly_rematched,
+                        ]
+                    }
+                    rematch_targets = list(rematch_by_coordinate.values())
                     if rematch_targets:
                         if not provider.ready:
                             raise ValueError("定点重新匹配需要先启用 LLM API Key")
                         excluded = matched_source_headers(plan)
                         instruction = (
-                            f"只重新匹配这些待填位置：{rematch_targets}。"
+                            f"补齐这些当前尚未映射的待填位置：{rematch_targets}。"
                             f"用户指定的指标行与数据源字段配对：{metric_pairs}。这些配对必须使用 metric_fill，"
                             "按日期轴及统计口径生成规则，不得用 append_rows 写入指标行。"
                             f"不得使用已被其他规则占用的数据源表头：{excluded}。"
@@ -966,6 +1049,132 @@ def create_app(
             output,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
+        )
+
+    def sheet_fill_task_folder(workspace: UserWorkspace, task_id: str) -> Path:
+        if not re.fullmatch(r"[0-9a-f]{16}", task_id):
+            raise HTTPException(status_code=404, detail="表格填充任务不存在")
+        return workspace.paths.runtime / "sheet-fill-tasks" / task_id
+
+    def write_sheet_fill_task(folder: Path, payload: dict) -> None:
+        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary = folder / "status.tmp"
+        temporary.write_text(json.dumps(payload, ensure_ascii=False, default=str), encoding="utf-8")
+        temporary.replace(folder / "status.json")
+
+    @app.post("/api/sheet-fill/tasks")
+    async def start_sheet_fill_task(
+        request: Request,
+        template: UploadFile = File(...),
+        sources: list[UploadFile] = File(default=[]),
+        database_source: str = Form(default=""),
+        database_period: str = Form(default="all"),
+        source_header_corrections: str = Form(default=""),
+        target_header_corrections: str = Form(default=""),
+        field_corrections: str = Form(default="[]"),
+        table_name: str = Form(default=""),
+        workspace: UserWorkspace = Depends(operator_workspace),
+    ) -> dict:
+        """Persist uploads and run sheet filling independently of the browser request."""
+        if not sources and not database_source:
+            raise HTTPException(status_code=422, detail="请选择上传文件或数据库数据源")
+        task_id = uuid.uuid4().hex[:16]
+        folder = sheet_fill_task_folder(workspace, task_id)
+        input_folder = folder / "input"
+        template_folder = input_folder / "template"
+        source_folder = input_folder / "sources"
+        template_folder.mkdir(parents=True, exist_ok=True)
+        source_folder.mkdir(parents=True, exist_ok=True)
+
+        async def persist_upload(upload: UploadFile, destination: Path) -> Path:
+            content = await upload.read(settings.max_batch_workbook_bytes + 1)
+            if len(content) > settings.max_batch_workbook_bytes:
+                raise HTTPException(status_code=413, detail="表格超过上传大小限制")
+            path = destination / Path(upload.filename or "workbook.xlsx").name
+            path.write_bytes(content)
+            return path
+
+        template_path = await persist_upload(template, template_folder)
+        source_paths = [await persist_upload(item, source_folder) for item in sources]
+        filenames = [path.name for path in source_paths]
+        if len(filenames) != len(set(filenames)):
+            raise HTTPException(status_code=422, detail="数据源中存在同名文件，请重命名后再上传")
+        status = {
+            "task_id": task_id, "status": "queued", "message": "等待执行",
+            "filename": f"已填充-{template_path.stem}.xlsx",
+        }
+        write_sheet_fill_task(folder, status)
+
+        async def execute() -> None:
+            status.update(status="running", message="正在解析并填充表格")
+            write_sheet_fill_task(folder, status)
+            opened = []
+            try:
+                template_file = template_path.open("rb")
+                opened.append(template_file)
+                template_upload = UploadFile(file=template_file, filename=template_path.name)
+                source_uploads = []
+                for path in source_paths:
+                    stream = path.open("rb")
+                    opened.append(stream)
+                    source_uploads.append(UploadFile(file=stream, filename=path.name))
+                response = await fill_spreadsheet(
+                    request=request, template=template_upload, sources=source_uploads,
+                    database_source=database_source, database_period=database_period,
+                    source_header_corrections=source_header_corrections,
+                    target_header_corrections=target_header_corrections,
+                    field_corrections=field_corrections, table_name=table_name,
+                    workspace=workspace,
+                )
+                (folder / "result.xlsx").write_bytes(bytes(response.body))
+                status.update(status="succeeded", message="填充完成")
+            except HTTPException as exc:
+                status.update(status="failed", message=str(exc.detail))
+            except Exception as exc:
+                logger.exception("后台表格填充任务[{}]异常", task_id)
+                status.update(status="failed", message=f"表格填充异常：{exc}")
+            finally:
+                for stream in opened:
+                    stream.close()
+                write_sheet_fill_task(folder, status)
+                shutil.rmtree(input_folder, ignore_errors=True)
+
+        running_sheet_tasks = getattr(app.state, "sheet_fill_tasks", None)
+        if running_sheet_tasks is None:
+            running_sheet_tasks = set()
+            app.state.sheet_fill_tasks = running_sheet_tasks
+        task = asyncio.create_task(execute())
+        running_sheet_tasks.add(task)
+        task.add_done_callback(running_sheet_tasks.discard)
+        return status
+
+    @app.get("/api/sheet-fill/tasks/{task_id}")
+    def get_sheet_fill_task(
+        task_id: str,
+        workspace: UserWorkspace = Depends(operator_workspace),
+    ) -> dict:
+        path = sheet_fill_task_folder(workspace, task_id) / "status.json"
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="表格填充任务不存在")
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    @app.get("/api/sheet-fill/tasks/{task_id}/download")
+    def download_sheet_fill_task(
+        task_id: str,
+        workspace: UserWorkspace = Depends(operator_workspace),
+    ) -> FileResponse:
+        folder = sheet_fill_task_folder(workspace, task_id)
+        status_path = folder / "status.json"
+        result_path = folder / "result.xlsx"
+        if not status_path.is_file():
+            raise HTTPException(status_code=404, detail="表格填充任务不存在")
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+        if status.get("status") != "succeeded" or not result_path.is_file():
+            raise HTTPException(status_code=409, detail="表格填充结果尚未生成")
+        return FileResponse(
+            result_path,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            filename=status["filename"],
         )
 
     @app.get("/api/dam/status")

@@ -6,6 +6,7 @@ from openpyxl import Workbook, load_workbook
 
 from webapp.sheet_agent import (
     apply_plan,
+    can_fast_reuse_plan,
     column_group_labels,
     direct_header_correction_plan,
     direct_coordinate_correction_plan,
@@ -17,6 +18,8 @@ from webapp.sheet_agent import (
     remove_target_mappings,
     source_profile,
     template_profile,
+    unmapped_coordinate_targets,
+    visible_sheet_names,
 )
 from webapp.sheet_database_source import export_content_source
 
@@ -135,6 +138,30 @@ def test_coordinate_mapping_distinguishes_duplicate_headers(tmp_path):
     assert load_workbook(output).active["A2"].value == 2
 
 
+def test_unmapped_coordinate_targets_keeps_only_targets_missing_from_plan():
+    plan = {"rules": [
+        {
+            "mode": "append_rows", "target_sheet": "明细",
+            "column_map": [{"target_header_cell": "B3"}],
+        },
+        {
+            "mode": "metric_fill", "target_sheet": "周报",
+            "target_label_cell": "A8",
+        },
+    ]}
+    targets = [
+        {"sheet": "明细", "cell": "B3", "header": "名称"},
+        {"sheet": "明细", "cell": "C3", "header": "金额"},
+        {"sheet": "周报", "cell": "A8", "header": "曝光次数"},
+        {"sheet": "周报", "cell": "A9", "header": "播放人数"},
+    ]
+
+    assert unmapped_coordinate_targets(plan, targets) == [
+        {"sheet": "明细", "cell": "C3", "header": "金额"},
+        {"sheet": "周报", "cell": "A9", "header": "播放人数"},
+    ]
+
+
 def test_find_header_accepts_model_coordinate_prefix(tmp_path):
     workbook_path = tmp_path / "headers.xlsx"
     _workbook(workbook_path, [[None], [None], [None], [None], [None], ["统计日期", "成交金额"]])
@@ -142,6 +169,47 @@ def test_find_header_accepts_model_coordinate_prefix(tmp_path):
 
     assert find_header(sheet, "A6:统计日期", 6) == 1
     assert find_header(sheet, "B6:成交金额", 6) == 2
+
+
+def test_find_header_accepts_bare_model_coordinate(tmp_path):
+    workbook_path = tmp_path / "headers.xlsx"
+    _workbook(workbook_path, [["统计日期", "成交金额"], ["2026-09-01", 12]])
+    sheet = load_workbook(workbook_path).active
+
+    assert find_header(sheet, "A1", 1) == 1
+    assert find_header(sheet, "b1", 1) == 2
+
+
+def test_find_header_rejects_bare_coordinate_outside_header_row(tmp_path):
+    workbook_path = tmp_path / "headers.xlsx"
+    _workbook(workbook_path, [["统计日期"], ["2026-09-01"]])
+    sheet = load_workbook(workbook_path).active
+
+    try:
+        find_header(sheet, "A2", 1)
+    except ValueError as error:
+        assert "不在第 1 行表头中" in str(error)
+    else:
+        raise AssertionError("应拒绝不在声明表头行中的坐标")
+
+
+def test_saved_plan_fast_reuse_only_needs_matching_file_and_sheet_names(tmp_path):
+    template = tmp_path / "template.xlsx"
+    workbook = Workbook()
+    workbook.active.title = "周报"
+    hidden = workbook.create_sheet("历史")
+    hidden.sheet_state = "hidden"
+    workbook.save(template)
+    record = {"plan": {"rules": [{
+        "source_file": "数据.xlsx", "target_sheet": "周报",
+    }]}}
+
+    sheets = visible_sheet_names(template)
+
+    assert sheets == {"周报"}
+    assert can_fast_reuse_plan(record, ["数据.xlsx"], sheets, [])
+    assert not can_fast_reuse_plan(record, ["其他.xlsx"], sheets, [])
+    assert not can_fast_reuse_plan(record, ["数据.xlsx"], sheets, [{"target": {}}])
 
 
 def test_saved_metric_plan_recovers_coordinate_field_options():

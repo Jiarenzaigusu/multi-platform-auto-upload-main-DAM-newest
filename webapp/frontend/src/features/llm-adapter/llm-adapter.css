@@ -6,7 +6,7 @@
   --llm-signal: #e9f05f;
   --llm-orange: #f06a3b;
   display: grid;
-  grid-template-columns: minmax(0, 1.12fr) minmax(310px, .64fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 22px;
   align-items: start;
   color: var(--llm-ink);
@@ -202,7 +202,7 @@
 
 /* 2026 visual refresh: align with the main console and reduce vertical drag. */
 .llm-adapter-layout {
-  grid-template-columns: minmax(0, 1fr) 320px;
+  grid-template-columns: minmax(0, 1fr);
   gap: 18px;
 }
 

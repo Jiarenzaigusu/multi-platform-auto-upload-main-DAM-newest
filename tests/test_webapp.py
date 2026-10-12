@@ -30,6 +30,7 @@ from uploader.jd_video_uploader.main import (
 from uploader.tmall_article_uploader.main import (
     TmallArticle,
     _article_picker_upload_names,
+    _cleanup_article_staging_directory,
 )
 from uploader.tmall_video_uploader.main import (
     TmallVideo,
@@ -1043,6 +1044,51 @@ class PublishRequestValidationTests(unittest.TestCase):
             ],
         )
         self.assertEqual(len(names), len(set(names)))
+
+    def test_tmall_article_staging_cleanup_retries_windows_file_lock(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            staging_dir = Path(temp_dir) / "mpau-article-test"
+            staging_dir.mkdir()
+            locked = PermissionError(13, "file is in use")
+            with (
+                patch(
+                    "uploader.tmall_article_uploader.main.shutil.rmtree",
+                    side_effect=[locked, None],
+                ) as remove,
+                patch(
+                    "uploader.tmall_article_uploader.main.asyncio.sleep",
+                    new=AsyncMock(),
+                ) as sleep,
+            ):
+                cleaned = asyncio.run(
+                    _cleanup_article_staging_directory(staging_dir, retry_delay=0)
+                )
+
+        self.assertTrue(cleaned)
+        self.assertEqual(remove.call_count, 2)
+        sleep.assert_awaited_once_with(0)
+
+    def test_tmall_article_staging_cleanup_does_not_fail_after_persistent_lock(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            staging_dir = Path(temp_dir) / "mpau-article-test"
+            staging_dir.mkdir()
+            with (
+                patch(
+                    "uploader.tmall_article_uploader.main.shutil.rmtree",
+                    side_effect=PermissionError(13, "file is in use"),
+                ),
+                patch(
+                    "uploader.tmall_article_uploader.main.asyncio.sleep",
+                    new=AsyncMock(),
+                ),
+            ):
+                cleaned = asyncio.run(
+                    _cleanup_article_staging_directory(
+                        staging_dir, attempts=2, retry_delay=0,
+                    )
+                )
+
+        self.assertFalse(cleaned)
 
     def test_tmall_article_one_to_one_ratio_triggers_requested_crop(self):
         uploader = object.__new__(TmallArticle)

@@ -102,7 +102,8 @@ class DashboardRepository:
             """
             SELECT `年份`, `下载周期`, `汇总分类`, `二级分类`, COUNT(*),
                    SUM(`曝光人数`), SUM(`曝光次数`), SUM(`互动次数`),
-                   SUM(`种草成交金额`), SUM(`商品点击人数`), SUM(`点击次数`)
+                   SUM(`种草成交金额`), SUM(`商品点击人数`), SUM(`点击次数`),
+                   SUM(CASE WHEN TRIM(`是否爆文`) = '是' THEN 1 ELSE 0 END)
             FROM content_performance
             WHERE brand_id = %s
             GROUP BY `年份`, `下载周期`, `汇总分类`, `二级分类`
@@ -121,12 +122,12 @@ class DashboardRepository:
                 "contentCount": _number(row[4]), "exposure": _number(row[5]),
                 "views": _number(row[6]), "interactions": _number(row[7]),
                 "revenue": _number(row[8]), "product_click_users": _number(row[9]),
-                "clicks": _number(row[10]),
+                "clicks": _number(row[10]), "viralCount": _number(row[11]),
             }
         sample_rows = self.database.execute(
             """
             SELECT `汇总分类`, `二级分类`, `内容ID`, `内容名称`, `内容发布时间`,
-                   `曝光人数`, `种草成交金额`, `商品点击人数`, `点击次数`
+                   `曝光人数`, `种草成交金额`, `商品点击人数`, `点击次数`, `是否爆文`
             FROM content_performance
             WHERE brand_id = %s AND `年份` = %s AND `下载周期` = %s
             ORDER BY `曝光人数` DESC
@@ -134,7 +135,7 @@ class DashboardRepository:
             (brand_id, int(selected_key[:4]), f"{int(selected_key[5:])}月"),
         )
         samples: dict[tuple[str, str], list[dict[str, Any]]] = {}
-        for category, subcategory, content_id, title, published_at, exposure, revenue, product_click_users, clicks in sample_rows:
+        for category, subcategory, content_id, title, published_at, exposure, revenue, product_click_users, clicks, is_viral in sample_rows:
             name = str(category or "未分类").strip()
             sub = str(subcategory or "").strip()
             label = f"{name} · {sub}" if sub else name
@@ -143,18 +144,13 @@ class DashboardRepository:
             published = str(published_at)[:10] if published_at else "未知"
             bucket.append({
                 "content_id": str(content_id),
+                "viralCount": int(str(is_viral or "").strip() == "是"),
                 "title": str(title or content_id).replace("\\u200d", "\u200d"),
                 "exposure": _number(exposure), "clicks": _number(clicks), "revenue": _number(revenue),
                 "product_click_users": _number(product_click_users),
                 "meta": f"发布于 {published}",
                 "metric": f"商品点击人数 {_number(product_click_users):,}",
             })
-        for key, bucket in samples.items():
-            top = {}
-            for metric in ("exposure", "clicks", "revenue", "product_click_users"):
-                for sample in sorted(bucket, key=lambda item: item[metric], reverse=True)[:5]:
-                    top[sample["content_id"]] = sample
-            samples[key] = list(top.values())
         palette = ("#5f7ca4", "#76955e", "#b27a58", "#9b6a85", "#a18d55", "#758cad")
         tags: dict[str, list[dict[str, Any]]] = {"image": [], "video": []}
         channels = []
@@ -168,7 +164,7 @@ class DashboardRepository:
                     "color": palette[index % len(palette)],
                     **item, "delta": _change(item["exposure"], previous["exposure"] if previous else None),
                     "trend": [groups.get((month["period_key"], kind, label), {}).get("exposure", 0) for month in trend_months],
-                    "trends": {metric: [groups.get((month["period_key"], kind, label), {}).get(metric, 0) for month in trend_months] for metric in ("contentCount", "exposure", "clicks", "revenue")},
+                    "trends": {metric: [groups.get((month["period_key"], kind, label), {}).get(metric, 0) for month in trend_months] for metric in ("contentCount", "viralCount", "exposure", "clicks", "revenue")},
                     "trendLabels": [month["label"] for month in trend_months],
                     "samples": samples.get((kind, label), []),
                 })

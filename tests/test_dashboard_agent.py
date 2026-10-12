@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from webapp.dashboard_agent import ChatRequest, ConversationStore, DashboardTools, _name_works, answer_question
+from webapp.dashboard_agent import ChatRequest, ConversationStore, DashboardTools, _concise_answer, _name_works, answer_question
 
 
 class DashboardAgentTests(unittest.TestCase):
@@ -77,6 +77,12 @@ class DashboardAgentTests(unittest.TestCase):
         self.assertEqual(len(evidence), 1)
         self.assertEqual(provider.chat.call_count, 3)
 
+    def test_formatted_answer_keeps_layout(self):
+        provider = MagicMock()
+        answer = '**结论：继续做《杯具合集》。**\n\n依据：\n- 曝光 1,000 人。\n- 点击 100 人。\n\n口径说明：人数未跨内容去重。'
+        self.assertEqual(_concise_answer(provider, answer), answer)
+        provider.chat.assert_not_called()
+
     def test_ranked_work_ids_use_titles_when_available(self):
         answer = _name_works('推荐 `460235214175`（成交 2,978）和 472447801879（点击 364）。', [
             {'tool': 'rank_contents', 'result': [
@@ -85,6 +91,23 @@ class DashboardAgentTests(unittest.TestCase):
             ]},
         ])
         self.assertEqual(answer, '推荐 《杯具合集》（成交 2,978）和 472447801879（点击 364）。')
+
+    def test_quoted_references_resolve_normalized_titles_in_scope(self):
+        database = MagicMock()
+        database.execute.return_value = [
+            ('123', '甜夏赴约｜夏日甜品派对站🍮'),
+            ('456', '新品！豹纹咖调🐆'),
+            ('789', '豹纹咖调礼盒'),
+        ]
+        tools = DashboardTools(database, self.dashboard, 'video', 'all')
+        references = tools.content_references(['推荐“甜夏赴约|夏日甜品派对站”和“豹纹咖调”。'])
+        self.assertEqual(references, [{'content_id': '123', 'title': '甜夏赴约｜夏日甜品派对站🍮', 'label': '甜夏赴约|夏日甜品派对站'}])
+        query, params = database.execute.call_args.args
+        self.assertIn('brand_id = %s', query)
+        self.assertEqual(params, (7, 2026, '8月', '图文'))
+        database.reset_mock()
+        self.assertEqual(tools.content_references(['本期成交增长。']), [])
+        database.execute.assert_not_called()
 
     def test_rejects_invalid_request_scope(self):
         with self.assertRaises(ValueError):

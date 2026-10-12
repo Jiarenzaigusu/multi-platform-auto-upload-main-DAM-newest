@@ -62,3 +62,7 @@ Thumbs.db
 *.flv
 *.wmv
 *.webm
+
+# Server update backups (contain credentials and accounts)
+backups/
+release/

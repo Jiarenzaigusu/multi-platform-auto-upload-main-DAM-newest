@@ -434,3 +434,30 @@ corepack pnpm run build
 看板右侧“问数据助手”现在支持连续提问。`GET /api/dashboard/chat` 读取当前账户、品牌、周期和标签范围的会话；`POST /api/dashboard/chat` 使用当前账户已启用的 LLM 适配器回答。品牌由账户绑定确定，不接受浏览器提供品牌 ID。服务端仅开放固定只读工具：所选范围指标、上期对比、分类汇总、作品排行及单条作品历史。查询都由服务端限定品牌和范围，单次最多返回 10 条作品、30 个分类、12 个历史周期；每轮最多执行 6 个工具调用。
 
 会话保存在用户独立工作区的 `runtime/dashboard-chat.sqlite3`，最近 8 条消息进入模型上下文；每个会话最多保留 100 条消息，每个账户最多保留 30 个最近会话。前端切换周期或标签后读取对应会话。回答可展开查看本轮工具结果。当前没有活动背景数据工具，助手会明确缺少促销资料，不应编造活动或因果关系。
+
+### Docker 服务连接同机宿主机 MySQL
+
+当 Web 服务运行在 Docker、MySQL 直接运行在同一台 Linux 服务器时，Compose 已将
+`host.docker.internal` 映射到宿主机网关。设置 `deploy/docker/docker.env`：
+
+```dotenv
+MPAU_MYSQL_HOST=host.docker.internal
+MPAU_MYSQL_PORT=3306
+MPAU_MYSQL_DATABASE=实际数据库名
+MPAU_MYSQL_USER=实际数据库用户
+MPAU_MYSQL_PASSWORD=实际数据库密码
+```
+
+端口须以服务器 MySQL 实际端口为准。本地 SSH 转发端口（例如 13306）不应直接沿用。
+MySQL 需要监听容器可访问的宿主机接口，并允许应用账号从 Docker 网络访问；
+只监听 127.0.0.1 时无法通过该网关连接。无需为此开放公网 3306。
+如果 MySQL 也运行在容器中，应将两个容器接入同一 Docker 网络，并改用 MySQL 服务名及容器端口。
+
+更新配置后，在项目根目录执行：
+
+```bash
+docker compose -f deploy/docker/docker-compose.yml up --build -d mpau-web
+docker compose -f deploy/docker/docker-compose.yml exec -T mpau-web python -m webapp.mysql_demo
+```
+
+第二条命令使用容器环境配置核验连接；数据库表和已有数据仍需在服务器上实际存在。

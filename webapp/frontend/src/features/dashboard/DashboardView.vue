@@ -44,6 +44,18 @@ const assistantBusy = ref(false)
 const assistantError = ref('')
 let assistantRequest = 0
 const assistantScope = ref({ type: 'image', tagId: 'all', label: '全部图文' })
+const assistantSuggestions = [
+  '本周期整体表现怎么样？',
+  '哪些作品的内容查看人数最高？',
+  '商品点击表现最好的内容有哪些？',
+  '哪些内容值得继续做？',
+  '与上期相比，变化最大的是哪里？',
+  '这个分类有哪些高点击作品？',
+  '哪些内容的曝光转化效率最高？',
+  '哪些作品需要优先优化？',
+  '不同内容分类的表现有什么差异？',
+  '下个周期建议重点做什么？',
+]
 const assistantPreview = (content) => content.replace(/\*\*|__|`|^#{1,3}\s+/gm, '').replace(/\s+/g, ' ').slice(0, 180).trim()
 let analysisRequest = 0
 const metricOptions = [
@@ -271,9 +283,11 @@ onUnmounted(() => { clearInterval(categoryInsightTimer); categoryInsightRequest 
     <div v-if="assistantOpen" class="assistant-backdrop" @click="assistantOpen = false"></div>
     <aside id="dashboard-assistant" class="assistant-drawer" :class="{ open: assistantOpen }" :aria-hidden="!assistantOpen" aria-label="问数据助手" :inert="!assistantOpen">
       <header class="assistant-drawer-header"><div class="assistant-header-row"><div><small>DATA ASSISTANT · LIVE</small><h3>问数据助手</h3></div><button type="button" aria-label="关闭数据助手" @click="assistantOpen = false">×</button></div><div class="assistant-scope"><span>当前分析范围</span><strong>{{ data?.brand?.name || '当前品牌' }} · {{ dateLabel || '未选择周期' }} · {{ assistantScope.label }}</strong><small>切换看板周期或标签后，范围会同步更新。</small></div></header>
+      <details class="assistant-suggestion-panel" open>
+        <summary><strong>常用问题</strong><span>{{ assistantSuggestions.length }} 个选项 <i aria-hidden="true">⌄</i></span></summary>
+        <div class="assistant-suggestions"><button v-for="question in assistantSuggestions" :key="question" type="button" @click="assistantDraft = question">{{ question }}</button></div>
+      </details>
       <div class="assistant-conversation">
-        <div class="assistant-welcome"><span>✦</span><h4>从当前数据开始提问</h4><p>可以围绕趋势、内容分类或具体作品继续追问。回答会附上本次查询的数据依据。</p></div>
-        <div class="assistant-suggestions"><button v-for="question in ['哪些内容值得继续做？', '与上期相比，变化最大的是哪里？', '这个分类有哪些高点击作品？']" :key="question" type="button" @click="assistantDraft = question">{{ question }}</button></div>
         <div v-for="(message, index) in assistantMessages" :key="index" class="assistant-message" :class="message.role"><details v-if="message.role === 'assistant' && message.content.length > 500" class="assistant-long-answer"><summary><span class="assistant-answer-preview">{{ assistantPreview(message.content) }}… 展开完整回答</span><span class="assistant-answer-collapse">收起回答</span></summary><AssistantRichText :text="message.content" :evidence="message.evidence" :content-type="assistantScope.type" /></details><AssistantRichText v-else-if="message.role === 'assistant'" :text="message.content" :evidence="message.evidence" :content-type="assistantScope.type" /><p v-else>{{ message.content }}</p><details v-if="message.evidence?.length"><summary>查看数据依据</summary><pre v-for="(item, evidenceIndex) in message.evidence" :key="evidenceIndex">{{ item.tool }}：{{ JSON.stringify(item.result, null, 2) }}</pre></details></div>
         <div v-if="aiResult && !assistantMessages.length" class="assistant-current-analysis"><strong>本周期已有分析</strong><p>{{ aiResult.summary }}</p><small>来源：当前看板的 AI 内容分析</small></div>
       </div>
@@ -298,11 +312,15 @@ onUnmounted(() => { clearInterval(categoryInsightTimer); categoryInsightRequest 
 .assistant-scope span, .assistant-scope small { color: #81927b; font-size: 11px; }
 .assistant-scope strong { color: #365a3e; font-size: 13px; }
 .assistant-conversation { flex: 1; overflow-y: auto; padding: 20px 16px; }
-.assistant-welcome { padding: 18px; border: 1px solid #e1e9da; border-radius: 13px; background: white; }
-.assistant-welcome span { color: #86a050; font-size: 20px; }
-.assistant-welcome h4 { margin: 9px 0; color: #294c42; }
-.assistant-welcome p, .assistant-current-analysis p { color: #6f8378; font-size: 12px; line-height: 1.65; }
-.assistant-suggestions { display: grid; gap: 8px; margin: 16px 0; }
+.assistant-current-analysis p { color: #6f8378; font-size: 12px; line-height: 1.65; }
+.assistant-suggestion-panel { flex: 0 0 auto; margin: -1px 16px 0; border: 1px solid #dce6d3; border-radius: 0 0 11px 11px; background: #fbfcf7; box-shadow: 0 5px 14px rgba(41, 76, 66, .08); overflow: hidden; }
+.assistant-suggestion-panel summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 12px; color: #365a3e; cursor: pointer; list-style: none; user-select: none; }
+.assistant-suggestion-panel summary::-webkit-details-marker { display: none; }
+.assistant-suggestion-panel summary strong { font-size: 13px; }
+.assistant-suggestion-panel summary span { display: inline-flex; align-items: center; gap: 6px; color: #81927b; font-size: 11px; }
+.assistant-suggestion-panel summary i { font-size: 15px; font-style: normal; transition: transform .18s ease; }
+.assistant-suggestion-panel[open] summary i { transform: rotate(180deg); }
+.assistant-suggestions { display: grid; gap: 8px; max-height: min(288px, 36vh); padding: 0 10px 10px; overflow-y: auto; }
 .assistant-suggestions button { padding: 10px; border: 1px solid #dde7d2; border-radius: 9px; background: white; color: #456451; text-align: left; cursor: pointer; }
 .assistant-message { margin: 12px 0; padding: 12px; border: 1px solid #e1e9da; border-radius: 10px; background: white; color: #3c6248; font-size: 12px; }
 .assistant-message.user { margin-left: 25px; background: #eff5dc; }

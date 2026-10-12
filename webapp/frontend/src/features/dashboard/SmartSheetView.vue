@@ -24,6 +24,8 @@ const databaseSource = ref('')
 const databasePeriod = ref('all')
 const databaseBrand = ref('')
 const databaseError = ref('')
+const activeTaskId = ref(localStorage.getItem('mpau-sheet-fill-task') || '')
+let taskPollTimer = null
 const sourceReady = computed(() => sourceMode.value === 'upload' ? sourceFiles.value.length > 0 : Boolean(databaseSource.value))
 
 function appendSources(body) {
@@ -62,7 +64,8 @@ async function fillSheet() {
     return
   }
   sheetFilling.value = true
-  sheetStatus.value = '正在解析并匹配字段，请稍候…'
+  const reusingPlan = tableNames.value.includes(tableName.value.trim())
+  sheetStatus.value = reusingPlan ? '正在复用历史映射并填充，请稍候…' : '正在解析并匹配字段，请稍候…'
   if (resultUrl.value) URL.revokeObjectURL(resultUrl.value)
   resultUrl.value = ''
   const body = new FormData()
@@ -76,26 +79,65 @@ async function fillSheet() {
     }))))
   body.append('table_name', tableName.value)
   try {
-    const response = await apiFetch('/api/sheet-fill', { method: 'POST', body })
-    if (!response.ok) {
-      const errorBody = await response.json().catch(() => ({}))
-      throw new Error(typeof errorBody.detail === 'string' ? errorBody.detail : '表格填充失败')
-    }
-    const url = URL.createObjectURL(await response.blob())
-    const filename = `已填充-${templateFile.value.name.replace(/\.[^.]+$/, '')}.xlsx`
-    resultUrl.value = url
-    resultFilename.value = filename
-    const link = document.createElement('a')
-    link.href = url
-    link.download = filename
-    document.body.appendChild(link)
-    link.click()
-    link.remove()
+    const task = await apiRequest('/api/sheet-fill/tasks', { method: 'POST', body })
+    activeTaskId.value = task.task_id
+    localStorage.setItem('mpau-sheet-fill-task', task.task_id)
     if (tableName.value.trim() && !tableNames.value.includes(tableName.value.trim())) tableNames.value.push(tableName.value.trim())
-    sheetStatus.value = `填充完成：${filename}（已发送到浏览器下载目录）`
+    await pollSheetTask()
   } catch (requestError) {
+    if (requestError.status === 404) {
+      localStorage.removeItem('mpau-sheet-fill-task')
+      activeTaskId.value = ''
+    }
     sheetStatus.value = requestError.message
-  } finally {
+    sheetFilling.value = false
+  }
+}
+
+async function downloadSheetTask(task) {
+  const response = await apiFetch(`/api/sheet-fill/tasks/${task.task_id}/download`)
+  if (!response.ok) throw new Error('表格结果下载失败')
+  if (resultUrl.value) URL.revokeObjectURL(resultUrl.value)
+  const url = URL.createObjectURL(await response.blob())
+  resultUrl.value = url
+  resultFilename.value = task.filename
+  const link = document.createElement('a')
+  link.href = url
+  link.download = task.filename
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  localStorage.removeItem('mpau-sheet-fill-task')
+  activeTaskId.value = ''
+  sheetFilling.value = false
+  sheetStatus.value = `填充完成：${task.filename}（已发送到浏览器下载目录）`
+}
+
+async function pollSheetTask() {
+  if (!activeTaskId.value) return
+  if (taskPollTimer) clearTimeout(taskPollTimer)
+  try {
+    const task = await apiRequest(`/api/sheet-fill/tasks/${activeTaskId.value}`)
+    if (task.status === 'succeeded') {
+      await downloadSheetTask(task)
+      return
+    }
+    if (task.status === 'failed') {
+      localStorage.removeItem('mpau-sheet-fill-task')
+      activeTaskId.value = ''
+      sheetFilling.value = false
+      sheetStatus.value = task.message || '表格填充失败'
+      return
+    }
+    sheetFilling.value = true
+    sheetStatus.value = task.message || '正在后台填充表格…'
+    taskPollTimer = setTimeout(pollSheetTask, 1500)
+  } catch (requestError) {
+    if (requestError.status === 404) {
+      localStorage.removeItem('mpau-sheet-fill-task')
+      activeTaskId.value = ''
+    }
+    sheetStatus.value = requestError.message
     sheetFilling.value = false
   }
 }
@@ -182,8 +224,11 @@ async function inspectFields() {
 function addFieldMapping() { fieldMappings.value.push({ sourceIndex: '', targetIndex: '' }) }
 function removeFieldMapping(index) { fieldMappings.value.splice(index, 1) }
 
-onMounted(() => { loadTableNames(); loadDatabaseSources() })
-onBeforeUnmount(() => { if (resultUrl.value) URL.revokeObjectURL(resultUrl.value) })
+onMounted(() => { loadTableNames(); loadDatabaseSources(); pollSheetTask() })
+onBeforeUnmount(() => {
+  if (taskPollTimer) clearTimeout(taskPollTimer)
+  if (resultUrl.value) URL.revokeObjectURL(resultUrl.value)
+})
 </script>
 
 <template>
@@ -197,7 +242,7 @@ onBeforeUnmount(() => { if (resultUrl.value) URL.revokeObjectURL(resultUrl.value
       <label v-else class="source-select" :class="{ selected: databaseSource }"><span>数据库数据表</span><select v-model="databaseSource" :disabled="!databaseSources.length"><option value="">请选择数据表</option><option v-for="source in databaseSources" :key="source.key" :value="source.key">{{ source.label }} · {{ databaseBrand }}</option></select></label>
       <label v-if="sourceMode === 'database'" class="source-select"><span>下载周期</span><select v-model="databasePeriod"><option value="all">全部周期</option><option v-for="item in databasePeriods" :key="item.key" :value="item.key">{{ item.label }}（{{ item.count }} 条）</option></select></label>
       <label :class="{ selected: templateFile }"><span>上传待填数据</span><input type="file" accept=".xlsx,.xlsm" @change="selectTemplate" /><small>{{ templateFile ? `✓ ${templateFile.name}` : '点击选择模板' }}</small></label>
-      <button type="button" :disabled="sheetFilling || !templateFile || !sourceReady" @click="fillSheet">{{ sheetFilling ? '处理中…' : '开始填充' }}</button>
+      <button type="button" :disabled="sheetFilling || activeTaskId || !templateFile || !sourceReady" @click="fillSheet">{{ sheetFilling || activeTaskId ? '处理中…' : '开始填充' }}</button>
       <p v-if="sourceMode === 'database' && databaseError" class="database-source-error" role="status">{{ databaseError }}</p>
       <div class="sheet-correction-grid">
         <div class="sheet-correction-head"><strong>字段映射修正</strong><button type="button" :disabled="inspectingFields || !templateFile || !sourceReady" @click="inspectFields">{{ inspectingFields ? '识别中…' : '识别表头位置' }}</button></div>

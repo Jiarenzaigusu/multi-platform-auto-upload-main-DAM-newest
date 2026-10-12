@@ -83,6 +83,31 @@ def _article_image_count_has_updated(body_text: str, expected_images: int) -> bo
     )
 
 
+async def _cleanup_article_staging_directory(
+    staging_dir: str | Path,
+    *,
+    attempts: int = 20,
+    retry_delay: float = 0.25,
+) -> bool:
+    """Remove staged uploads after Chromium releases its Windows file handles."""
+    path = Path(staging_dir)
+    for attempt in range(attempts):
+        try:
+            shutil.rmtree(path)
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError as error:
+            # Chromium may keep a selected upload open briefly on Windows. Other
+            # cleanup errors should still surface instead of being silently hidden.
+            if getattr(error, "winerror", None) not in (32, 5) and not isinstance(error, PermissionError):
+                raise
+            if attempt + 1 < attempts:
+                await asyncio.sleep(retry_delay)
+    tmall_logger.warning("图文上传暂存目录仍被浏览器占用，已跳过本次清理：{}", path)
+    return False
+
+
 async def _click_visible_article_frame_button(
     frames: tuple,
     names: tuple[str, ...],
@@ -1393,7 +1418,8 @@ class TmallArticle:
         source_paths = [Path(image_path) for image_path in self.image_paths]
         # 素材库永久保留历史图片，批量目录又经常使用 1.jpg、2.jpg 等重复名称。
         # 上传唯一命名的临时副本，才能在“完成”返回图库后精确选中本次素材。
-        with tempfile.TemporaryDirectory(prefix="mpau-article-") as staging_dir:
+        staging_dir = tempfile.mkdtemp(prefix="mpau-article-")
+        try:
             upload_names = _article_picker_upload_names(source_paths)
             staged_paths: list[str] = []
             for source_path, upload_name in zip(source_paths, upload_names, strict=True):
@@ -1407,6 +1433,8 @@ class TmallArticle:
                 (picker_frame,), ("完成",), description="图片上传完成", timeout_seconds=120
             )
             expected_image_stems = [Path(path).stem.casefold() for path in staged_paths]
+        finally:
+            await _cleanup_article_staging_directory(staging_dir)
         selected_images = None
         # “完成”后图库仍会逐张回写。持续等待每个唯一文件名真实出现，不能以
         # 固定时长代替这个确认，避免只选到先挂载的一部分图片。

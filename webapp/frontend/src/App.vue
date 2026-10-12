@@ -1543,13 +1543,13 @@ onBeforeUnmount(() => {
           <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="7" y="4" width="12" height="14" rx="2" /><path d="M15 18v2H5a2 2 0 0 1-2-2V8h4M10 9h6m-6 4h6" /></svg></span>
         </button>
         <div class="nav-subsection">
-          <button class="feature-nav-entry" :class="{ active: activeView === 'dashboard' }" @click="activeView = 'dashboard'">
-            <span>数据看板</span>
-            <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 19V9m6 10V5m6 14v-7m4 7H2" /><path d="m4 7 6-4 6 7 4-3" /></svg></span>
-          </button>
           <button class="feature-nav-entry" :class="{ active: activeView === 'smart-sheet' }" @click="activeView = 'smart-sheet'">
             <span>智能表格</span>
             <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="16" rx="2" /><path d="M3.5 10h17M10.5 10v10" /></svg></span>
+          </button>
+          <button class="feature-nav-entry" :class="{ active: activeView === 'dashboard' }" @click="activeView = 'dashboard'">
+            <span>数据看板</span>
+            <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 19V9m6 10V5m6 14v-7m4 7H2" /><path d="m4 7 6-4 6 7 4-3" /></svg></span>
           </button>
         </div>
         <button class="feature-nav-entry" :class="{ active: activeView === 'llm-adapter' }" @click="activeView = 'llm-adapter'">

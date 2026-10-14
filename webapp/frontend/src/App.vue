@@ -489,7 +489,7 @@ const brandLabel = computed(() => {
   if (!brandAccess.value.loaded) return '正在读取数据品牌'
   if (brandAccess.value.error) return '数据品牌暂不可用'
   if (!brandAccess.value.configured) return '数据品牌未配置'
-  return brandAccess.value.brand ? `数据品牌：${brandAccess.value.brand.name}` : '未绑定数据品牌'
+  return brandAccess.value.brand ? `所属品牌：${brandAccess.value.brand.name}` : '未匹配到品牌数据'
 })
 const platformLabel = (platform) => platformMeta[platform]?.label || platform
 const batchPlatformLabel = computed(() => platformLabel(batchForm.platform))
@@ -1468,9 +1468,10 @@ function endAuthenticatedSession() {
   resetUserInterface()
 }
 
-async function refreshBrandAccess() {
+async function refreshBrandAccess(updatedUser) {
   const userId = currentUser.value?.id
   if (!userId) return
+  if (updatedUser?.id === userId) Object.assign(currentUser.value, updatedUser)
   try {
     const result = await request('/api/brand-access/me')
     if (currentUser.value?.id === userId) brandAccess.value = { ...result, loaded: true, error: false }
@@ -1579,20 +1580,33 @@ onBeforeUnmount(() => {
           <p class="eyebrow">{{ viewEyebrow }}</p>
           <h1>{{ viewTitle }}</h1>
         </div>
-        <div class="session-actions">
-          <span><strong>{{ currentUser.display_name }}</strong><small>{{ currentUser.username }} · {{ brandLabel }} · {{ currentUser.role }}</small></span>
-          <button
-            class="agent-connection-status"
-            :class="{ online: agentStatus.online, offline: !agentStatus.online && agentStatus.checked && !agentStatus.unavailable, unknown: agentStatus.unavailable || !agentStatus.checked, updates: agentUpdateAvailable }"
-            :title="agentStatusDescription"
-            type="button"
-            @click="refreshAgentStatus"
+        <div class="session-tools">
+          <div class="session-actions">
+            <span><strong>{{ currentUser.display_name }}</strong><small>{{ currentUser.username }} · {{ brandLabel }} · {{ currentUser.role }}</small></span>
+            <button
+              class="agent-connection-status"
+              :class="{ online: agentStatus.online, offline: !agentStatus.online && agentStatus.checked && !agentStatus.unavailable, unknown: agentStatus.unavailable || !agentStatus.checked, updates: agentUpdateAvailable }"
+              :title="agentStatusDescription"
+              type="button"
+              @click="refreshAgentStatus"
+            >
+              <i aria-hidden="true"></i>{{ agentStatusLabel }}
+            </button>
+            <button class="refresh agent-windows" :class="{ updates: agentUpdateAvailable }" type="button" @click="agentSetupOpen = true">Windows 助手</button>
+            <button v-if="!['dashboard', 'smart-sheet', 'ai-copy', 'llm-adapter', 'users'].includes(activeView)" class="refresh" @click="refreshDashboard">刷新状态</button>
+            <button class="refresh logout" type="button" @click="logout">退出</button>
+          </div>
+          <a
+            class="manual-access"
+            href="/assets/user-manual/index.html"
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="使用手册（在新标签页打开）"
           >
-            <i aria-hidden="true"></i>{{ agentStatusLabel }}
-          </button>
-          <button class="refresh agent-windows" :class="{ updates: agentUpdateAvailable }" type="button" @click="agentSetupOpen = true">Windows 助手</button>
-          <button v-if="!['dashboard', 'smart-sheet', 'ai-copy', 'llm-adapter', 'users'].includes(activeView)" class="refresh" @click="refreshDashboard">刷新状态</button>
-          <button class="refresh logout" type="button" @click="logout">退出</button>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v15M12 5C8 3 5 3 3 4v15c3-1 6-1 9 1 3-2 6-2 9-1V4c-2-1-5-1-9 1Z" /></svg>
+            使用手册
+            <span aria-hidden="true">↗</span>
+          </a>
         </div>
       </header>
 

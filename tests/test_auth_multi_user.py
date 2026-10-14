@@ -21,7 +21,7 @@ from webapp.api.main import WebSettings, create_app, server_bind_address
 from webapp.api.models import validate_publish_request
 from webapp.api.tasks import TaskManager
 from webapp.auth import AuthStore
-from webapp.mysql_demo import MySQLSettings
+from webapp.mysql_demo import MySQLDemoError, MySQLSettings
 from webapp.workspaces import AppDataPaths, UserWorkspaceRegistry
 
 
@@ -280,36 +280,58 @@ class MultiUserApiTests(unittest.TestCase):
         response = self.client.post("/api/dashboard/chat", headers=self.csrf_headers(), json=payload)
         self.assertEqual(response.status_code, 422, response.text)
 
-    def test_brand_data_requires_admin_binding_and_filters_by_brand_id(self):
+    def test_registration_brand_catalog_is_public_and_excludes_ambiguous_names(self):
+        response = self.client.get("/api/auth/brands")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json(), {"configured": False, "brands": []})
+        database = self.app.state.mysql_database
+        database.settings = MySQLSettings(
+            host="db.internal", database="business", user="app", password="secret"
+        )
+        with patch.object(database, "execute", return_value=[
+            (1, "星巴克"), (2, "Nike"), (3, " ＮＩＫＥ "), (4, "   "),
+        ]):
+            response = self.client.get("/api/auth/brands")
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json(), {"configured": True, "brands": [{"id": 1, "name": "星巴克"}]})
+            self.assertEqual(self.client.get("/api/admin/brand-access").status_code, 401)
+            self.assertEqual(self.client.get("/api/dashboard").status_code, 401)
+
+        with patch.object(database, "execute", side_effect=MySQLDemoError("测试连接失败")):
+            response = self.client.get("/api/auth/brands")
+            self.assertEqual(response.status_code, 503, response.text)
+
+    def test_registered_brand_grants_data_access_and_filters_by_brand_id(self):
         self.bootstrap_admin()
         operator = self.create_user("samebrand")
         database = self.app.state.mysql_database
         database.settings = MySQLSettings(
             host="db.internal", database="business", user="app", password="secret"
         )
-        bindings = {}
         calls = []
+        bindings = {}
 
         def execute(query, parameters=None):
             values = tuple(parameters or ())
             calls.append((query, values))
             if query.startswith("SELECT id, name FROM brands"):
                 return [(1, "星巴克"), (2, "其他品牌")]
-            if query.startswith("SELECT user_id, brand_id"):
+            if query.startswith("SELECT ub.brand_id, b.name"):
+                brand_id = bindings.get(values[0])
+                return [(brand_id, "星巴克" if brand_id == 1 else "其他品牌")] if brand_id else []
+            if query.startswith("SELECT user_id, brand_id FROM user_brand_bindings"):
                 return list(bindings.items())
-            if query.startswith("SELECT id FROM brands"):
-                return [(values[0],)] if values[0] in {1, 2} else []
+            if query.startswith("INSERT IGNORE INTO user_brand_bindings"):
+                bindings.setdefault(values[0], values[1])
+                return []
             if query.startswith("INSERT INTO user_brand_bindings"):
                 bindings[values[0]] = values[1]
                 return []
             if query.startswith("DELETE FROM user_brand_bindings"):
                 bindings.pop(values[0], None)
                 return []
-            if query.startswith("SELECT b.id, b.name"):
-                brand_id = bindings.get(values[0])
-                return [(brand_id, "星巴克" if brand_id == 1 else "其他品牌")] if brand_id else []
-            if query.startswith("SELECT 1 FROM user_brand_bindings"):
-                return []
+            if query.startswith("SELECT 1 FROM content_performance"):
+                return [(1,)] if values == (1, "1383899085827225") else []
             if query.startswith("SELECT `年份`, `下载周期`, COUNT(*) FROM content_performance"):
                 return [(2026, "8月", 1)]
             if query.startswith("SHOW COLUMNS FROM content_performance"):
@@ -317,11 +339,11 @@ class MultiUserApiTests(unittest.TestCase):
             if "LIMIT 20001" in query:
                 return [(2026, "8月", "1383899085827225", 10)]
             if "GROUP BY `年份`, `下载周期`, `汇总分类`" in query:
-                return [(2026, "8月", "图文", "", 1, 100, 120, 2, 39.5, 20, 10)]
+                return [(2026, "8月", "图文", "", 1, 100, 120, 2, 39.5, 20, 10, 0)]
             if "FROM content_performance" in query and "COUNT(*)" in query:
                 return [(2026, "8月", 1, 50, 120, 39.5, 20, 100, 2, 30)]
             if "FROM content_performance" in query:
-                return [("图文", "", "1383899085827225", "真实作品", "2026-07-30 16:44:48", 100, 39.5, 20, 10)]
+                return [("图文", "", "1383899085827225", "真实作品", "2026-07-30 16:44:48", 100, 39.5, 20, 10, "否")]
             raise AssertionError(query)
 
         with patch.object(database, "execute", side_effect=execute):
@@ -338,20 +360,18 @@ class MultiUserApiTests(unittest.TestCase):
                 headers=self.csrf_headers(), json_body={"brand_id": 1},
             )
             self.assertEqual(forbidden_binding.status_code, 403, forbidden_binding.text)
-            self.assertEqual(bindings, {})
-
-            self.login("admin", "admin-password-123")
-            response = self.client.request(
-                "PUT", f"/api/admin/users/{operator['id']}/brand-binding",
-                headers=self.csrf_headers(), json_body={"brand_id": 1},
+            registered = self.client.post(
+                "/api/auth/register",
+                json={"username": "registeredbrand", "display_name": "注册用户",
+                      "brand_name": "　星巴克　", "password": "operator-password-123"},
             )
-            self.assertEqual(response.status_code, 200, response.text)
-            self.assertEqual(bindings[operator["id"]], 1)
-
-            self.login("samebrand", "operator-password-123")
+            self.assertEqual(registered.status_code, 201, registered.text)
+            self.assertEqual(registered.json()["brand_name"], "星巴克")
+            self.assertEqual(registered.json()["role"], "operator")
             bound_access = self.client.get("/api/brand-access/me")
             self.assertEqual(bound_access.status_code, 200, bound_access.text)
             self.assertEqual(bound_access.json()["brand"], {"id": 1, "name": "星巴克"})
+            self.assertEqual(bindings[registered.json()["id"]], 1)
             database_sources = self.client.get("/api/sheet-fill/database-sources")
             self.assertEqual(database_sources.status_code, 200, database_sources.text)
             self.assertEqual(database_sources.json()["brand"], "星巴克")
@@ -372,15 +392,63 @@ class MultiUserApiTests(unittest.TestCase):
             self.assertEqual(scoped.json()["brand"]["id"], 1)
             self.assertEqual(scoped.json()["summary"]["current"]["content_viewers"], 50)
             self.assertEqual(scoped.json()["tags"]["image"][0]["samples"][0]["content_id"], "1383899085827225")
+            forged_scope = self.client.get("/api/dashboard?brand_id=2")
+            self.assertEqual(forged_scope.status_code, 200, forged_scope.text)
+            self.assertEqual(forged_scope.json()["brand"]["id"], 1)
             content_calls = [(query, values) for query, values in calls if "FROM content_performance" in query and values]
             self.assertTrue(content_calls)
             self.assertTrue(all(values[0] == 1 for _, values in content_calls))
             private_detail = self.client.get("/api/guanghe/content/other-brand-content")
             self.assertEqual(private_detail.status_code, 403, private_detail.text)
+            with patch("webapp.api.main.content_detail", return_value={"content_id": "1383899085827225"}) as detail:
+                own_detail = self.client.get("/api/guanghe/content/1383899085827225")
+                self.assertEqual(own_detail.status_code, 200, own_detail.text)
+                detail.assert_called_once_with("1383899085827225")
 
             self.login("admin", "admin-password-123")
             admin_unbound = self.client.get("/api/dashboard")
             self.assertEqual(admin_unbound.status_code, 403, admin_unbound.text)
+
+            # A stale account label or ordinary profile save never replaces the ID.
+            preserved = dict(bindings)
+            edited = self.client.patch(
+                f"/api/admin/users/{registered.json()['id']}", headers=self.csrf_headers(),
+                json={"display_name": "已修改显示名", "brand_name": "其他品牌"},
+            )
+            self.assertEqual(edited.status_code, 200, edited.text)
+            access = self.client.get("/api/admin/brand-access")
+            self.assertEqual(access.status_code, 200, access.text)
+            self.assertEqual(access.json()["bindings"][registered.json()["id"]], 1)
+            self.login("registeredbrand", "operator-password-123")
+            for _ in range(2):
+                self.assertEqual(self.client.get("/api/brand-access/me").json()["brand"]["id"], 1)
+            self.assertEqual(self.client.get("/api/dashboard").json()["brand"]["id"], 1)
+            self.assertEqual(bindings, preserved)
+
+            # Only an explicit administrator brand change updates the saved ID.
+            self.login("admin", "admin-password-123")
+            updated = self.client.request(
+                "PUT", f"/api/admin/users/{registered.json()['id']}/brand-binding",
+                headers=self.csrf_headers(), json_body={"brand_id": 2},
+            )
+            self.assertEqual(updated.status_code, 200, updated.text)
+            users = self.client.get("/api/admin/users").json()
+            self.assertEqual(next(user for user in users if user["id"] == registered.json()["id"])["brand_name"], "其他品牌")
+            self.login("registeredbrand", "operator-password-123")
+            self.assertEqual(self.client.get("/api/brand-access/me").json()["brand"]["id"], 2)
+            switched = self.client.get("/api/dashboard")
+            self.assertEqual(switched.status_code, 200, switched.text)
+            self.assertEqual(switched.json()["brand"]["id"], 2)
+            self.login("admin", "admin-password-123")
+            cleared = self.client.request(
+                "PUT", f"/api/admin/users/{registered.json()['id']}/brand-binding",
+                headers=self.csrf_headers(), json_body={"brand_id": None},
+            )
+            self.assertEqual(cleared.status_code, 200, cleared.text)
+            self.login("registeredbrand", "operator-password-123")
+            self.assertIsNone(self.client.get("/api/brand-access/me").json()["brand"])
+            self.assertEqual(self.client.get("/api/dashboard").status_code, 403)
+            self.assertNotIn(registered.json()["id"], bindings)
 
     def test_direct_http_ip_login_preserves_session_and_csrf_flow(self):
         direct_headers = {

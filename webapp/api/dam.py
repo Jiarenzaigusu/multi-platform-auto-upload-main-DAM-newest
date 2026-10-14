@@ -28,6 +28,16 @@ class DamSettings:
         return all((self.host, self.key, self.secret, self.tenant, self.catalog))
 
 
+# Fixed UAT connection for the DAM picker; credentials stay on the server.
+DEFAULT_DAM_SETTINGS = DamSettings(
+    host="https://ross-api-uat.baozun.com/ddc-dam-backend",
+    key="dam_dIhs0RFwmGH9MiYfvqGDAXEg2WA9ETC1",
+    secret="zGFcx-NmJWx7GEKN6DH6Lpo_sD4Z0VJEuAKof64Ua_zXnX2FBUE6UA",
+    tenant="baozun",
+    catalog="rsc_design_crossteam",
+)
+
+
 class DamOpenApiClient:
     """Server-side adapter for the external DAM OpenAPI."""
 

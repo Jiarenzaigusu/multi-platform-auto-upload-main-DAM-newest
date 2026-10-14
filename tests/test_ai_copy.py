@@ -3,7 +3,7 @@
 覆盖：
 - 卖点 Excel 解析与目录存储（上传/解析/删除/TTL/LRU）
 - 商品链接读取（京东/天猫/通用 HTML/自定义服务，含 SSRF 防护）
-- LLM 文案生成（system prompt、工具调用、字数校验、高风险表述/无依据数字校验）
+- LLM 文案生成（system prompt、工具调用、字数/数量/重复校验、高风险表述/禁用数字校验）
 - FastAPI 路由（/api/ai-copy/*）
 """
 from __future__ import annotations
@@ -18,8 +18,9 @@ from unittest.mock import Mock, patch
 from urllib.parse import unquote
 
 import certifi
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
+from fastapi.testclient import TestClient
 from openpyxl import Workbook, load_workbook
 from openpyxl.worksheet.datavalidation import DataValidation
 from starlette.datastructures import UploadFile
@@ -59,7 +60,7 @@ from webapp.ai_copy.product_lookup.tmall_reader import (
     extract_tmall_product_ids,
 )
 from webapp.ai_copy.router import _import_copy_to_excel, create_ai_copy_router
-from webapp.ai_copy.service import AiCopyService
+from webapp.ai_copy.service import AiCopyService, MAX_GENERATE_ATTEMPTS, count_han_characters
 from webapp.ai_copy.selling_points import SellingPointCatalogStore
 from webapp.ai_copy.settings import AiCopySettings
 
@@ -67,6 +68,8 @@ from webapp.ai_copy.settings import AiCopySettings
 class FakeChatProvider:
     model = "test-copy-model"
     provider_label = "Test Provider"
+    default_title = "夏日通勤，穿上轻盈自在的日常鞋款"
+    default_body = "轻盈透气的日常鞋款，陪伴通勤、散步与周末出游，让每一次搭配都自然舒展。"
 
     def __init__(
         self,
@@ -75,13 +78,16 @@ class FakeChatProvider:
         tool_urls: list[str] | None = None,
         ready: bool = True,
         draft: dict[str, str | list[str]] | None = None,
+        drafts: list[dict[str, str | list[str]]] | None = None,
     ) -> None:
         self.tool_urls = tool_urls or [tool_url]
         self.ready = ready
         self.draft = draft or {
-            "title": "轻盈入夏，通勤与周末自在相伴，写下舒展轻松的日常节奏呀呀",
-            "body": "轻盈透气的日常鞋款，陪伴通勤、散步与周末出游，让每一次搭配都自然舒展。" * 30,
+            "title": self.default_title,
+            "body": self.default_body,
         }
+        self.drafts = drafts or []
+        self.draft_index = 0
         self.calls: list[dict] = []
 
     def chat(self, messages, **options):
@@ -102,6 +108,9 @@ class FakeChatProvider:
                     for index, product_url in enumerate(self.tool_urls, start=1)
                 ],
             }
+        if self.drafts:
+            self.draft = self.drafts[min(self.draft_index, len(self.drafts) - 1)]
+            self.draft_index += 1
         return {
             "role": "assistant",
             "content": json.dumps(self._candidate_payload(), ensure_ascii=False),
@@ -205,6 +214,8 @@ class AiCopyServiceTests(unittest.TestCase):
             product_identifiers=[identifier],
             style=values.pop("style", "atmospheric_seeding"),
             scene=values.pop("scene", "daily_styling"),
+            title_max_chars=values.pop("title_max_chars", 15),
+            body_max_chars=values.pop("body_max_chars", 31),
             **values,
         )
 
@@ -325,27 +336,27 @@ class AiCopyServiceTests(unittest.TestCase):
         )
         service = AiCopyService(provider, FakeProductTool())
 
-        with self.assertRaisesRegex(LLMResponseError, "没有的数字信息：99%"):
+        with self.assertRaisesRegex(LLMResponseError, "禁用数字或百分号：99%"):
             service.generate(
                 self.make_request(service, "突出轻便和通勤百搭")
             )
 
-    def test_source_grounded_number_is_allowed(self):
+    def test_source_grounded_number_is_rejected(self):
         provider = FakeChatProvider(
             draft={"title": "轻盈日常鞋", "body": "鞋面含棉99%，通勤穿着自然舒适。"}
         )
         service = AiCopyService(provider, FakeProductTool())
 
-        result = service.generate(
-            self.make_request(
-                service,
-                "鞋面含棉99%，适合日常通勤",
-                title_max_chars=5,
-                body_max_chars=19,
+        with self.assertRaisesRegex(LLMResponseError, "第 1 条正文包含禁用数字或百分号：99%"):
+            service.generate(
+                self.make_request(
+                    service,
+                    "鞋面含棉99%，适合日常通勤",
+                    title_max_chars=5,
+                    body_max_chars=19,
+                )
             )
-        )
-
-        self.assertIn("99%", result.body)
+        self.assertEqual(len(provider.calls), MAX_GENERATE_ATTEMPTS)
 
     def test_product_url_number_does_not_ground_a_marketing_claim(self):
         provider = FakeChatProvider(
@@ -354,7 +365,7 @@ class AiCopyServiceTests(unittest.TestCase):
         )
         service = AiCopyService(provider, FakeProductTool())
 
-        with self.assertRaisesRegex(LLMResponseError, "没有的数字信息：99%"):
+        with self.assertRaisesRegex(LLMResponseError, "禁用数字或百分号：99%"):
             service.generate(
                 self.make_request(
                     service,
@@ -444,6 +455,8 @@ class AiCopyServiceTests(unittest.TestCase):
                 product_identifiers=["SKU-001", "SKU-002"],
                 style="atmospheric_seeding",
                 scene="daily_styling",
+                title_max_chars=15,
+                body_max_chars=31,
             )
         )
 
@@ -480,6 +493,8 @@ class AiCopyServiceTests(unittest.TestCase):
                 manual_selling_point="轻盈透气，适合日常通勤",
                 style="atmospheric_seeding",
                 scene="daily_styling",
+                title_max_chars=15,
+                body_max_chars=31,
             )
         )
 
@@ -510,26 +525,26 @@ class AiCopyServiceTests(unittest.TestCase):
                 scene="daily_styling",
             )
 
-    def test_generated_copy_prompts_for_exact_han_character_targets(self):
+    def test_generated_copy_rejects_wrong_han_character_targets(self):
         provider = FakeChatProvider(
             draft={"title": "夏鞋", "body": "舒适好搭，日常通勤穿着轻松。"}
         )
         service = AiCopyService(provider, FakeProductTool())
 
-        result = service.generate(
-            self.make_request(
-                service,
-                "轻盈透气，适合日常通勤",
-                title_max_chars=15,
-                body_max_chars=100,
+        with self.assertRaisesRegex(LLMResponseError, "第 1 条标题汉字数不正确.*实际 2 个") as context:
+            service.generate(
+                self.make_request(
+                    service,
+                    "轻盈透气，适合日常通勤",
+                    title_max_chars=15,
+                    body_max_chars=100,
+                )
             )
-        )
-
-        self.assertEqual(result.title, "夏鞋")
-        self.assertEqual(result.body, "舒适好搭，日常通勤穿着轻松。")
+        self.assertIn("第 1 条正文汉字数不正确", str(context.exception))
+        self.assertEqual(len(provider.calls), MAX_GENERATE_ATTEMPTS)
         instruction = provider.calls[0]["messages"][-1]["content"]
         self.assertIn("每条标题必须正好包含 15 个汉字", instruction)
-        self.assertIn("每条正文必须严格以 100 个汉字为目标", instruction)
+        self.assertIn("每条正文必须正好包含 100 个汉字", instruction)
         self.assertIn("标点、数字、英文字母、空格和其他符号全部不计", instruction)
         self.assertIn("标题达到八个汉字时", instruction)
 
@@ -546,7 +561,10 @@ class AiCopyServiceTests(unittest.TestCase):
         service = AiCopyService(provider, FakeProductTool())
 
         result = service.generate(
-            self.make_request(service, "轻盈透气，适合日常通勤", title_count=3, body_count=2)
+            self.make_request(
+                service, "轻盈透气，适合日常通勤", title_count=3, body_count=2,
+                title_max_chars=5, body_max_chars=18,
+            )
         )
 
         self.assertEqual(result.titles, ["轻盈通勤鞋", "自在日常鞋", "夏日好搭鞋"])
@@ -565,6 +583,155 @@ class AiCopyServiceTests(unittest.TestCase):
 
         with self.assertRaisesRegex(LLMResponseError, "标题数量不正确"):
             AiCopyService._validate_draft_counts(draft, title_count=3, body_count=1)
+
+    def test_generation_accepts_exact_han_lengths_with_punctuation_and_letters(self):
+        provider = FakeChatProvider(draft={
+            "title": "轻盈日常鞋 Gap",
+            "body": "轻盈透气，日常通勤穿着轻松自在。",
+        })
+        service = AiCopyService(provider, FakeProductTool())
+
+        result = service.generate(self.make_request(
+            service, "Gap 轻盈通勤鞋", title_max_chars=5, body_max_chars=14,
+        ))
+
+        self.assertEqual(result.title, "轻盈日常鞋 Gap")
+        self.assertEqual(result.body, "轻盈透气，日常通勤穿着轻松自在。")
+        self.assertEqual(len(provider.calls), 1)
+
+    def test_generation_checks_lengths_of_every_candidate(self):
+        provider = FakeChatProvider(draft={
+            "titles": ["轻盈通勤鞋", "夏日好搭鞋呀"],
+            "bodies": [
+                "轻盈透气的鞋款，适合日常通勤与自在搭配。",
+                "简约鞋型自然好搭，出行与休闲都更轻松。",
+            ],
+        })
+        service = AiCopyService(provider, FakeProductTool())
+
+        with self.assertRaises(LLMResponseError) as context:
+            service.generate(self.make_request(
+                service, "轻盈通勤鞋", title_max_chars=5, body_max_chars=18,
+                title_count=2, body_count=2,
+            ))
+
+        self.assertIn("第 2 条标题汉字数不正确（需要 5 个，实际 6 个）", str(context.exception))
+        self.assertIn("第 2 条正文汉字数不正确（需要 18 个，实际 17 个）", str(context.exception))
+        self.assertNotIn("第 1 条标题汉字数不正确", str(context.exception))
+        self.assertNotIn("第 1 条正文汉字数不正确", str(context.exception))
+
+    def test_generation_retries_with_all_errors_and_returns_the_corrected_draft(self):
+        provider = FakeChatProvider(drafts=[
+            {"title": "夏鞋", "body": "鞋面含棉99%，通勤穿着自然舒适。"},
+            {"title": "轻盈日常鞋", "body": "轻盈透气，日常通勤穿着轻松自在。"},
+        ])
+        service = AiCopyService(provider, FakeProductTool())
+
+        result = service.generate(self.make_request(
+            service, "轻盈通勤鞋", title_max_chars=5, body_max_chars=14,
+        ))
+
+        self.assertEqual(len(provider.calls), 2)
+        feedback = provider.calls[1]["messages"][-1]["content"]
+        self.assertIn("第 1 条标题汉字数不正确（需要 5 个，实际 2 个）", feedback)
+        self.assertIn("第 1 条正文汉字数不正确（需要 14 个，实际 12 个）", feedback)
+        self.assertIn("第 1 条正文包含禁用数字或百分号：99%", feedback)
+        self.assertEqual(result.title, "轻盈日常鞋")
+        self.assertEqual(result.body, "轻盈透气，日常通勤穿着轻松自在。")
+
+    def test_generation_rejects_duplicate_titles_ignoring_punctuation_and_case(self):
+        for titles in (
+            ["轻盈通勤鞋", "轻盈通勤鞋"],
+            ["轻盈，通勤鞋", "轻盈 通勤鞋！"],
+            ["轻盈通勤鞋 Gap", "轻盈通勤鞋 ＧＡＰ"],
+        ):
+            with self.subTest(titles=titles):
+                provider = FakeChatProvider(draft={
+                    "titles": titles,
+                    "bodies": [FakeChatProvider.default_body],
+                })
+                service = AiCopyService(provider, FakeProductTool())
+
+                with self.assertRaisesRegex(LLMResponseError, "第 2 条标题与第 1 条标题重复"):
+                    service.generate(self.make_request(
+                        service, "轻盈通勤鞋", title_max_chars=5, title_count=2,
+                    ))
+
+    def test_generation_rejects_duplicate_bodies(self):
+        provider = FakeChatProvider(draft={
+            "titles": [FakeChatProvider.default_title],
+            "bodies": [
+                FakeChatProvider.default_body,
+                FakeChatProvider.default_body.replace("，", " ").replace("。", "！"),
+            ],
+        })
+        service = AiCopyService(provider, FakeProductTool())
+
+        with self.assertRaisesRegex(LLMResponseError, "第 2 条正文与第 1 条正文重复"):
+            service.generate(self.make_request(service, "轻盈通勤鞋", body_count=2))
+
+    def test_numbers_in_references_do_not_exempt_output_numbers(self):
+        for value in ("99%", "９９％", "９\u200b９％", "①", "%", "％"):
+            with self.subTest(value=value):
+                provider = FakeChatProvider(draft={
+                    "title": "轻盈日常鞋",
+                    "body": f"鞋面含棉{value}，通勤穿着自然舒适。",
+                })
+                service = AiCopyService(provider, FakeProductTool())
+
+                with self.assertRaisesRegex(LLMResponseError, "第 1 条正文包含禁用数字或百分号"):
+                    service.generate(self.make_request(
+                        service, "轻盈通勤鞋", copy_reference=f"参考成分{value}",
+                        title_max_chars=5, body_max_chars=12,
+                    ))
+
+    def test_numeric_title_is_rejected_even_when_it_matches_the_han_target(self):
+        provider = FakeChatProvider(draft={
+            "title": "轻盈日常鞋99",
+            "body": "轻盈透气，日常通勤穿着轻松自在。",
+        })
+        service = AiCopyService(provider, FakeProductTool())
+
+        with self.assertRaisesRegex(LLMResponseError, "第 1 条标题包含禁用数字或百分号：99"):
+            service.generate(self.make_request(
+                service, "轻盈通勤鞋", title_max_chars=5, body_max_chars=14,
+            ))
+
+    def test_existing_prompt_risk_terms_are_enforced_by_the_validator(self):
+        for claim in ("治疗", "改善", "修复", "抑制", "保证", "必然", "第\u200b一"):
+            with self.subTest(claim=claim):
+                draft = GeneratedCopyDraft(
+                    titles=["轻盈通勤鞋"],
+                    bodies=[f"{claim}穿着效果，适合日常通勤。"],
+                )
+                with self.assertRaisesRegex(LLMResponseError, "第 1 条正文包含高风险"):
+                    AiCopyService._validate_draft_claims(draft)
+
+    def test_missing_title_and_body_counts_are_both_reported(self):
+        draft = GeneratedCopyDraft(
+            titles=["轻盈通勤鞋"],
+            bodies=["轻盈透气，日常通勤穿着轻松自在。"],
+        )
+        with self.assertRaises(LLMResponseError) as context:
+            AiCopyService._validate_draft(draft, 5, 14, 2, 2)
+        self.assertIn("标题数量不正确（需要 2 条，实际 1 条）", str(context.exception))
+        self.assertIn("文案数量不正确（需要 2 条，实际 1 条）", str(context.exception))
+
+    def test_omitted_length_targets_are_still_validated_against_server_defaults(self):
+        provider = FakeChatProvider()
+        service = AiCopyService(provider, FakeProductTool())
+
+        with self.assertRaises(LLMResponseError) as context:
+            service.generate(self.make_request(
+                service, "轻盈通勤鞋", title_max_chars=None, body_max_chars=None,
+            ))
+
+        self.assertIn("需要 30 个，实际 15 个", str(context.exception))
+        self.assertIn("需要 1000 个，实际 31 个", str(context.exception))
+
+    def test_character_count_matches_the_ui_rule(self):
+        self.assertEqual(count_han_characters("Gap，纯棉外套 ９９％！"), 4)
+        self.assertEqual(count_han_characters("𠀀㐀棉"), 2)
 
 
 class _FakeHeaders:
@@ -1016,6 +1183,29 @@ class ProductSearchToolTests(unittest.TestCase):
 
 
 class AiCopyRouterTests(unittest.TestCase):
+    def test_generate_api_returns_validation_error_after_retry_exhaustion(self):
+        provider = FakeChatProvider(draft={
+            "title": "夏鞋",
+            "body": "轻盈透气，日常通勤穿着轻松自在。",
+        })
+        app = FastAPI()
+        app.include_router(create_ai_copy_router(AiCopyService(provider, FakeProductTool())))
+
+        with TestClient(app) as client:
+            response = client.post("/api/ai-copy/generate", json={
+                "selling_point_input_mode": "manual",
+                "manual_selling_point": "轻盈通勤鞋",
+                "style": "relaxed_natural",
+                "scene": "work_commute",
+                "title_max_chars": 5,
+                "body_max_chars": 14,
+            })
+
+        self.assertEqual(response.status_code, 502)
+        self.assertIn("第 1 条标题汉字数不正确（需要 5 个，实际 2 个）", response.json()["detail"])
+        self.assertNotIn("titles", response.json())
+        self.assertEqual(len(provider.calls), MAX_GENERATE_ATTEMPTS)
+
     def test_selling_point_template_download_matches_upload_contract(self):
         service = AiCopyService(FakeChatProvider(), FakeProductTool())
         router = create_ai_copy_router(service)

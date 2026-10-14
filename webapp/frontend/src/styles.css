@@ -57,7 +57,7 @@ button {
 .dam-open-button { width: auto; min-height: 34px; padding: 7px 12px; border: 1px solid var(--accent-deep); border-radius: 9px; color: var(--nav); background: rgba(231, 237, 106, .25); font-size: 12px; font-weight: 800; }
 .dam-picker-backdrop { position: fixed; z-index: 50; inset: 0; display: grid; place-items: center; overflow: auto; padding: 12px; background: rgba(18, 53, 54, .54); }
 .dam-picker { display: grid; width: min(860px, calc(100vw - 24px)); height: min(640px, calc(100dvh - 24px)); min-height: 0; max-height: calc(100dvh - 24px); grid-template-rows: auto auto minmax(0, 1fr) auto; overflow: hidden; border: 1px solid var(--line); border-radius: 18px; background: var(--paper); box-shadow: 0 28px 80px rgba(18, 53, 54, .28); }
-.dam-picker-login { grid-template-rows: auto minmax(0, 1fr); }
+.dam-picker-status { grid-template-rows: auto minmax(0, 1fr); }
 .dam-picker > header, .dam-picker > footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 20px; border-bottom: 1px solid var(--line); }
 .dam-picker > header h2 { margin: 4px 0 0; font-size: 20px; }
 .dam-picker-header-actions { display: flex; gap: 8px; }
@@ -83,21 +83,12 @@ button {
 .dam-picker-empty { padding: 28px 12px; color: var(--muted); text-align: center; }
 .form-error { margin: 0; padding: 8px 20px; color: var(--danger); background: #fff1ed; font-size: 12px; }
 .dam-picker-body main { min-width: 0; }
-.dam-login { display: grid; min-height: 0; max-width: 520px; gap: 10px; align-content: start; overflow-y: auto; margin: 0 auto; padding: 25px 20px; }
-.dam-login h3 { margin: 4px 0; font-size: 22px; }
-.dam-login small { color: var(--green); font: 11px Menlo, monospace; letter-spacing: .1em; }
-.dam-login label { display: grid; gap: 5px; color: var(--muted); font-size: 12px; font-weight: 700; }
-.dam-login input { width: 100%; }
-.dam-login button { margin: 5px 0 0; }
 .dam-picker-body aside,
-.dam-picker-body main,
-.dam-login { scrollbar-width: thin; scrollbar-color: #a5c19a transparent; }
+.dam-picker-body main { scrollbar-width: thin; scrollbar-color: #a5c19a transparent; }
 .dam-picker-body aside::-webkit-scrollbar,
-.dam-picker-body main::-webkit-scrollbar,
-.dam-login::-webkit-scrollbar { width: 8px; height: 8px; }
+.dam-picker-body main::-webkit-scrollbar { width: 8px; height: 8px; }
 .dam-picker-body aside::-webkit-scrollbar-thumb,
-.dam-picker-body main::-webkit-scrollbar-thumb,
-.dam-login::-webkit-scrollbar-thumb { border-radius: 99px; background: #a5c19a; }
+.dam-picker-body main::-webkit-scrollbar-thumb { border-radius: 99px; background: #a5c19a; }
 @media (max-width: 700px) {
   .dam-picker-backdrop { padding: 8px; }
   .dam-picker { width: 100%; height: min(700px, calc(100dvh - 16px)); max-height: calc(100dvh - 16px); }
@@ -328,6 +319,46 @@ svg {
   font-size: clamp(28px, 3.2vw, 42px);
   font-weight: 800;
   letter-spacing: -.035em;
+}
+
+.session-tools {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+  justify-items: end;
+}
+
+.manual-access {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 7px;
+  color: #315c59;
+  font-size: 12px;
+  font-weight: 750;
+  text-decoration: none;
+}
+
+.manual-access svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.manual-access:hover {
+  background: rgba(255, 255, 255, .72);
+  color: var(--nav);
+}
+
+.manual-access:focus-visible {
+  outline: 2px solid #315c59;
+  outline-offset: 2px;
 }
 
 .session-actions {
@@ -1661,6 +1692,10 @@ svg {
   .session-actions {
     width: 100%;
     justify-content: flex-start;
+  }
+
+  .session-tools {
+    width: 100%;
   }
 
   .session-actions > span {

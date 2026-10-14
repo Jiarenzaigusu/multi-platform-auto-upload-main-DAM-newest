@@ -23,6 +23,17 @@ class UserWorkspace:
     log_sinks: UserLogSinks
     _closed: bool = False
     _close_lock: threading.Lock = field(default_factory=threading.Lock)
+    _dashboard_memory: object | None = None
+
+    @property
+    def dashboard_memory(self):
+        with self._close_lock:
+            if self._closed:
+                raise RuntimeError("用户工作区已关闭")
+            if self._dashboard_memory is None:
+                from webapp.dashboard_memory import BrandMemoryService
+                self._dashboard_memory = BrandMemoryService(self.paths.runtime / "dashboard-chat.sqlite3", self.llm_registry)
+            return self._dashboard_memory
 
     def close(self) -> None:
         """Stop browser work before releasing logging resources."""
@@ -31,6 +42,8 @@ class UserWorkspace:
                 return
             self._closed = True
         try:
+            if self._dashboard_memory is not None:
+                self._dashboard_memory.close()
             self.task_manager.shutdown()
         finally:
             self.log_sinks.close()

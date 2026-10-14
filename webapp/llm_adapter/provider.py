@@ -45,7 +45,7 @@ class ChatProvider(Protocol):
         messages: list[dict[str, Any]],
         *,
         tools: list[dict[str, Any]] | None = None,
-        tool_choice: dict[str, Any] | None = None,
+        tool_choice: dict[str, Any] | str | None = None,
         response_format: dict[str, str] | None = None,
         temperature: float = 0.4,
     ) -> dict[str, Any]: ...
@@ -97,7 +97,7 @@ class OpenAICompatibleProvider:
         messages: list[dict[str, Any]],
         *,
         tools: list[dict[str, Any]] | None = None,
-        tool_choice: dict[str, Any] | None = None,
+        tool_choice: dict[str, Any] | str | None = None,
         response_format: dict[str, str] | None = None,
         temperature: float = 0.4,
     ) -> dict[str, Any]:

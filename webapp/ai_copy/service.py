@@ -4,19 +4,20 @@
 1. 管理卖点目录（上传/删除/解析）
 2. 读取商品链接资料（京东/天猫/通用HTML/自定义服务）
 3. 调用 LLM 生成文案（system prompt + 商品工具调用 + 最终生成）
-4. 校验生成结果（高风险表述、无依据数字）
+4. 校验生成结果（汉字数、候选数量、重复、高风险表述、禁用数字）
 
 生成流程：
 1. resolve 卖点 → 匹配商品 ID 到核心卖点
 2. 若有商品链接：LLM 必须为每个链接调用 inspect_product_link 工具
 3. 读取商品资料 → 作为 tool result 返回给 LLM
 4. LLM 生成最终 JSON（title + body），必要时重试
-5. 校验高风险绝对化表述、无依据数字
+5. 校验逐条汉字数、候选数量与重复、高风险绝对化表述和禁用数字
 """
 from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from typing import Any
 
 from pydantic import ValidationError as PydanticValidationError
@@ -76,6 +77,7 @@ HIGH_RISK_CLAIMS = (
     "最高级",
     "全网第一",
     "销量第一",
+    "第一",
     "唯一",
     "顶级",
     "绝对",
@@ -88,9 +90,15 @@ HIGH_RISK_CLAIMS = (
     "包治",
     "根治",
     "治愈",
+    "治疗",
+    "改善",
+    "修复",
+    "抑制",
+    "保证",
+    "必然",
 )
-# 数字匹配正则（含百分号），用于检测文案中无依据的数字
-NUMBER_PATTERN = re.compile(r"\d+(?:\.\d+)?%?")
+# 输出禁止数字和百分号；输入资料中的数字也不能豁免。
+NUMBER_PATTERN = re.compile(r"\d+(?:\.\d+)?%?|%")
 HAN_CHARACTER_PATTERN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 
 
@@ -238,11 +246,9 @@ class AiCopyService:
             )
             try:
                 draft = self._parse_draft(final_message)
-                self._validate_draft_claims(
-                    draft, request, selling_points, references
-                )
-                self._validate_draft_counts(
-                    draft, request.title_count, request.body_count
+                self._validate_draft(
+                    draft, title_target, body_target,
+                    request.title_count, request.body_count,
                 )
                 break
             except LLMResponseError as exc:
@@ -296,9 +302,9 @@ class AiCopyService:
                     "字数只统计汉字，使用正则逐个数汉字；标点、数字、英文字母、空格和其他符号全部不计。"
                     "先完成自然、完整的内容，再逐条统计汉字数；不能靠重复词、标点或数字凑数。\n"
                     f"每条标题必须正好包含 {title_preferred} 个汉字；"
-                    f"每条正文必须严格以 {body_preferred} 个汉字为目标。"
+                    f"每条正文必须正好包含 {body_preferred} 个汉字。"
                     "输出 JSON 前必须逐个检查 titles 和 bodies：标题汉字数少一个或多一个都必须重写；"
-                    "正文也必须尽量精确到目标汉字数，先删改完整句子再补足，不得提交明显超长内容。\n"
+                    "正文汉字数也必须正好等于目标值，先删改完整句子再补足。\n"
                     "【标题断句与语义硬约束】每条标题必须是自然、完整、易懂的中文表达；"
                     "不得将商品名、多个卖点和场景直接连成没有停顿的一串。标题达到八个汉字时，"
                     "必须使用至少一个自然的中文分隔标点（如逗号、顿号、冒号、分号或破折号）"
@@ -319,7 +325,8 @@ class AiCopyService:
                 f"上一次输出未通过校验：{exc}。"
                 "上一次 JSON 不能复用；请从头重写。"
                 "同时不含高风险绝对化或功效表述；标题必须严格改为指定汉字数，且要有自然断句和完整语义，"
-                "不能把关键词硬连在一起；正文尽量精确到目标汉字数。"
+                "不能把关键词硬连在一起；正文也必须严格等于指定汉字数；"
+                "候选之间不得重复，任何阿拉伯数字和百分号都不得出现，即使输入资料中出现过也不允许。"
                 "只返回 JSON 对象，字段严格为 titles 和 bodies，且二者都必须是字符串数组。"
             ),
         }
@@ -336,14 +343,83 @@ class AiCopyService:
         draft: GeneratedCopyDraft, title_count: int, body_count: int
     ) -> None:
         """确保模型候选数量与前端选择严格一致。"""
+        errors: list[str] = []
         if len(draft.titles) != title_count:
-            raise LLMResponseError(
+            errors.append(
                 f"LLM 返回标题数量不正确（需要 {title_count} 条，实际 {len(draft.titles)} 条）"
             )
         if len(draft.bodies) != body_count:
-            raise LLMResponseError(
+            errors.append(
                 f"LLM 返回文案数量不正确（需要 {body_count} 条，实际 {len(draft.bodies)} 条）"
             )
+        if errors:
+            raise LLMResponseError("；".join(errors))
+
+    @staticmethod
+    def _validate_draft(
+        draft: GeneratedCopyDraft,
+        title_target: int,
+        body_target: int,
+        title_count: int,
+        body_count: int,
+    ) -> None:
+        """汇总可由程序判断的问题，一次反馈所有失败项供模型修正。"""
+        errors: list[str] = []
+        checks = (
+            lambda: AiCopyService._validate_draft_claims(draft),
+            lambda: AiCopyService._validate_draft_counts(draft, title_count, body_count),
+            lambda: AiCopyService._validate_draft_lengths(draft, title_target, body_target),
+            lambda: AiCopyService._validate_draft_uniqueness(draft),
+        )
+        for check in checks:
+            try:
+                check()
+            except LLMResponseError as exc:
+                errors.append(str(exc))
+        if errors:
+            raise LLMResponseError("；".join(errors))
+
+    @staticmethod
+    def _validate_draft_lengths(
+        draft: GeneratedCopyDraft, title_target: int, body_target: int
+    ) -> None:
+        errors: list[str] = []
+        for label, candidates, target in (
+            ("标题", draft.titles, title_target),
+            ("正文", draft.bodies, body_target),
+        ):
+            for index, text in enumerate(candidates, start=1):
+                actual = count_han_characters(text)
+                if actual != target:
+                    errors.append(
+                        f"第 {index} 条{label}汉字数不正确（需要 {target} 个，实际 {actual} 个）"
+                    )
+        if errors:
+            raise LLMResponseError("；".join(errors))
+
+    @staticmethod
+    def _normalized_copy_text(text: str) -> str:
+        # 统一全角等兼容字符，排除零宽格式字符，避免明显的规则绕过。
+        return "".join(
+            character for character in unicodedata.normalize("NFKC", text)
+            if unicodedata.category(character) != "Cf"
+        )
+
+    @staticmethod
+    def _validate_draft_uniqueness(draft: GeneratedCopyDraft) -> None:
+        """忽略标点、空白和英文大小写检查重复；不冒充语义相似度判断。"""
+        errors: list[str] = []
+        for label, candidates in (("标题", draft.titles), ("正文", draft.bodies)):
+            seen: dict[str, int] = {}
+            for index, text in enumerate(candidates, start=1):
+                normalized = AiCopyService._normalized_copy_text(text).casefold()
+                key = re.sub(r"[\W_]+", "", normalized)
+                if key in seen:
+                    errors.append(f"第 {index} 条{label}与第 {seen[key]} 条{label}重复")
+                else:
+                    seen[key] = index
+        if errors:
+            raise LLMResponseError("；".join(errors))
 
     @staticmethod
     def _initial_messages(
@@ -380,12 +456,12 @@ class AiCopyService:
                     "商品读取工具返回的资料。可以扩展内容，让文字表达更加充沛。不得编造或"
                     "推断价格、材质、成分、功效、销量、认证、排名、库存、赠品、促销或"
                     "使用效果。\n"
+                    "核心卖点与商品资料中的当前商品事实优先于文案参考；参考文案中与当前商品"
+                    "冲突或无法确认适用的材质、参数和效果不得采用，只可借鉴其表达方式。\n"
                     "2.标题和正文不得出现任何商品编号ID、阿拉伯数字、百分号、价格、"
                     "折扣、年份、尺码、时长、数量或型号；"
                     "不得延伸为营销承诺。\n"
-                    "3. 禁止绝对化、夸大和功效/医疗暗示，包括但不限于“第一、唯一、顶级、"
-                    "最高级、100%、永久、零风险、无副作用、治疗、治愈、根治、改善、"
-                    "修复、抑制、保证、必然”。"
+                    f"3. 禁止绝对化、夸大和功效/医疗暗示，包括但不限于“{'、'.join(HIGH_RISK_CLAIMS)}”。"
                     "必须将这些视为不可违反的硬性要求。\n"
                     "4. 遇到没有依据或不合规的卖点，直接省略，不要用近义词替换成另一种"
                     "承诺。优先写真实使用场景、搭配感受和克制的描述。\n"
@@ -465,36 +541,23 @@ class AiCopyService:
     @staticmethod
     def _validate_draft_claims(
         draft: GeneratedCopyDraft,
-        request: GenerateCopyRequest,
-        selling_points: list[SellingPointReference],
-        references: list[ProductReference],
     ) -> None:
-        generated_text = "\n".join([*draft.titles, *draft.bodies])
-        matched_claims = [claim for claim in HIGH_RISK_CLAIMS if claim in generated_text]
-        if matched_claims:
-            raise LLMResponseError(
-                f"LLM 文案包含高风险绝对化或功效表述：{'、'.join(matched_claims)}"
-            )
-
-        source_parts = [
-            *(item.selling_point for item in selling_points),
-            request.copy_reference or "",
-            request.festival or "",
-        ]
-        for reference in references:
-            source_parts.extend(
-                [
-                    reference.title,
-                    reference.summary,
-                    *reference.attributes.keys(),
-                    *reference.attributes.values(),
-                ]
-            )
-        source_numbers = set(NUMBER_PATTERN.findall("\n".join(source_parts)))
-        invented_numbers = set(NUMBER_PATTERN.findall(generated_text)) - source_numbers
-        if invented_numbers:
-            values = "、".join(sorted(invented_numbers))
-            raise LLMResponseError(f"LLM 文案包含输入资料中没有的数字信息：{values}")
+        errors: list[str] = []
+        for label, candidates in (("标题", draft.titles), ("正文", draft.bodies)):
+            for index, text in enumerate(candidates, start=1):
+                normalized = AiCopyService._normalized_copy_text(text)
+                matched_claims = [claim for claim in HIGH_RISK_CLAIMS if claim in normalized]
+                if matched_claims:
+                    errors.append(
+                        f"第 {index} 条{label}包含高风险绝对化或功效表述：{'、'.join(matched_claims)}"
+                    )
+                forbidden_numbers = sorted(set(NUMBER_PATTERN.findall(normalized)))
+                if forbidden_numbers:
+                    errors.append(
+                        f"第 {index} 条{label}包含禁用数字或百分号：{'、'.join(forbidden_numbers)}"
+                    )
+        if errors:
+            raise LLMResponseError("；".join(errors))
 
 
 def build_ai_copy_service(

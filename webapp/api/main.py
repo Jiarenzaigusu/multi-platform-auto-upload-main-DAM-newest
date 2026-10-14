@@ -45,7 +45,7 @@ from webapp.api.agent_batch import (
     parse_remote_xiaohongshu_video_batch_workbook,
 )
 from webapp.api.batch import BatchValidationError
-from webapp.api.brand_data import create_brand_data_router
+from webapp.api.brand_data import create_brand_data_router, resolve_data_brand
 from webapp.api.batch_douyin_article import parse_douyin_article_batch_workbook
 from webapp.api.batch_douyin_video import parse_douyin_video_batch_workbook
 from webapp.api.batch_jd_article import parse_jd_article_batch_workbook
@@ -55,7 +55,8 @@ from webapp.api.batch_tmall_article import parse_tmall_article_batch_workbook
 from webapp.api.batch_tmall_video import parse_tmall_video_batch_workbook
 from webapp.api.batch_xiaohongshu_article import parse_xiaohongshu_article_batch_workbook
 from webapp.api.batch_xiaohongshu_video import parse_xiaohongshu_video_batch_workbook
-from webapp.api.dam import DamApiError, DamOpenApiClient, DamSettings, stream_download
+from webapp.api.dam import DEFAULT_DAM_SETTINGS, DamApiError, DamOpenApiClient, DamSettings, stream_download
+from webapp.api.dashboard_memory import create_dashboard_memory_router
 from webapp.api.media import (
     MediaQuotaExceededError,
     UploadTooLargeError,
@@ -86,6 +87,7 @@ from webapp.auth.dependencies import require_admin, require_operator, require_se
 from webapp.auth.middleware import AuthenticationMiddleware
 from webapp.dashboard import DashboardRepository
 from webapp.dashboard_agent import ChatRequest, ConversationStore, DashboardTools, answer_question
+from webapp.dashboard_memory import memory_enabled
 from webapp.guanghe_api import GuangheApiError, content_detail
 from webapp.llm_adapter import OpenAICompatibleProvider, create_llm_adapter_router
 from webapp.mysql_demo import (
@@ -417,7 +419,7 @@ def create_app(
         session = require_session(request)
         with dam_sessions_lock:
             session_settings = dam_sessions.get(session.session_id)
-        return DamOpenApiClient(session_settings or DamSettings())
+        return DamOpenApiClient(session_settings or DEFAULT_DAM_SETTINGS)
 
     def delete_account_and_cookie(
         workspace: UserWorkspace, platform: str, account: str
@@ -503,14 +505,8 @@ def create_app(
                 ),
             }
         try:
-            binding = mysql_database.execute(
-                "SELECT b.id, b.name FROM user_brand_bindings AS ub "
-                "JOIN brands AS b ON b.id = ub.brand_id WHERE ub.user_id = %s",
-                (user.id,),
-            )
-            if not binding:
-                raise HTTPException(status_code=403, detail="当前账户尚未由管理员绑定数据品牌")
-            return dashboard_repository.load(binding[0][0], binding[0][1], period)
+            brand = resolve_data_brand(mysql_database, user)
+            return dashboard_repository.load(brand["id"], brand["name"], period)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except MySQLDemoError as exc:
@@ -555,8 +551,12 @@ def create_app(
             raise HTTPException(status_code=422, detail="当前周期暂无可分析数据")
         try:
             tools = DashboardTools(mysql_database, dashboard, content_type, tag_id)
-            store = ConversationStore(current_workspace(request).paths.runtime / "dashboard-chat.sqlite3")
+            workspace = current_workspace(request)
+            store = ConversationStore(workspace.paths.runtime / "dashboard-chat.sqlite3")
             conversation_id, messages = store.open(dashboard["brand"]["id"], period, content_type, tag_id)
+            if memory_enabled():
+                workspace.dashboard_memory.store.bootstrap(dashboard["brand"]["id"])
+                workspace.dashboard_memory.notify()
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         references = tools.content_references([message['content'] for message in messages if message['role'] == 'assistant'])
@@ -579,18 +579,24 @@ def create_app(
             store = ConversationStore(workspace.paths.runtime / "dashboard-chat.sqlite3")
             conversation_id, history = store.open(dashboard["brand"]["id"], payload.period, payload.content_type, payload.tag_id, payload.conversation_id)
             provider = OpenAICompatibleProvider(workspace.llm_registry)
-            answer, evidence = answer_question(provider, tools, history, payload.question)
+            memory = []
+            if memory_enabled():
+                workspace.dashboard_memory.store.bootstrap(dashboard["brand"]["id"])
+                memory = workspace.dashboard_memory.store.context(dashboard["brand"]["id"], payload.period, payload.content_type, payload.tag_id)
+            answer, evidence = answer_question(provider, tools, history, payload.question, memory=memory)
             references = tools.content_references([answer])
             if references:
                 evidence.append({'tool': 'get_content_references', 'result': references})
-            store.append(conversation_id, payload.question, answer, evidence)
+            message_ids = store.append(conversation_id, payload.question, answer, evidence, learn=memory_enabled())
+            if memory_enabled():
+                workspace.dashboard_memory.notify()
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except LLMAdapterError as exc:
             raise HTTPException(status_code=exc.status_code, detail="数据助手暂不可用，请检查 LLM 适配器配置后重试") from exc
         except MySQLDemoError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
-        return {"conversation_id": conversation_id, "answer": answer, "evidence": evidence, "model": provider.model}
+        return {"conversation_id": conversation_id, "answer": answer, "evidence": evidence, "model": provider.model, "memory_used": memory, **message_ids}
 
     @app.get("/api/guanghe/content/{content_id}")
     def guanghe_content(content_id: str, request: Request) -> dict:
@@ -598,11 +604,11 @@ def create_app(
         if not mysql_database.configured:
             raise HTTPException(status_code=503, detail="请先配置 MySQL 连接")
         try:
+            brand = resolve_data_brand(mysql_database, user)
             allowed = mysql_database.execute(
-                "SELECT 1 FROM user_brand_bindings AS ub "
-                "JOIN content_performance AS cp ON cp.brand_id = ub.brand_id "
-                "WHERE ub.user_id = %s AND cp.`内容ID` = %s LIMIT 1",
-                (user.id, content_id),
+                "SELECT 1 FROM content_performance "
+                "WHERE brand_id = %s AND `内容ID` = %s LIMIT 1",
+                (brand["id"], content_id),
             )
             if not allowed:
                 raise HTTPException(status_code=403, detail="当前账户无权查看此品牌内容")
@@ -616,19 +622,8 @@ def create_app(
 
     def sheet_database_brand(request: Request) -> tuple[int, str]:
         user = require_operator(request)
-        if not mysql_database.configured:
-            raise HTTPException(status_code=503, detail="请先配置 MySQL 连接")
-        try:
-            binding = mysql_database.execute(
-                "SELECT b.id, b.name FROM user_brand_bindings AS ub "
-                "JOIN brands AS b ON b.id = ub.brand_id WHERE ub.user_id = %s",
-                (user.id,),
-            )
-        except MySQLDemoError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        if not binding:
-            raise HTTPException(status_code=403, detail="当前账户尚未由管理员绑定数据品牌")
-        return int(binding[0][0]), str(binding[0][1])
+        brand = resolve_data_brand(mysql_database, user)
+        return brand["id"], brand["name"]
 
     @app.get("/api/sheet-fill/database-sources")
     def sheet_database_sources(request: Request, _: UserWorkspace = Depends(operator_workspace)) -> dict:
@@ -1179,17 +1174,19 @@ def create_app(
 
     @app.get("/api/dam/status")
     async def dam_status(request: Request, _: UserWorkspace = Depends(current_workspace)) -> dict:
-        """Return the current user's in-memory DAM session status."""
+        """Validate the session override or the built-in DAM connection."""
         client = dam_client(request)
         if not client.settings.configured:
             return {"configured": False, "bindings": [], "binding": None}
         try:
             bindings = await client.bindings()
-            binding = next((item for item in bindings if (
+            matched = [item for item in bindings if (
                 item.get("tenantCode") == client.settings.tenant
                 and item.get("catalogCode") == client.settings.catalog
-            )), None)
-            return {"configured": True, "bindings": bindings, "binding": binding}
+            )]
+            if len(matched) != 1:
+                raise HTTPException(status_code=403, detail="Tenant/Catalog 不在该 DAM Key 的授权绑定中")
+            return {"configured": True, "bindings": bindings, "binding": matched[0]}
         except DamApiError as exc:
             raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
@@ -2081,6 +2078,7 @@ def create_app(
         )
 
     app.include_router(create_brand_data_router(mysql_database, auth_service))
+    app.include_router(create_dashboard_memory_router(lambda user: resolve_data_brand(mysql_database, user), current_workspace))
     app.include_router(
         create_auth_router(
             auth_service,

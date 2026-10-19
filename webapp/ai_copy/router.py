@@ -20,13 +20,22 @@ from io import BytesIO
 from urllib.parse import quote
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from openpyxl import Workbook, load_workbook
 
 from webapp.ai_copy.contracts import (
     FESTIVAL_SUGGESTIONS,
     GenerateCopyRequest,
     GenerateCopyResponse,
+    CopyEditRequest,
+    CopyBrandCreateRequest,
+    CopyBrandRequest,
+    CopyAdoptRequest,
+    CopyRewriteRequest,
+    CopyBatchRewriteRequest,
+    CopyImportRequest,
+    CopyPreferenceRequest,
+    CopySampleRequest,
     ProductReference,
     ProductReferencesRequest,
     SCENE_LABELS,
@@ -35,6 +44,8 @@ from webapp.ai_copy.contracts import (
 )
 from webapp.ai_copy.errors import AiCopyError
 from webapp.ai_copy.service import AiCopyService
+from webapp.ai_copy.history import BrandCopyHistory, CopyBrandScope, CopyHistoryConflict, CopyBrandDuplicate
+from webapp.ai_copy.learning import CopyLearningEngine
 from webapp.llm_adapter.errors import LLMAdapterError
 
 
@@ -62,6 +73,9 @@ def _cell_text(value) -> str:
 
 def create_ai_copy_router(
     service: AiCopyService | Callable[[Request], AiCopyService],
+    *,
+    history: BrandCopyHistory | None = None,
+    actor_for_request: Callable[[Request], tuple[str, bool]] | None = None,
 ) -> APIRouter:
     """创建 AI 文案 APIRouter。
 
@@ -72,6 +86,150 @@ def create_ai_copy_router(
 
     def resolve(request: Request) -> AiCopyService:
         return service(request) if callable(service) else service
+
+    def actor(request):
+        if history is None or actor_for_request is None:
+            raise HTTPException(status_code=503, detail="品牌文案存储尚未配置")
+        return actor_for_request(request)
+
+    def scope(request: Request, expected_brand_id: str | None = None) -> CopyBrandScope:
+        actor_id, admin = actor(request)
+        header_id = request.headers.get("x-copy-brand")
+        if expected_brand_id and header_id and expected_brand_id != header_id:
+            raise HTTPException(status_code=409, detail="请求品牌不一致，请重新选择")
+        brand_id = expected_brand_id or header_id
+        if not brand_id:
+            raise HTTPException(status_code=422, detail="请先选择文案品牌")
+        return history_action(lambda: history.scope(actor_id, brand_id, admin))
+
+    def history_action(action):
+        try:
+            return action()
+        except CopyBrandDuplicate as exc:
+            return JSONResponse(status_code=409, content={"detail": str(exc), "existing_brand": exc.brand})
+        except CopyHistoryConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @router.get("/brands")
+    def get_brands(request: Request):
+        actor_id, admin = actor(request)
+        return {"brands": history.brands(actor_id, admin)}
+
+    @router.post("/brands", status_code=201)
+    def create_brand(payload: CopyBrandCreateRequest, request: Request):
+        actor_id, _ = actor(request)
+        return history_action(lambda: history.save_brand(actor_id, payload.name))
+
+    @router.patch("/brands/{brand_id}")
+    def update_brand(brand_id: str, payload: CopyBrandRequest, request: Request):
+        actor_id, admin = actor(request)
+        if not admin:
+            raise HTTPException(status_code=403, detail="仅管理员可以重命名或停用文案品牌")
+        return history_action(lambda: history.save_brand(actor_id, payload.name,
+                              brand_id=brand_id, version=payload.version, enabled=payload.enabled))
+
+    @router.get("/profile")
+    def get_profile(request: Request):
+        selected = scope(request)
+        return {**history.profile(selected.brand_id), "brand_name": selected.brand_name}
+
+    @router.get("/history")
+    def get_history(request: Request):
+        selected = scope(request)
+        return {"brand_id": selected.brand_id, "records": history.history(selected.brand_id)}
+
+    @router.get("/history/{generation_id}")
+    def get_history_detail(generation_id: str, request: Request):
+        selected = scope(request)
+        return history_action(lambda: history.detail(selected.brand_id, generation_id))
+
+    @router.patch("/history/{generation_id}")
+    def edit_history(generation_id: str, payload: CopyEditRequest, request: Request):
+        selected = scope(request, payload.expected_brand_id)
+        return history_action(lambda: history.edit(selected, generation_id, payload.field, payload.index, payload.text, payload.version))
+
+    @router.post("/history/{generation_id}/rewrite")
+    async def rewrite(generation_id: str, payload: CopyRewriteRequest, request: Request):
+        selected = scope(request, payload.expected_brand_id)
+        cached = history_action(lambda: history.feedback_result(selected, generation_id, payload))
+        if cached:
+            return cached
+        record = history_action(lambda: history.detail(selected.brand_id, generation_id))
+        profile = history.profile(selected.brand_id, record["brief"])
+        context = history.generation_context(profile)
+        try:
+            revised = await asyncio.to_thread(CopyLearningEngine(resolve(request).chat_provider).revise, record, payload, context)
+        except (AiCopyError, LLMAdapterError) as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        scope(request, selected.brand_id)
+        revised["profile_version"] = profile["version"]
+        return history_action(lambda: history.rewrite(selected, generation_id, payload, revised))
+
+    @router.post("/history/{generation_id}/rewrite-batch")
+    async def rewrite_batch(generation_id: str, payload: CopyBatchRewriteRequest, request: Request):
+        selected = scope(request, payload.expected_brand_id)
+        cached = history_action(lambda: history.batch_feedback_result(selected, generation_id, payload))
+        if cached:
+            return cached
+        record = history_action(lambda: history.detail(selected.brand_id, generation_id))
+        profile = history.profile(selected.brand_id, record["brief"])
+        try:
+            revised = await asyncio.to_thread(CopyLearningEngine(resolve(request).chat_provider).revise_batch,
+                                              record, payload, history.generation_context(profile))
+        except (AiCopyError, LLMAdapterError) as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        scope(request, selected.brand_id)
+        revised["profile_version"] = profile["version"]
+        return history_action(lambda: history.rewrite_batch(selected, generation_id, payload, revised))
+
+    @router.post("/history/{generation_id}/imports")
+    def record_import(generation_id: str, payload: CopyImportRequest, request: Request):
+        selected = scope(request, payload.expected_brand_id)
+        return history_action(lambda: history.record_import(selected, generation_id, payload))
+
+    async def analyze(selected, adoption_id, request):
+        adoption, claimed = history_action(lambda: history.claim_analysis(selected, adoption_id))
+        if not claimed:
+            return adoption
+        try:
+            candidates = await asyncio.to_thread(CopyLearningEngine(resolve(request).chat_provider).extract, adoption)
+        except (AiCopyError, LLMAdapterError):
+            scope(request, selected.brand_id)
+            return history_action(lambda: history.analysis_result(selected, adoption_id, [], failed=True, token=adoption["analysis_token"]))
+        scope(request, selected.brand_id)
+        return history_action(lambda: history.analysis_result(selected, adoption_id, candidates, token=adoption["analysis_token"]))
+
+    @router.post("/history/{generation_id}/adopt")
+    def adopt(generation_id: str, payload: CopyAdoptRequest, request: Request):
+        selected = scope(request, payload.expected_brand_id)
+        # Adoption is durable before any model analysis; no network call can undo it.
+        return history_action(lambda: history.adopt(selected, generation_id, payload.version, payload.title_index, payload.body_index))
+
+    @router.post("/adoptions/{adoption_id}/analyze")
+    async def analyze_adoption(adoption_id: str, request: Request):
+        return await analyze(scope(request), adoption_id, request)
+
+    @router.patch("/adoptions/{adoption_id}")
+    def update_sample(adoption_id: str, payload: CopySampleRequest, request: Request):
+        selected = scope(request, payload.expected_brand_id)
+        history_action(lambda: history.sample_enabled(selected, adoption_id, payload.enabled, payload.version))
+        return history.profile(selected.brand_id)
+
+    @router.patch("/preferences/{preference_id}")
+    def update_preference(preference_id: str, payload: CopyPreferenceRequest, request: Request):
+        selected = scope(request, payload.expected_brand_id)
+        history_action(lambda: history.preference(selected, preference_id, payload.status, payload.version, payload.text, payload.scope_mode))
+        return history.profile(selected.brand_id)
 
     @router.get("/options")
     def get_options(request: Request = None) -> dict:
@@ -181,6 +339,15 @@ def create_ai_copy_router(
     ) -> GenerateCopyResponse:
         """生成文案：匹配卖点 → 读取商品 → LLM 生成 → 校验。"""
         try:
+            selected = scope(request, payload.expected_brand_id) if history is not None else None
+            profile = await asyncio.to_thread(history.profile, selected.brand_id, payload) if selected else None
+            if selected:
+                response = await asyncio.to_thread(
+                    resolve(request).generate, payload, brand_context=history.generation_context(profile)
+                )
+                scope(request, selected.brand_id)  # Rebinding while the model runs must not cross brands.
+                saved = await asyncio.to_thread(history.save_generation, selected, payload, response, profile["version"])
+                return GenerateCopyResponse.model_validate(saved)
             return await asyncio.to_thread(resolve(request).generate, payload)
         except (AiCopyError, LLMAdapterError) as exc:
             raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc

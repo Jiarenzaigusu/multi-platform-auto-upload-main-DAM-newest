@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 from enum import Enum
+from typing import Literal
 
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -178,6 +179,8 @@ class GenerateCopyRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    expected_brand_id: str | None = Field(default=None, min_length=1, max_length=64)  # 仅核对页面品牌，不授予品牌访问权
+
     selling_point_input_mode: SellingPointInputMode = SellingPointInputMode.EXCEL
     selling_point_catalog_id: str | None = Field(default=None, max_length=64)  # Excel 卖点目录 ID
     product_identifiers: list[str] = Field(default_factory=list, max_length=20)  # 商品 ID/货号列表
@@ -195,13 +198,13 @@ class GenerateCopyRequest(BaseModel):
         default=None,
         ge=2,
         le=100,
-        description="生成标题的目标汉字数（每条结果必须正好等于目标值，标点数字不计）",
+        description="生成标题的参考汉字数（允许合理浮动，标点数字不计）",
     )
     body_max_chars: int | None = Field(       # 正文目标字符数（字段名为兼容旧客户端保留）
         default=None,
         ge=10,
         le=1000,
-        description="生成正文的目标汉字数（每条结果必须正好等于目标值，标点数字不计）",
+        description="生成正文的参考汉字数（允许合理浮动，标点数字不计）",
     )
     title_count: int = Field(
         default=1,
@@ -307,7 +310,7 @@ class GenerateCopyRequest(BaseModel):
 class GeneratedCopyDraft(BaseModel):
     """LLM 生成的文案草稿（用于解析 LLM 返回的 JSON）。
 
-    固定上下限用于限制单次模型响应的体积；标题与正文目标汉字数由服务层另行严格校验。
+    固定上下限用于限制单次模型响应的体积；参考汉字数只用于引导生成，不要求严格相等。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -359,3 +362,117 @@ class GenerateCopyResponse(BaseModel):
     body_max_chars: int                     # 正文目标字符数（兼容旧字段名）
     title_count: int                        # 标题候选数量
     body_count: int                         # 正文候选数量
+    generation_id: str | None = None
+    brand_id: str | None = None
+    brand_name: str = ""
+    owner_id: str | None = None
+    revision: int = 0
+    profile_version: int = 0
+    brief: dict = Field(default_factory=dict)
+    candidate_briefs: dict = Field(default_factory=dict)
+
+
+class CopyEditRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    expected_brand_id: str = Field(min_length=1, max_length=64)
+    version: int = Field(ge=0)
+    field: Literal["title", "body"]
+    index: int = Field(ge=0, le=9)
+    text: str = Field(min_length=1, max_length=2000)
+
+
+class CopyBrandCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    name: str = Field(min_length=1, max_length=80)
+
+
+class CopyBrandRequest(CopyBrandCreateRequest):
+    enabled: bool = True
+    version: int = Field(default=0, ge=0)
+
+
+class CopyAdoptRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_brand_id: str = Field(min_length=1, max_length=64)
+    version: int = Field(ge=0)
+    title_index: int = Field(ge=0, le=9)
+    body_index: int = Field(ge=0, le=9)
+
+
+class CopyRewriteRequest(CopyAdoptRequest):
+    message: str = Field(min_length=1, max_length=2000)
+    target: Literal["title", "body", "both"] = "both"
+    request_id: str = Field(min_length=1, max_length=64)
+
+    @field_validator("message")
+    @classmethod
+    def nonempty_message(cls, value):
+        if not value.strip():
+            raise ValueError("请填写修改要求")
+        return value.strip()
+
+
+class CopyBatchRewriteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    expected_brand_id: str = Field(min_length=1, max_length=64)
+    version: int = Field(ge=0)
+    message: str = Field(min_length=1, max_length=2000)
+    target: Literal["title", "body", "both"] = "both"
+    request_id: str = Field(min_length=1, max_length=64)
+
+
+class CopyBatchCandidate(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    index: int = Field(ge=0, le=9)
+    text: str = Field(min_length=1, max_length=2000)
+    reference_chars: int = Field(ge=2, le=1000)
+
+
+class CopyBatchRewriteResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    titles: list[CopyBatchCandidate] = Field(max_length=10)
+    bodies: list[CopyBatchCandidate] = Field(max_length=10)
+
+
+class CopyImportRequest(CopyAdoptRequest):
+    platform: Literal["tmall", "jd", "xiaohongshu", "douyin"]
+    content_type: Literal["video", "article"]
+    title: str = Field(min_length=1, max_length=200)
+    body: str = Field(default="", max_length=2000)
+
+
+class CopyPreferenceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_brand_id: str = Field(min_length=1, max_length=64)
+    version: int = Field(ge=0)
+    status: Literal["active", "disabled", "rejected"]
+    text: str | None = Field(default=None, min_length=1, max_length=300)
+    scope_mode: Literal["source", "brand"] | None = None
+
+
+class CopySampleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_brand_id: str = Field(min_length=1, max_length=64)
+    version: int = Field(ge=0)
+    enabled: bool
+
+
+class CopyPreferenceCandidate(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    category: Literal["tone", "sentence", "wording", "structure", "other"]
+    scope: Literal["title", "body", "both"]
+    text: str = Field(min_length=1, max_length=300)
+    source_quote: str = Field(default="", max_length=2000)
+
+
+class CopyPreferenceCandidates(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    candidates: list[CopyPreferenceCandidate] = Field(max_length=3)
+
+
+class CopyRewriteResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    title: str = Field(min_length=1, max_length=200)
+    body: str = Field(min_length=1, max_length=2000)
+    title_max_chars: int = Field(ge=2, le=100)
+    body_max_chars: int = Field(ge=10, le=1000)

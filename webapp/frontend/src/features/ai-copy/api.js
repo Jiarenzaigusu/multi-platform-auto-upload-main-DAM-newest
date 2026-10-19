@@ -18,9 +18,16 @@ function errorMessage(body) {
   return 'AI 文案服务请求失败，请稍后重试'
 }
 
-export function createAiCopyApi() {
+export function createAiCopyApi(brandId = '') {
   const path = (suffix) => `/api/ai-copy${suffix}`
-  const request = (suffix, options = {}) => apiRequest(path(suffix), options)
+  const scopeHeaders = () => {
+    const id = typeof brandId === 'function' ? brandId() : brandId
+    return id ? { 'X-Copy-Brand': id } : {}
+  }
+  const request = (suffix, options = {}) => apiRequest(path(suffix), {
+    ...options, headers: { ...scopeHeaders(), ...options.headers },
+  })
+  const json = (method, payload) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
 
   return {
     options: () => request('/options'),
@@ -43,6 +50,21 @@ export function createAiCopyApi() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }),
+    profile: () => request('/profile'),
+    history: () => request('/history'),
+    historyDetail: (id) => request(`/history/${encodeURIComponent(id)}`),
+    saveEdit: (id, payload) => request(`/history/${encodeURIComponent(id)}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    }),
+    brands: () => request('/brands'),
+    saveBrand: (id, payload) => request(id ? `/brands/${encodeURIComponent(id)}` : '/brands', json(id ? 'PATCH' : 'POST', payload)),
+    rewrite: (id, payload) => request(`/history/${encodeURIComponent(id)}/rewrite`, json('POST', payload)),
+    rewriteBatch: (id, payload) => request(`/history/${encodeURIComponent(id)}/rewrite-batch`, json('POST', payload)),
+    recordImport: (id, payload) => request(`/history/${encodeURIComponent(id)}/imports`, json('POST', payload)),
+    adopt: (id, payload) => request(`/history/${encodeURIComponent(id)}/adopt`, json('POST', payload)),
+    analyze: (id) => request(`/adoptions/${encodeURIComponent(id)}/analyze`, { method: 'POST' }),
+    preference: (id, payload) => request(`/preferences/${encodeURIComponent(id)}`, json('PATCH', payload)),
+    sample: (id, payload) => request(`/adoptions/${encodeURIComponent(id)}`, json('PATCH', payload)),
     /**
      * 将生成的文案（标题+正文）导入批量发布 Excel 表格。
      *
@@ -64,6 +86,7 @@ export function createAiCopyApi() {
       // 返回原始 response 以便前端读取 blob 下载文件
       return apiFetch(path('/import-to-batch-excel'), {
         method: 'POST',
+        headers: scopeHeaders(),
         body: form,
       }).then((response) => {
         if (!response.ok) {

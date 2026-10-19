@@ -1763,56 +1763,7 @@ svg {
   font-size: 20px;
 }
 
-/* AI 文案工坊：单独扩大工作区，并把分界线明显左移，让生成结果区更宽。 */
-.workspace-ai-copy .ai-copy-layout {
-  grid-template-columns: minmax(0, 3fr) minmax(420px, 2fr) !important;
-  gap: 16px !important;
-}
-
-.workspace-ai-copy .ai-copy-composer {
-  justify-self: stretch;
-  max-width: none;
-  padding: 18px 18px 20px !important;
-  row-gap: 12px;
-}
-
-.workspace-ai-copy .ai-copy-results {
-  width: 100%;
-  min-width: 0;
-  padding: 20px 22px !important;
-}
-
-.workspace-ai-copy .ai-copy-catalog-upload,
-.workspace-ai-copy .ai-copy-catalog-status,
-.workspace-ai-copy .ai-copy-selling-point-preview,
-.workspace-ai-copy .ai-copy-product-panel {
-  max-width: none !important;
-}
-
-.workspace-ai-copy .ai-copy-limit-row {
-  grid-template-columns: 96px minmax(0, 1fr) 108px !important;
-  gap: 8px !important;
-}
-
-.workspace-ai-copy .ai-copy-limit-custom {
-  width: 108px !important;
-}
-
-.workspace-ai-copy .ai-copy-output {
-  padding: 13px 14px !important;
-}
-
-.workspace-ai-copy .ai-copy-title-output h3 {
-  font-size: 16px !important;
-  line-height: 1.32;
-}
-
+/* Copy workbench layout is owned by features/ai-copy/ai-copy-workspace.css. */
 @media (max-width: 1120px) {
-  .workspace.workspace-ai-copy {
-    padding: 22px 14px 36px;
-  }
-
-  .workspace-ai-copy .ai-copy-layout {
-    grid-template-columns: 1fr !important;
-  }
+  .workspace.workspace-ai-copy { padding: 22px 14px 36px; }
 }

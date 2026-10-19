@@ -33,6 +33,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from utils.config import BASE_DIR
 from utils.log import logger
 from webapp.ai_copy import create_ai_copy_router
+from webapp.ai_copy.history import BrandCopyHistory
 from webapp.api.agent import create_agent_router
 from webapp.api.agent_batch import (
     parse_remote_douyin_article_batch_workbook,
@@ -354,6 +355,8 @@ def create_app(
     app.state.workspace_registry = workspace_registry
     app.state.auth_service = auth_service
     app.state.mysql_database = mysql_database
+    copy_history = BrandCopyHistory(data_paths.system / "brand-copy.sqlite3")
+    app.state.copy_history = copy_history
     dam_sessions: dict[str, DamSettings] = {}
     dam_sessions_lock = Lock()
     trusted_browser_origins = set(settings.allowed_origins)
@@ -414,6 +417,10 @@ def create_app(
     def operator_workspace(request: Request) -> UserWorkspace:
         user = require_operator(request)
         return workspace_registry.get(user.id)
+
+    def copy_actor(request: Request) -> tuple[str, bool]:
+        user = require_operator(request)
+        return user.id, user.role == "admin"
 
     def dam_client(request: Request) -> DamOpenApiClient:
         session = require_session(request)
@@ -2094,7 +2101,9 @@ def create_app(
     )
     app.include_router(
         create_ai_copy_router(
-            lambda request: operator_workspace(request).ai_copy_service
+            lambda request: operator_workspace(request).ai_copy_service,
+            history=copy_history,
+            actor_for_request=copy_actor,
         )
     )
     app.include_router(
@@ -2113,7 +2122,10 @@ def create_app(
 
         @app.get("/")
         def frontend_index() -> FileResponse:
-            return FileResponse(settings.frontend_dist_dir / "index.html")
+            return FileResponse(
+                settings.frontend_dist_dir / "index.html",
+                headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+            )
     else:
 
         @app.get("/")

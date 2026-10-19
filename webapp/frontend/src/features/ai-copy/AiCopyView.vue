@@ -4,18 +4,20 @@
   功能：
   - 通过 Excel 匹配商品核心卖点，或直接输入核心卖点（二选一）
   - 可选直接输入文案参考，与核心卖点共同参与生成
-  - 调用 LLM 生成标题与正文（含风格/场景/节日/目标字数）
+  - 调用 LLM 生成标题与正文（含风格/场景/节日/参考字数）
   - 复制结果或导入发布工作台
 
-  目标字数：输入过程不夹紧、失焦时归位到默认值或合法范围。
+  参考字数：输入过程不夹紧、失焦时归位到默认值或合法范围，生成结果允许合理浮动。
   生成前必须所有商品 ID 都能在卖点表中匹配。
 -->
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 
 import { createAiCopyApi } from './api.js'
 import AiCopyDropdown from './AiCopyDropdown.vue'
 import WorkbenchImportDialog from './WorkbenchImportDialog.vue'
+import BrandCopyPanel from './BrandCopyPanel.vue'
+import BrandProfileDrawer from './BrandProfileDrawer.vue'
 import {
   clearAiCopyDraft, clearSellingPointWorkbook, loadSellingPointWorkbook, readAiCopyDraft,
   saveAiCopyDraft, saveSellingPointWorkbook,
@@ -25,10 +27,14 @@ const props = defineProps({
   apiBase: { type: String, default: '' },
   active: { type: Boolean, default: false },
   userId: { type: String, default: '' },
+  brandId: { type: String, default: '' },
+  brandName: { type: String, default: '' },
+  canModerate: { type: Boolean, default: false },
+  profileOpen: { type: Boolean, default: false },
 })
-const emit = defineEmits(['import-to-workbench'])
+const emit = defineEmits(['import-to-workbench', 'update:profileOpen'])
 
-const api = createAiCopyApi(props.apiBase)
+const api = createAiCopyApi(() => props.brandId)
 const options = ref({ styles: [], scenes: [], festivals: [], llm: { ready: false, model: '', provider: '' } })
 const titleLimitPresets = [10, 15]
 const bodyLimitPresets = [25, 50, 100, 200]
@@ -66,6 +72,16 @@ const loadingOptions = ref(true)
 const uploadingSellingPoints = ref(false)
 const readingProduct = ref(false)
 const generating = ref(false)
+const savingEdit = ref(false)
+const rewriting = ref(false)
+const feedbackText = ref('')
+const feedbackTarget = ref('both')
+const settingsOpen = ref(false)
+const resultsPanel = ref(null)
+const busy = computed(() => generating.value || savingEdit.value || rewriting.value || importingToBatchExcel.value || restoringDraft.value)
+const memoryRefresh = ref(0)
+let disposed = false
+let pendingRewrite = null
 const sellingPointCatalog = ref(null)
 const productReferences = ref([])
 const result = ref(null)
@@ -266,22 +282,6 @@ function resetEditState() {
   bodyEditValue.value = ''
 }
 
-function updateResultCandidate(kind, index, value) {
-  if (!result.value) return false
-  const isTitle = kind === 'title'
-  const values = (isTitle ? resultTitles.value : resultBodies.value).slice()
-  if (!values[index]) return false
-  values[index] = value
-  if (isTitle) {
-    result.value.titles = values
-    result.value.title = values[0] || ''
-  } else {
-    result.value.bodies = values
-    result.value.body = values[0] || ''
-  }
-  return true
-}
-
 function beginEditTitle(index) {
   selectedTitleIndex.value = index
   editingTitleIndex.value = index
@@ -304,35 +304,56 @@ function cancelEditBody() {
   bodyEditValue.value = ''
 }
 
-function saveEditedTitle(index) {
-  const value = titleEditValue.value.trim()
+async function saveEditedCandidate(kind, index, rawValue) {
+  const value = rawValue.trim()
   if (!value) {
-    error.value = '标题不能为空'
+    error.value = '标题或文案不能为空'
     return false
   }
-  if (!updateResultCandidate('title', index, value)) return false
+  if (busy.value) return false
+  if (!result.value?.generation_id || result.value.brand_id !== props.brandId) {
+    error.value = '这条草稿尚未关联当前品牌历史，请重新生成后保存修改'
+    return false
+  }
+  const generationId = result.value.generation_id
+  savingEdit.value = true
+  try {
+    const saved = await api.saveEdit(generationId, {
+      expected_brand_id: props.brandId, version: result.value.revision,
+      field: kind, index, text: value,
+    })
+    if (disposed || result.value?.generation_id !== generationId) return false
+    Object.assign(result.value, saved)
+    memoryRefresh.value += 1
+    error.value = ''
+    showSuccess('修改已保存；导入发布台后会自动加入品牌选用样本')
+    return true
+  } catch (requestError) {
+    error.value = requestError.message
+    return false
+  } finally {
+    savingEdit.value = false
+  }
+}
+
+async function saveEditedTitle(index) {
+  if (!await saveEditedCandidate('title', index, titleEditValue.value)) return false
   selectedTitleIndex.value = index
   cancelEditTitle()
-  error.value = ''
   return true
 }
 
-function saveEditedBody(index) {
-  const value = bodyEditValue.value.trim()
-  if (!value) {
-    error.value = '文案不能为空'
-    return false
-  }
-  if (!updateResultCandidate('body', index, value)) return false
+async function saveEditedBody(index) {
+  if (!await saveEditedCandidate('body', index, bodyEditValue.value)) return false
   selectedBodyIndex.value = index
   cancelEditBody()
-  error.value = ''
   return true
 }
 
-function saveActiveEdits() {
-  if (editingTitleIndex.value !== null && !saveEditedTitle(editingTitleIndex.value)) return false
-  if (editingBodyIndex.value !== null && !saveEditedBody(editingBodyIndex.value)) return false
+async function saveActiveEdits() {
+  if (busy.value) return false
+  if (editingTitleIndex.value !== null && !await saveEditedTitle(editingTitleIndex.value)) return false
+  if (editingBodyIndex.value !== null && !await saveEditedBody(editingBodyIndex.value)) return false
   return true
 }
 
@@ -350,6 +371,8 @@ const canGenerate = computed(() => (
   && !uploadingSellingPoints.value
   && !readingProduct.value
   && !generating.value
+  && !busy.value
+  && Boolean(props.brandId)
   && !loadingOptions.value
 ))
 
@@ -375,7 +398,7 @@ function showSuccess(message) {
 }
 
 function clearAll() {
-  if (generating.value || readingProduct.value || uploadingSellingPoints.value) return
+  if (busy.value || readingProduct.value || uploadingSellingPoints.value) return
   const catalogId = sellingPointCatalog.value?.catalog_id
   if (catalogId) api.deleteSellingPointCatalog(catalogId).catch(() => {})
   Object.assign(form, createDefaultForm())
@@ -388,8 +411,8 @@ function clearAll() {
   window.clearTimeout(copyTimer)
   window.clearTimeout(successTimer)
   if (sellingPointFileInput.value) sellingPointFileInput.value.value = ''
-  clearAiCopyDraft(props.userId)
-  clearSellingPointWorkbook(props.userId).catch(() => {})
+  clearAiCopyDraft(props.userId, props.brandId)
+  clearSellingPointWorkbook(props.userId, props.brandId).catch(() => {})
 }
 
 function chooseSellingPointFile() {
@@ -402,13 +425,14 @@ async function uploadSellingPointFile(file, { persist = true, preserveResult = f
   uploadingSellingPoints.value = true
   try {
     const uploaded = await api.uploadSellingPoints(file)
+    if (disposed) return
     const previousCatalogId = sellingPointCatalog.value?.catalog_id
     sellingPointCatalog.value = uploaded
     if (!preserveResult) {
       result.value = null
       resetEditState()
     }
-    if (persist) await saveSellingPointWorkbook(file, props.userId)
+    if (persist) await saveSellingPointWorkbook(file, props.userId, props.brandId)
     if (previousCatalogId && previousCatalogId !== uploaded.catalog_id) {
       api.deleteSellingPointCatalog(previousCatalogId).catch(() => {})
     }
@@ -428,14 +452,14 @@ async function uploadSellingPointCatalog(event) {
 }
 
 function clearSellingPointCatalog() {
-  if (uploadingSellingPoints.value || generating.value) return
+  if (uploadingSellingPoints.value || busy.value) return
   const catalogId = sellingPointCatalog.value?.catalog_id
   if (catalogId) api.deleteSellingPointCatalog(catalogId).catch(() => {})
   sellingPointCatalog.value = null
   result.value = null
   resetEditState()
   error.value = ''
-  clearSellingPointWorkbook(props.userId).catch(() => {})
+  clearSellingPointWorkbook(props.userId, props.brandId).catch(() => {})
   if (sellingPointFileInput.value) sellingPointFileInput.value.value = ''
 }
 
@@ -451,7 +475,13 @@ async function loadOptions() {
 }
 
 async function generateCopy() {
+  if (busy.value) return
+  if (!await saveActiveEdits()) return
   clearFeedback()
+  if (!props.brandId) {
+    error.value = '请先选择文案品牌'
+    return
+  }
   if (isManualSellingPointMode.value) {
     if (!manualSellingPoint.value) {
       error.value = '请填写商品核心卖点'
@@ -476,11 +506,11 @@ async function generateCopy() {
     return
   }
   if (!titleLimitValid.value) {
-    error.value = `标题目标字数必须在 ${titleMin}-${titleMax} 之间`
+    error.value = `标题参考字数必须在 ${titleMin}-${titleMax} 之间`
     return
   }
   if (!bodyLimitValid.value) {
-    error.value = `文案目标字数必须在 ${bodyMin}-${bodyMax} 之间`
+    error.value = `文案参考字数必须在 ${bodyMin}-${bodyMax} 之间`
     return
   }
   if (!titleCountValid.value) {
@@ -491,8 +521,6 @@ async function generateCopy() {
     error.value = `文案生成个数必须在 ${candidateCountMin}-${candidateCountMax} 之间`
     return
   }
-  result.value = null
-  resetEditState()
   generating.value = true
   const titleLimit = form.titleMaxChars === '' || form.titleMaxChars === null
     ? null
@@ -508,6 +536,7 @@ async function generateCopy() {
     : Number(form.bodyCount)
   try {
     const response = await api.generate({
+      expected_brand_id: props.brandId,
       selling_point_input_mode: form.sellingPointInputMode,
       selling_point_catalog_id: isManualSellingPointMode.value ? null : sellingPointCatalog.value.catalog_id,
       product_identifiers: isManualSellingPointMode.value ? [] : productIdentifiers.value,
@@ -524,11 +553,17 @@ async function generateCopy() {
       title_count: titleCount,
       body_count: bodyCount,
     })
+    if (disposed) return
+    if (response.brand_id !== props.brandId) throw new Error('文案品牌不一致，请重新选择')
     result.value = response
+    memoryRefresh.value += 1
     selectedTitleIndex.value = 0
     selectedBodyIndex.value = 0
     resetEditState()
     productReferences.value = response.product_references || []
+    feedbackText.value = ''
+    settingsOpen.value = false
+    await revealResults()
   } catch (requestError) {
     error.value = requestError.message
   } finally {
@@ -571,32 +606,36 @@ async function copyText(field, value) {
   copyTimer = window.setTimeout(() => { copiedField.value = '' }, 1800)
 }
 
-function importToWorkbench() {
-  if (!saveActiveEdits()) return
+async function importToWorkbench() {
+  if (!await saveActiveEdits()) return
   if (!result.value || !selectedTitle.value || !selectedBody.value) return
   workbenchImportOpen.value = true
 }
 
-function confirmWorkbenchImport(target) {
-  if (!saveActiveEdits()) return
+async function confirmWorkbenchImport(target) {
+  if (!await saveActiveEdits()) return
   if (!result.value || !selectedTitle.value || !selectedBody.value) return
   emit('import-to-workbench', {
     title: selectedTitle.value,
     body: selectedBody.value,
     platform: target.platform,
     contentType: target.contentType,
+    origin: {
+      generation_id: result.value.generation_id, expected_brand_id: props.brandId,
+      version: result.value.revision, title_index: selectedTitleIndex.value, body_index: selectedBodyIndex.value,
+    },
   })
   workbenchImportOpen.value = false
 }
 
-function chooseBatchExcelFile() {
-  if (!saveActiveEdits()) return
+async function chooseBatchExcelFile() {
+  if (!await saveActiveEdits()) return
   if (!result.value) {
     error.value = '请先生成文案，再导入到批量发布 Excel'
     return
   }
-  if (isManualSellingPointMode.value) {
-    error.value = '直接输入卖点模式没有商品 ID，无法按商品 ID 导入批量发布表格'
+  if (!outputProductIdentifiers.value.length) {
+    error.value = '当前文案没有商品 ID，无法按商品 ID 导入批量发布表格'
     return
   }
   if (importingToBatchExcel.value) return
@@ -636,12 +675,13 @@ async function openAndImportBatchExcel() {
     error.value = '无法获取文件读写权限，已取消导入'
     return
   }
-  await importToBatchExcelByHandle(fileHandle)
+  if (!disposed) await importToBatchExcelByHandle(fileHandle)
 }
 
 async function importToBatchExcelByHandle(fileHandle) {
-  if (!saveActiveEdits()) return
+  if (!await saveActiveEdits()) return
   const file = await fileHandle.getFile()
+  if (disposed) return
   if (!file.name.toLowerCase().endsWith('.xlsx')) {
     error.value = '请选择 .xlsx 格式的批量发布表格'
     return
@@ -654,8 +694,9 @@ async function importToBatchExcelByHandle(fileHandle) {
       file,
       selectedTitle.value,
       selectedBody.value,
-      productIdentifiers.value.join(','),
+      outputProductIdentifiers.value.join(','),
     )
+    if (disposed) return
     const summaryText = importSummaryText(response)
     const writable = await fileHandle.createWritable()
     await writable.write(await response.arrayBuffer())
@@ -679,7 +720,7 @@ function importSummaryText(response) {
 
 // 可选路径：下载独立结果文件，不修改正在打开的原文件。
 async function importToBatchExcel(event) {
-  if (!saveActiveEdits()) {
+  if (!await saveActiveEdits()) {
     event.target.value = ''
     return
   }
@@ -696,8 +737,9 @@ async function importToBatchExcel(event) {
       file,
       selectedTitle.value,
       selectedBody.value,
-      productIdentifiers.value.join(','),
+      outputProductIdentifiers.value.join(','),
     )
+    if (disposed) return
     const summaryText = importSummaryText(response)
     const blob = await response.blob()
     const url = window.URL.createObjectURL(blob)
@@ -718,14 +760,16 @@ async function importToBatchExcel(event) {
 }
 
 function restoreAiCopyDraft() {
-  const draft = readAiCopyDraft(props.userId)
+  const draft = readAiCopyDraft(props.userId, props.brandId)
   if (!draft) return
   if (draft.form && typeof draft.form === 'object') {
     for (const key of Object.keys(createDefaultForm())) {
       if (Object.hasOwn(draft.form, key)) form[key] = draft.form[key]
     }
   }
-  if (draft.result && typeof draft.result === 'object') result.value = draft.result
+  if (draft.result && draft.result.brand_id === props.brandId) result.value = draft.result
+  if (typeof draft.feedbackText === 'string') feedbackText.value = draft.feedbackText
+  if (['title', 'body', 'both'].includes(draft.feedbackTarget)) feedbackTarget.value = draft.feedbackTarget
   if (Array.isArray(draft.productReferences)) productReferences.value = draft.productReferences
   if (Number.isInteger(draft.selectedTitleIndex)) selectedTitleIndex.value = draft.selectedTitleIndex
   if (Number.isInteger(draft.selectedBodyIndex)) selectedBodyIndex.value = draft.selectedBodyIndex
@@ -733,7 +777,7 @@ function restoreAiCopyDraft() {
 
 async function restoreSellingPointWorkbook() {
   try {
-    const file = await loadSellingPointWorkbook(props.userId)
+    const file = await loadSellingPointWorkbook(props.userId, props.brandId)
     if (file) await uploadSellingPointFile(file, { persist: false, preserveResult: true })
   } catch (restoreError) {
     error.value = `恢复本机卖点 Excel 失败：${restoreError.message}`
@@ -741,11 +785,11 @@ async function restoreSellingPointWorkbook() {
 }
 
 function persistAiCopyDraft() {
-  if (restoringDraft.value) return
+  if (restoringDraft.value || disposed) return
   window.clearTimeout(draftSaveTimer)
   draftSaveTimer = window.setTimeout(() => {
-    saveAiCopyDraft({ version: 1, form: { ...form }, result: result.value, productReferences: productReferences.value,
-      selectedTitleIndex: selectedTitleIndex.value, selectedBodyIndex: selectedBodyIndex.value, savedAt: new Date().toISOString() }, props.userId)
+    saveAiCopyDraft({ version: 3, feedbackText: feedbackText.value, feedbackTarget: feedbackTarget.value, form: { ...form }, result: result.value, productReferences: productReferences.value,
+      selectedTitleIndex: selectedTitleIndex.value, selectedBodyIndex: selectedBodyIndex.value, savedAt: new Date().toISOString() }, props.userId, props.brandId)
   }, 180)
 }
 
@@ -753,21 +797,92 @@ onMounted(async () => {
   restoreAiCopyDraft()
   await loadOptions()
   await restoreSellingPointWorkbook()
-  restoringDraft.value = false
+  if (result.value?.generation_id && !disposed) {
+    try { result.value = await api.historyDetail(result.value.generation_id) }
+    catch (exc) { if (!disposed) { result.value = null; error.value = exc.message } }
+  }
+  if (!disposed) restoringDraft.value = false
 })
 watch(() => props.active, (active) => {
   if (active) loadOptions()
 })
-watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], persistAiCopyDraft, { deep: true })
+watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex, feedbackText, feedbackTarget], persistAiCopyDraft, { deep: true })
+onBeforeUnmount(() => {
+  persistAiCopyDraft()
+  window.clearTimeout(draftSaveTimer)
+  // Flush the current brand's draft before a navigation or brand switch.
+  if (!restoringDraft.value) saveAiCopyDraft({
+    version: 3, feedbackText: feedbackText.value, feedbackTarget: feedbackTarget.value, form: { ...form }, result: result.value, productReferences: productReferences.value,
+    selectedTitleIndex: selectedTitleIndex.value, selectedBodyIndex: selectedBodyIndex.value,
+  }, props.userId, props.brandId)
+  disposed = true
+  window.clearTimeout(copyTimer)
+  window.clearTimeout(successTimer)
+})
+
+function candidateTarget(field, index) {
+  return result.value?.candidate_briefs?.[`${field}:${index}`]?.[`${field}_max_chars`]
+    || (field === 'title' ? resultTitleMax.value : resultBodyMax.value)
+}
+const outputProductIdentifiers = computed(() => result.value?.brief?.selling_point_input_mode === 'excel'
+  ? (result.value.brief.product_identifiers || []) : [])
+
+async function rewriteCandidates() {
+  if (busy.value || !feedbackText.value.trim() || !await saveActiveEdits() || !result.value) return
+  const record = result.value
+  const message = feedbackText.value.trim()
+  rewriting.value = true
+  error.value = ''
+  try {
+    const payload = {
+      expected_brand_id: props.brandId, version: record.revision,
+      message, target: feedbackTarget.value,
+    }
+    const signature = JSON.stringify([record.generation_id, payload])
+    if (pendingRewrite?.signature !== signature) pendingRewrite = { signature, requestId: crypto.randomUUID() }
+    const saved = await api.rewriteBatch(record.generation_id, { ...payload, request_id: pendingRewrite.requestId })
+    if (disposed || result.value?.generation_id !== record.generation_id) return
+    result.value = saved
+    pendingRewrite = null
+    feedbackText.value = ''
+    resetEditState()
+    showSuccess('已批量修改候选。请选择标题和正文导入发布台，实际导入的内容会自动加入选用样本。')
+    memoryRefresh.value += 1
+  } catch (exc) { if (!disposed) error.value = exc.message }
+  finally { rewriting.value = false }
+}
+
+async function revealResults() {
+  await nextTick()
+  if (!disposed) resultsPanel.value?.scrollIntoView({
+    behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start',
+  })
+}
+
+async function restoreHistoryRecord(record) {
+  if (busy.value || record.brand_id !== props.brandId || record.owner_id !== props.userId) return
+  if (!await saveActiveEdits() || disposed) return
+  result.value = record
+  selectedTitleIndex.value = 0
+  selectedBodyIndex.value = 0
+  resetEditState()
+  feedbackText.value = ''
+  productReferences.value = record.product_references || []
+  clearFeedback()
+  emit('update:profileOpen', false)
+  showSuccess('已打开历史文案；导入商品使用该记录生成时的商品 ID。')
+  await revealResults()
+}
 </script>
 
 <template>
-  <section class="ai-copy-layout">
+  <section class="ai-copy-layout ai-copy-workspace" :class="{ 'has-results': result }">
     <form class="ai-copy-card ai-copy-composer" @submit.prevent="generateCopy">
+      <fieldset class="ai-copy-controls" :disabled="busy">
       <div class="ai-copy-intro">
         <div>
-          <p>01 / CREATIVE BRIEF</p>
-          <h2>把卖点交给AI</h2>
+          <p>生成准备</p>
+          <h2>商品资料</h2>
         </div>
         <span class="ai-copy-model" :class="{ offline: !options.llm.ready }">
           {{ options.llm.ready ? `${options.llm.provider} · ${options.llm.model}` : 'LLM 待配置' }}
@@ -777,8 +892,7 @@ watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], 
       <p v-if="!loadingOptions && !options.llm.ready" class="ai-copy-warning">
         尚未激活 LLM。页面可正常填写，生成前请前往左侧“LLM 适配器”选择模型并填写 API Key。
       </p>
-      <p v-if="error" class="ai-copy-error" role="alert">{{ error }}</p>
-      <p v-if="success" class="ai-copy-success">{{ success }}</p>
+      <p v-if="error && !result" class="ai-copy-error" role="alert">{{ error }}</p>
 
       <section class="ai-copy-selling-points">
         <div class="ai-copy-selling-point-header">
@@ -879,8 +993,12 @@ watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], 
         </div>
       </section>
 
+      <details class="ai-copy-generation-settings" :open="settingsOpen" @toggle="settingsOpen = $event.target.open">
+        <summary><strong>生成设置</strong><span>{{ form.titleCount || titleCountDefault }} 条标题 · {{ form.bodyCount || bodyCountDefault }} 条正文</span><small>字数、风格、场景与文案参考</small></summary>
+        <div class="ai-copy-settings-content">
       <fieldset class="ai-copy-choice-group ai-copy-limits">
-        <legend><b>目标汉字数</b></legend>
+        <legend><b>参考汉字数</b></legend>
+        <p class="ai-copy-length-help">参考字数允许合理浮动，优先保证表达自然、内容完整。</p>
 
         <div class="ai-copy-limit-row">
           <span class="ai-copy-limit-label"><b>标题字数</b></span>
@@ -891,7 +1009,7 @@ watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], 
               type="button"
               :class="{ active: form.titleMaxChars === preset }"
               @click="pickTitleLimit(preset)"
-            >{{ preset }} 字</button>
+            >约 {{ preset }} 字</button>
           </div>
           <label class="ai-copy-limit-custom">
             <span>自定义</span>
@@ -918,7 +1036,7 @@ watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], 
               type="button"
               :class="{ active: form.bodyMaxChars === preset }"
               @click="pickBodyLimit(preset)"
-            >{{ preset }} 字</button>
+            >约 {{ preset }} 字</button>
           </div>
           <label class="ai-copy-limit-custom">
             <span>自定义</span>
@@ -1083,32 +1201,39 @@ watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], 
         </div>
       </section>
 
+        </div>
+      </details>
       <button class="ai-copy-generate" :disabled="!canGenerate" type="submit">
-        <span>{{ generating ? '正在组织标题与文案…' : '生成标题与文案' }}</span>
+        <span>{{ generating ? '正在生成候选…' : result ? '重新生成候选' : '生成标题与文案' }}</span>
         <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 12h13M14 7l5 5-5 5" /></svg>
       </button>
+      </fieldset>
     </form>
 
-    <aside class="ai-copy-results">
+    <aside ref="resultsPanel" class="ai-copy-results" aria-label="文案候选与AI改稿">
+      <fieldset class="ai-copy-controls" :disabled="busy">
       <div class="ai-copy-result-head">
-        <div><p>02 / GENERATED COPY</p><h2>生成结果</h2></div>
+        <div><p>挑选并导入</p><h2>候选文案</h2></div>
         <div class="ai-copy-result-actions">
-          <span v-if="result" class="ai-copy-ready">READY</span>
+          <span v-if="result" class="ai-copy-ready">{{ resultTitles.length }} 标题 · {{ resultBodies.length }} 正文</span>
           <button
             class="ai-copy-clear"
-            :disabled="generating || readingProduct || uploadingSellingPoints"
+            :disabled="busy || readingProduct || uploadingSellingPoints"
             type="button"
             @click="clearAll"
           >一键清空</button>
         </div>
       </div>
 
+      <p v-if="result && error" class="ai-copy-error" role="alert">{{ error }}</p>
+      <p v-if="result && success" class="ai-copy-success" role="status">{{ success }}</p>
       <div v-if="generating" class="ai-copy-generating" aria-live="polite">
         <span></span><span></span><span></span>
         <p>正在综合原参考、核心卖点与文案参考构思文案</p>
       </div>
 
       <template v-else-if="result">
+        <div class="ai-copy-candidate-lists" role="region" tabindex="0" aria-label="标题与正文候选">
         <section class="ai-copy-output-group">
           <div class="ai-copy-candidate-heading">
             <span>标题候选</span><small>已生成 {{ resultTitles.length }} 条；请选择 1 条用于导入</small>
@@ -1120,17 +1245,17 @@ watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], 
           >
             <div class="ai-copy-output-label">
               <span>标题{{ resultTitles.length > 1 ? ` ${index + 1}` : '' }}</span>
-              <small>{{ countHanCharacters(title) }} 汉字 · 目标 {{ resultTitleMax }} 汉字</small>
+              <small>{{ countHanCharacters(title) }} 汉字 · 参考约 {{ candidateTarget('title', index) }} 汉字</small>
             </div>
             <label v-if="resultTitles.length > 1" class="ai-copy-candidate-select">
-              <input type="checkbox" :checked="selectedTitleIndex === index" @change="selectedTitleIndex = index" />
+              <input type="radio" :aria-label="`选用标题 ${index + 1}`" name="copy-import-title" :disabled="busy" :checked="selectedTitleIndex === index" @change="selectedTitleIndex = index" />
               <span>选用此标题</span>
             </label>
             <template v-if="editingTitleIndex === index">
               <textarea
                 v-model="titleEditValue"
                 class="ai-copy-edit-textarea ai-copy-title-editor"
-                maxlength="120"
+                maxlength="200"
                 rows="2"
                 @keydown.meta.enter.prevent="saveEditedTitle(index)"
                 @keydown.ctrl.enter.prevent="saveEditedTitle(index)"
@@ -1139,7 +1264,7 @@ watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], 
                 <span>{{ countHanCharacters(titleEditValue) }} 汉字 · 保存后用于复制、导入工作台和 Excel</span>
               </div>
               <div class="ai-copy-output-actions">
-                <button type="button" @click="saveEditedTitle(index)">保存标题</button>
+                <button type="button" :disabled="savingEdit" @click="saveEditedTitle(index)">{{ savingEdit ? '保存中…' : '保存标题' }}</button>
                 <button class="ai-copy-secondary-action" type="button" @click="cancelEditTitle">取消</button>
               </div>
             </template>
@@ -1149,7 +1274,7 @@ watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], 
                 <button type="button" @click="copyText(`title-${index}`, title)">
                   {{ copiedField === `title-${index}` ? '已复制' : '复制标题' }}
                 </button>
-                <button class="ai-copy-secondary-action" type="button" @click="beginEditTitle(index)">编辑标题</button>
+                <button class="ai-copy-secondary-action" :disabled="busy" type="button" @click="beginEditTitle(index)">编辑标题</button>
               </div>
             </template>
           </article>
@@ -1166,17 +1291,17 @@ watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], 
           >
             <div class="ai-copy-output-label">
               <span>正文文案{{ resultBodies.length > 1 ? ` ${index + 1}` : '' }}</span>
-              <small>{{ countHanCharacters(body) }} 汉字 · 目标 {{ resultBodyMax }} 汉字</small>
+              <small>{{ countHanCharacters(body) }} 汉字 · 参考约 {{ candidateTarget('body', index) }} 汉字</small>
             </div>
             <label v-if="resultBodies.length > 1" class="ai-copy-candidate-select">
-              <input type="checkbox" :checked="selectedBodyIndex === index" @change="selectedBodyIndex = index" />
+              <input type="radio" :aria-label="`选用正文 ${index + 1}`" name="copy-import-body" :disabled="busy" :checked="selectedBodyIndex === index" @change="selectedBodyIndex = index" />
               <span>选用此文案</span>
             </label>
             <template v-if="editingBodyIndex === index">
               <textarea
                 v-model="bodyEditValue"
                 class="ai-copy-edit-textarea ai-copy-body-editor"
-                maxlength="1600"
+                maxlength="2000"
                 rows="6"
                 @keydown.meta.enter.prevent="saveEditedBody(index)"
                 @keydown.ctrl.enter.prevent="saveEditedBody(index)"
@@ -1185,7 +1310,7 @@ watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], 
                 <span>{{ countHanCharacters(bodyEditValue) }} 汉字 · 保存后用于复制、导入工作台和 Excel</span>
               </div>
               <div class="ai-copy-output-actions">
-                <button type="button" @click="saveEditedBody(index)">保存文案</button>
+                <button type="button" :disabled="savingEdit" @click="saveEditedBody(index)">{{ savingEdit ? '保存中…' : '保存文案' }}</button>
                 <button class="ai-copy-secondary-action" type="button" @click="cancelEditBody">取消</button>
               </div>
             </template>
@@ -1195,22 +1320,34 @@ watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], 
                 <button type="button" @click="copyText(`body-${index}`, body)">
                   {{ copiedField === `body-${index}` ? '已复制' : '复制文案' }}
                 </button>
-                <button class="ai-copy-secondary-action" type="button" @click="beginEditBody(index)">编辑文案</button>
+                <button class="ai-copy-secondary-action" :disabled="busy" type="button" @click="beginEditBody(index)">编辑文案</button>
               </div>
             </template>
           </article>
         </section>
 
-        <button class="ai-copy-import" type="button" @click="importToWorkbench">
-          <span>
-            <small>IMPORT TO WORKBENCH</small>
-            <strong>导入发布工作台</strong>
-            <em>选择后直接导入</em>
-          </span>
-          <svg aria-hidden="true" viewBox="0 0 24 24">
-            <path d="M5 12h13M14 7l5 5-5 5" />
-          </svg>
-        </button>
+        </div>
+
+        <form class="ai-copy-rewrite-bar" aria-label="AI 改稿" @submit.prevent="rewriteCandidates">
+          <div class="ai-copy-rewrite-heading">
+            <strong>AI 改稿</strong>
+            <label>范围 <select v-model="feedbackTarget" :disabled="busy" aria-label="改稿范围"><option value="both">全部标题和正文</option><option value="title">全部标题</option><option value="body">全部正文</option></select></label>
+          </div>
+          <label class="ai-copy-rewrite-input" for="copy-rewrite-request">修改要求</label>
+          <textarea id="copy-rewrite-request" v-model="feedbackText" :disabled="busy" rows="2" maxlength="2000" placeholder="例如：都自然口语一点，保留每条的区别，正文缩短到五十字左右。" />
+          <div class="ai-copy-rewrite-actions">
+            <span aria-live="polite">{{ rewriting ? '正在修改' : '将修改' }} {{ feedbackTarget !== 'body' ? resultTitles.length : 0 }} 条标题、{{ feedbackTarget !== 'title' ? resultBodies.length : 0 }} 条正文</span>
+            <button type="submit" :disabled="busy || !feedbackText.trim()">{{ rewriting ? '正在修改…' : '批量修改' }}</button>
+          </div>
+        </form>
+
+        <section class="ai-copy-export" aria-label="导入所选候选">
+          <div class="ai-copy-export-main">
+            <p>已选：<strong>标题 {{ selectedTitleIndex + 1 }}</strong><span> · </span><strong>正文 {{ selectedBodyIndex + 1 }}</strong></p>
+            <button class="ai-copy-import" :disabled="busy" type="button" @click="importToWorkbench">导入发布台 <span aria-hidden="true">→</span></button>
+          </div>
+          <p class="ai-copy-sample-note">导入成功后，实际导入的字段自动加入品牌选用样本。</p>
+        </section>
 
         <WorkbenchImportDialog
           :open="workbenchImportOpen"
@@ -1227,45 +1364,36 @@ watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], 
           @change="importToBatchExcel"
         />
 
-        <button
-          class="ai-copy-import-batch"
-          type="button"
-          :disabled="!result || importingToBatchExcel || isManualSellingPointMode"
-          @click="chooseBatchExcelFile"
-        >
-          <span>
-            <small>IMPORT TO BATCH EXCEL</small>
-            <strong>{{ importingToBatchExcel ? '正在处理…' : '导入批量发布表格' }}</strong>
-            <em>{{ isManualSellingPointMode ? '直接输入模式没有商品 ID，不能导入批量发布表格' : downloadBatchExcelCopy ? '下载独立导入结果，不覆盖原文件' : '直接填入原文件；请先关闭 WPS/Excel 中打开的该文件' }}</em>
-          </span>
-          <svg aria-hidden="true" viewBox="0 0 24 24">
-            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
-            <polyline points="14,2 14,8 20,8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
-            <line x1="12" y1="18" x2="12" y2="12" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
-            <polyline points="9,15 12,18 15,15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-        </button>
-
-        <label class="ai-copy-download-option">
-          <input v-model="downloadBatchExcelCopy" type="checkbox" />
-          <span>下载为新文件（保留原文件）</span>
-        </label>
-
+        <details class="ai-copy-excel-options">
+          <summary>批量表格导入</summary>
+          <p>{{ !outputProductIdentifiers.length ? '当前文案没有商品 ID，不能按 ID 导入批量表格。' : downloadBatchExcelCopy ? '下载独立导入结果，不覆盖原文件。' : '直接填入原文件；请先关闭 WPS/Excel 中打开的该文件。' }}</p>
+          <label class="ai-copy-download-option"><input v-model="downloadBatchExcelCopy" type="checkbox" /><span>下载为新文件（保留原文件）</span></label>
+          <button class="ai-copy-import-batch" type="button" :disabled="busy || !outputProductIdentifiers.length" @click="chooseBatchExcelFile">{{ importingToBatchExcel ? '正在处理…' : '导入批量发布表格' }}</button>
         <p class="ai-copy-result-meta">
           由 {{ result.provider }} · {{ result.model }} 生成
           <span> · 已引用 {{ result.selling_point_references.length }} 条核心卖点</span>
           <span v-if="result.product_references.length"> · 已引用 {{ result.product_references.length }} 个商品资料</span>
         </p>
+        </details>
+
+
       </template>
 
       <div v-else class="ai-copy-empty">
         <span>AI</span>
         <h3>匹配商品卖点，或直接交给 AI</h3>
         <p>可上传核心卖点 Excel 后按商品 ID 精准匹配，也可切换为直接输入核心卖点。</p>
-        <ol><li>标题与正文字数可在「目标字数」中预设或自定义</li><li>不虚构商品信息与促销承诺</li></ol>
+        <ol><li>可在「参考汉字数」中预设或自定义，结果字数允许合理浮动</li><li>不虚构商品信息与促销承诺</li></ol>
       </div>
+      </fieldset>
     </aside>
   </section>
+  <BrandProfileDrawer :open="profileOpen" :brand-name="brandName" @close="emit('update:profileOpen', false)">
+    <BrandCopyPanel :brand-id="brandId" :brand-name="brandName" :user-id="userId"
+      :can-moderate="canModerate" :refresh-key="memoryRefresh" :disabled="busy"
+      @restore="restoreHistoryRecord" />
+  </BrandProfileDrawer>
 </template>
 
 <style src="./ai-copy.css"></style>
+<style src="./ai-copy-workspace.css"></style>

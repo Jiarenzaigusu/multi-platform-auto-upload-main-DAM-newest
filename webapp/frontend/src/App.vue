@@ -4,7 +4,8 @@ import { apiRequest as request, apiUrl, configureApiClient } from './api-client.
 import AgentSetupDialog from './components/AgentSetupDialog.vue'
 import AuthGate from './components/AuthGate.vue'
 import DamAssetPicker from './components/DamAssetPicker.vue'
-import AiCopyView from './features/ai-copy/AiCopyView.vue'
+import AiCopyStudio from './features/ai-copy/AiCopyStudio.vue'
+import { createAiCopyApi } from './features/ai-copy/api.js'
 import DashboardView from './features/dashboard/DashboardView.vue'
 import SmartSheetView from './features/dashboard/SmartSheetView.vue'
 import LlmAdapterView from './features/llm-adapter/LlmAdapterView.vue'
@@ -12,6 +13,8 @@ import UserManagementView from './features/users/UserManagementView.vue'
 
 const apiBase = import.meta.env.VITE_API_BASE_URL || ''
 const currentUser = ref(null)
+const pendingCopyImport = ref(null)
+const copyImportSaving = ref(false)
 const brandAccess = ref({ loaded: false, configured: false, brand: null, error: false })
 const agentSetupOpen = ref(false)
 const agentStatus = reactive({
@@ -721,6 +724,41 @@ function importAiCopyToWorkbench(draft) {
   persistFormDraft()
   showNotice(`生成的${supportsDescription ? '标题和正文' : '标题'}已导入${platformLabel(draft.platform)}${draft.contentType === 'article' ? '图文' : '视频'}发布台`, 'success')
   activeView.value = 'publish'
+  // Record only after this parent has filled the actual workspace. The copy view
+  // unmounts during navigation, so it cannot own the sample request lifecycle.
+  if (draft.origin?.generation_id) {
+    const { generation_id: generationId, ...origin } = draft.origin
+    const event = {
+      userId: currentUser.value?.id, generationId,
+      payload: { ...origin, platform: draft.platform, content_type: draft.contentType,
+        title: form.title, body: supportsDescription ? form.description : '' },
+    }
+    pendingCopyImport.value = event
+    saveCopyImportSample(pendingCopyImport.value)
+  }
+}
+
+async function saveCopyImportSample(event) {
+  if (!event || event.userId !== currentUser.value?.id) return
+  copyImportSaving.value = true
+  const api = createAiCopyApi(event.payload.expected_brand_id)
+  try {
+    const sample = await api.recordImport(event.generationId, event.payload)
+    if (currentUser.value?.id !== event.userId || pendingCopyImport.value !== event) return
+    pendingCopyImport.value = null
+    showNotice(sample.enabled
+      ? `文案已导入发布台，${sample.field_scope === 'title' ? '标题' : '标题和正文'}已加入品牌选用样本。`
+      : '文案已导入发布台；对应品牌样本此前已撤回，仍保持撤回状态。', 'success')
+    if (sample.enabled && sample.analysis_status !== 'complete') {
+      api.analyze(sample.id).catch(() => { /* Sample persists; analysis can be retried in the profile. */ })
+    }
+  } catch (exc) {
+    if (currentUser.value?.id === event.userId && pendingCopyImport.value === event) {
+      showNotice(`文案已导入发布台，但品牌样本未保存：${exc.message}。可点击重试保存样本。`, 'error')
+    }
+  } finally {
+    if (currentUser.value?.id === event.userId && (!pendingCopyImport.value || pendingCopyImport.value === event)) copyImportSaving.value = false
+  }
 }
 
 function compareVersions(a, b) {
@@ -1463,6 +1501,8 @@ function endAuthenticatedSession() {
   window.clearInterval(refreshTimer)
   refreshTimer = null
   currentUser.value = null
+  pendingCopyImport.value = null
+  copyImportSaving.value = false
   brandAccess.value = { loaded: false, configured: false, brand: null, error: false }
   activeView.value = 'publish'
   resetUserInterface()
@@ -1611,14 +1651,17 @@ onBeforeUnmount(() => {
       </header>
 
       <p v-if="notice && !['dashboard', 'smart-sheet', 'ai-copy', 'llm-adapter'].includes(activeView)" :class="['notice', `notice-${noticeType}`]">{{ notice }}</p>
+      <button v-if="pendingCopyImport && activeView === 'publish'" class="quiet" type="button" :disabled="copyImportSaving" @click="saveCopyImportSample(pendingCopyImport)">{{ copyImportSaving ? '正在保存品牌选用样本…' : '重试保存品牌选用样本' }}</button>
 
       <DashboardView v-if="activeView === 'dashboard'" />
       <SmartSheetView v-else-if="activeView === 'smart-sheet'" />
 
-      <AiCopyView
+      <AiCopyStudio
+        :key="currentUser.id"
         v-else-if="activeView === 'ai-copy'"
         :active="activeView === 'ai-copy'"
         :user-id="currentUser.id"
+        :can-moderate="isAdmin"
         @import-to-workbench="importAiCopyToWorkbench"
       />
 

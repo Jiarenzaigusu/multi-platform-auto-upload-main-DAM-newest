@@ -21,6 +21,10 @@ ARG UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
     UV_CACHE_DIR=/tmp/uv-cache \
     UV_LINK_MODE=copy \
+    UV_HTTP_CONNECT_TIMEOUT=10 \
+    UV_HTTP_TIMEOUT=60 \
+    UV_HTTP_RETRIES=2 \
+    UV_CONCURRENT_DOWNLOADS=8 \
     PIP_INDEX_URL=${PIP_INDEX_URL} \
     UV_INDEX_URL=${UV_INDEX_URL}
 WORKDIR /src
@@ -29,9 +33,15 @@ RUN pip install --no-cache-dir uv==0.12.7
 
 COPY pyproject.toml uv.lock README.zh-CN.md ./
 
+# Export exact versions and artifact hashes from the unchanged lockfile. Frozen
+# sync uses its locked download URLs, so install the export through our mirror.
 # Keep third-party dependencies cached when only application code changes.
 RUN --mount=type=cache,id=mpau-uv-cache,target=/tmp/uv-cache \
-    uv sync --frozen --no-dev --no-editable --extra web --no-install-project
+    uv export --frozen --no-dev --extra web --no-emit-project \
+        --format requirements-txt --output-file /tmp/mpau-web-requirements.txt \
+    && uv venv --python python3.12 --no-python-downloads "${UV_PROJECT_ENVIRONMENT}" \
+    && uv pip sync --python "${UV_PROJECT_ENVIRONMENT}/bin/python" \
+        --require-hashes --index-url "${UV_INDEX_URL}" /tmp/mpau-web-requirements.txt
 
 COPY local_agent/ local_agent/
 COPY uploader/ uploader/
@@ -42,7 +52,8 @@ COPY --from=frontend-builder /src/webapp/frontend/dist /src/webapp/frontend/dist
 # Install a self-contained package so no paths from this build stage leak into
 # the runtime image.
 RUN --mount=type=cache,id=mpau-uv-cache,target=/tmp/uv-cache \
-    uv sync --frozen --no-dev --no-editable --extra web
+    uv pip install --python "${UV_PROJECT_ENVIRONMENT}/bin/python" \
+        --no-deps --no-editable --index-url "${UV_INDEX_URL}" .
 
 # Check the installed application before replacing the running service.
 RUN cd /tmp \

@@ -18,7 +18,7 @@ from docx.text.paragraph import Paragraph
 
 FRONTEND = Path(__file__).resolve().parents[1]
 PROJECT = FRONTEND.parents[1]
-DEFAULT_SOURCE = PROJECT / "outputs/manual/智能发布中枢系统用户使用手册.docx"
+DEFAULT_SOURCE = PROJECT / "outputs/manual/智能发布中枢系统用户使用手册_功能完善版_20261020.docx"
 
 
 def build(source: Path, output: Path) -> None:
@@ -35,7 +35,7 @@ def build(source: Path, output: Path) -> None:
     current_label = "手册概览"
     bookmark_targets = {}
     for paragraph in document.paragraphs:
-        if paragraph.style.name == "Heading 1":
+        if paragraph.style.name in ("Heading 1", "Heading 2", "Heading 3"):
             target = f"section-{len(headings) + 1}"
             headings.append((target, paragraph.text))
             for bookmark in paragraph._p.xpath(".//w:bookmarkStart"):
@@ -136,29 +136,32 @@ def build(source: Path, output: Path) -> None:
     for element in document.element.body:
         if element.tag == qn("w:p"):
             paragraph = Paragraph(element, document)
-            if paragraph.style.name == "Heading 1":
+            if paragraph.style.name in ("Heading 1", "Heading 2", "Heading 3"):
                 sections.append((current_id, current_label, "".join(current)))
                 current_id, current_label = headings[heading_index]
                 heading_index += 1
-                current = [f"<h2>{html.escape(current_label)}</h2>"]
+                level = int(paragraph.style.name[-1]) + 1
+                current = [f"<h{level}>{html.escape(current_label)}</h{level}>"]
             else:
                 current.append(render_paragraph(paragraph))
         elif element.tag == qn("w:tbl"):
             current.append(render_table(element))
     sections.append((current_id, current_label, "".join(current)))
-    chapter_titles = {
-        "1": "首次使用", "2": "平台账号登录", "3": "单条发布与素材",
-        "4": "平台填写规则", "5": "批量发布", "6": "AI 文案",
-        "7": "任务与结果", "8": "常见问题", "9": "日常维护",
-        "A": "部署与管理", "B": "数据安全与恢复", "C": "名词与项目位置",
-    }
+    chapter_titles = {}
     groups = {}
     for target, label, _ in sections:
-        match = re.match(r"^(\d+)\s+(.+)$", label) or re.match(r"^附录\s+([A-Z])\s+(.+)$", label)
-        key, child_label = (match.group(1), match.group(2)) if match else (target, label)
-        if key == "1":
-            child_label = re.sub(r"^首次使用\s+", "", child_label)
-        groups.setdefault(key, []).append((target, child_label))
+        chapter = re.match(r"^第\s*(\d+)\s*章\s+(.+)$", label)
+        appendix = re.match(r"^附录\s+([A-Z])\s+(.+)$", label)
+        subsection = re.match(r"^((?:\d+|[A-Z]))(?:\.\d+)+\s+", label)
+        if chapter or appendix:
+            match = chapter or appendix
+            key = match.group(1)
+            chapter_titles[key] = match.group(2)
+        elif subsection:
+            key = subsection.group(1)
+        else:
+            key = target
+        groups.setdefault(key, []).append((target, label))
     toc_parts = []
     for key, children in groups.items():
         label = chapter_titles.get(key, children[0][1])
@@ -171,7 +174,11 @@ def build(source: Path, output: Path) -> None:
             target = children[0][0]
             toc_parts.append(f'<a class="toc-chapter-link" href="#{target}" data-chapter="{key}" data-label="{html.escape(label, quote=True)}">{heading}</a>')
         else:
-            child_links = "".join(f'<a class="toc-child-link" href="#{target}" data-label="{html.escape(child, quote=True)}">{html.escape(child)}</a>' for target, child in children)
+            child_links = []
+            for target, child in children:
+                nested = " toc-subsection-link" if re.match(r"^(?:[0-9]+|[A-Z])\.[0-9]+\.[0-9]+ ", child) else ""
+                child_links.append(f'<a class="toc-child-link{nested}" href="#{target}" data-label="{html.escape(child, quote=True)}">{html.escape(child)}</a>')
+            child_links = "".join(child_links)
             toc_parts.append(f'<details class="toc-group" data-chapter="{key}" data-label="{html.escape(label, quote=True)}"><summary>{heading}</summary><div class="toc-children">{child_links}</div></details>')
     toc = "".join(toc_parts)
     body = "".join(f'<section id="{target}" class="manual-section">{content}</section>' for target, _, content in sections)

@@ -387,7 +387,7 @@ class BrandMemoryService:
             with closing(self.store.connect()) as db, db:
                 db.execute("UPDATE brand_memory_jobs SET state='cancelled',payload='{}' WHERE id=?", (job["id"],))
             return True
-        provider = OpenAICompatibleProvider(self.registry, timeout_seconds=10)
+        provider = OpenAICompatibleProvider(self.registry, timeout_seconds=10, feature="dashboard_memory")
         try:
             candidate = extract_profile(provider, job, profile, self.stopped)
             self.store.finish(job, profile, candidate, provider.model)

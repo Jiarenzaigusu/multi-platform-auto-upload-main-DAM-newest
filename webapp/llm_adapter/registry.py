@@ -29,7 +29,8 @@ class AdapterCredentials:
 class LLMAdapterRegistry:
     """Keep saved provider credentials while exposing only one active route."""
 
-    def __init__(self, credential_store: AdapterCredentialStore | None = None) -> None:
+    def __init__(self, credential_store: AdapterCredentialStore | None = None, *, usage_recorder=None) -> None:
+        self.usage_recorder = usage_recorder
         self._lock = RLock()
         self._credential_store = credential_store
         self._saved: dict[AdapterKind, AdapterCredentials] = {}

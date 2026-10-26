@@ -613,7 +613,7 @@ def build_ai_copy_service(
 ) -> AiCopyService:
     resolved = settings or AiCopySettings()
     return AiCopyService(
-        OpenAICompatibleProvider(registry),
+        OpenAICompatibleProvider(registry, feature="ai_copy"),
         ProductSearchTool(resolved, tmall_page_fetcher=tmall_page_fetcher),
         SellingPointCatalogStore(
             max_workbook_bytes=resolved.max_selling_point_workbook_bytes,

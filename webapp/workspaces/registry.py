@@ -32,6 +32,8 @@ class UserWorkspaceRegistry:
         manager_factory: Callable[..., object] = AgentTaskManager,
     ) -> None:
         self.data_paths = data_paths
+        from webapp.usage import UsageStore
+        self.usage_store = UsageStore(data_paths.system / "usage.sqlite3")
         self.user_workers = max(1, user_workers)
         self.global_browser_tasks = max(1, global_browser_tasks)
         self.browser_idle_timeout_seconds = max(0.0, browser_idle_timeout_seconds)
@@ -75,7 +77,8 @@ class UserWorkspaceRegistry:
                 browser_idle_timeout_seconds=self.browser_idle_timeout_seconds,
             )
             llm_registry = LLMAdapterRegistry(
-                FileAdapterCredentialStore(paths.secrets / "llm-adapter-credentials.json")
+                FileAdapterCredentialStore(paths.secrets / "llm-adapter-credentials.json"),
+                usage_recorder=lambda **event: self.usage_store.record(user_id=user_id, **event),
             )
             ai_settings = AiCopySettings()
             tmall_fetcher = None

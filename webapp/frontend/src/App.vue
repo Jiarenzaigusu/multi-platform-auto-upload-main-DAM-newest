@@ -10,6 +10,7 @@ import DashboardView from './features/dashboard/DashboardView.vue'
 import SmartSheetView from './features/dashboard/SmartSheetView.vue'
 import LlmAdapterView from './features/llm-adapter/LlmAdapterView.vue'
 import UserManagementView from './features/users/UserManagementView.vue'
+import UserUsageView from './features/users/UserUsageView.vue'
 
 const apiBase = import.meta.env.VITE_API_BASE_URL || ''
 const currentUser = ref(null)
@@ -590,6 +591,7 @@ const viewTitle = computed(() => ({
   'ai-copy': 'AI 文案工坊',
   'llm-adapter': 'LLM 适配器',
   users: '用户与权限',
+  'user-usage': '用户使用看板',
   batch: '批量发布任务',
   jobs: '任务追踪中心',
 }[activeView.value] || '智能发布中枢系统'))
@@ -599,6 +601,7 @@ const viewEyebrow = computed(() => ({
   'ai-copy': 'AI COPY STUDIO',
   'llm-adapter': 'LLM ROUTING DESK',
   users: 'ACCESS DIRECTORY',
+  'user-usage': 'USER ACTIVITY',
 }[activeView.value] || 'COMMERCE PUBLISHING'))
 const uploaderTags = computed(() => form.tags
   .split(/[,，]+/)
@@ -1601,6 +1604,10 @@ onBeforeUnmount(() => {
           <span>任务与日志</span>
           <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6z" /><path d="M15 3v5h4M9 12h7m-7 4h7" /></svg></span>
         </button>
+        <button v-if="isAdmin" class="feature-nav-entry" :class="{ active: activeView === 'user-usage' }" @click="activeView = 'user-usage'">
+          <span>用户使用看板</span>
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 3v17h17M8 15v-4m5 4V6m5 9V9" /></svg></span>
+        </button>
         <button v-if="isAdmin" class="feature-nav-entry" :class="{ active: activeView === 'users' }" @click="activeView = 'users'">
           <span>用户与权限</span>
           <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3" /><path d="M3.5 19c.5-4 2.3-6 5.5-6s5 2 5.5 6M16 8h5m-2.5-2.5v5M16 15h5m-5 4h5" /></svg></span>
@@ -1633,7 +1640,7 @@ onBeforeUnmount(() => {
               <i aria-hidden="true"></i>{{ agentStatusLabel }}
             </button>
             <button class="refresh agent-windows" :class="{ updates: agentUpdateAvailable }" type="button" @click="agentSetupOpen = true">Windows 助手</button>
-            <button v-if="!['dashboard', 'smart-sheet', 'ai-copy', 'llm-adapter', 'users'].includes(activeView)" class="refresh" @click="refreshDashboard">刷新状态</button>
+            <button v-if="!['dashboard', 'smart-sheet', 'ai-copy', 'llm-adapter', 'users', 'user-usage'].includes(activeView)" class="refresh" @click="refreshDashboard">刷新状态</button>
             <button class="refresh logout" type="button" @click="logout">退出</button>
           </div>
           <a
@@ -1792,6 +1799,8 @@ onBeforeUnmount(() => {
       </section>
 
       <LlmAdapterView v-else-if="activeView === 'llm-adapter'" />
+
+      <UserUsageView v-else-if="activeView === 'user-usage' && isAdmin" />
 
       <UserManagementView v-else-if="activeView === 'users'" :current-user-id="currentUser.id" @brand-binding-changed="refreshBrandAccess" />
 

@@ -196,6 +196,8 @@ class AuthStore:
                     ON sessions(user_id);
                 CREATE INDEX IF NOT EXISTS idx_audit_user_created
                     ON audit_logs(user_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_audit_action_day
+                    ON audit_logs(action, julianday(created_at));
                 CREATE INDEX IF NOT EXISTS idx_users_brand_key
                     ON users(brand_key);
                 """

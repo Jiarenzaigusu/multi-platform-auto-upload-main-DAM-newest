@@ -208,6 +208,78 @@ class MultiUserApiTests(unittest.TestCase):
         self.registry.close()
         self.temp_dir.cleanup()
 
+    def test_usage_dashboard_permissions_and_date_validation(self):
+        self.assertEqual(self.client.get('/api/admin/usage').status_code, 401)
+        self.bootstrap_admin()
+        user = self.create_user('usage-operator')
+        for query in ('start_date=2026-10-27&end_date=2026-10-26',
+                      'start_date=2020-01-01&end_date=2026-10-26', 'start_date=0001-01-01',
+                      'page_size=1000', 'start_date=invalid'):
+            self.assertEqual(self.client.get('/api/admin/usage?' + query).status_code, 422)
+        self.login('usage-operator', 'operator-password-123')
+        self.assertEqual(self.client.get('/api/admin/usage').status_code, 403)
+        self.assertEqual(self.client.get('/api/admin/usage/requests?user_id=' + user['id'] +
+                                        '&start_date=2026-10-01&end_date=2026-10-26').status_code, 403)
+
+    def test_usage_aggregates_retained_data_and_beijing_days_without_starting_workspaces(self):
+        self.bootstrap_admin()
+        user = self.create_user('usage-operator')
+        user_id = user['id']
+        with sqlite3.connect(self.data_paths.auth_database) as db:
+            for stamp in ('2026-10-24T15:59:59+00:00', '2026-10-24T16:00:00+00:00',
+                          '2026-10-24T17:00:00+00:00', '2026-10-25T16:00:00+00:00'):
+                db.execute("INSERT INTO audit_logs(user_id,action,resource_type,resource_id,ip_address,detail,created_at) VALUES (?, 'login','','','','',?)", (user_id, stamp))
+        with sqlite3.connect(self.app.state.copy_history.path) as db:
+            db.execute("INSERT INTO copy_brand_generations(id,brand_id,owner_id,brief,original,titles,bodies,created_at,updated_at) VALUES ('generation','brand',?,'{}','{}','[]','[]',?,?)",
+                       (user_id, '2026-10-25T00:00:00+08:00', '2026-10-25T00:00:00+08:00'))
+        runtime = self.data_paths.users / user_id / 'runtime'
+        runtime.mkdir(parents=True, exist_ok=True)
+        (runtime / 'state.json').write_text(json.dumps({'jobs': {
+            'publish': {'kind': 'publish', 'status': 'succeeded', 'created_at': '2026-10-24T16:00:00+00:00'},
+            'failed': {'kind': 'publish', 'status': 'failed', 'created_at': '2026-10-24T16:00:00+00:00'},
+            'queued': {'kind': 'publish', 'status': 'queued', 'created_at': '2026-10-24T16:00:00+00:00'},
+            'outside': {'kind': 'publish', 'status': 'succeeded', 'created_at': '2026-10-25T16:00:00+00:00'},
+            'check': {'kind': 'check', 'status': 'failed', 'created_at': '2026-10-24T16:00:00+00:00'},
+        }}))
+        store = self.registry.usage_store
+        store.record(user_id=user_id, provider='deepseek', model='test-model', feature='ai_copy',
+                     usage={'prompt_tokens': 12, 'completion_tokens': 8}, status='response')
+        store.record(user_id=user_id, provider='deepseek', model='test-model', feature='ai_copy',
+                     usage=None, status='transport_error')
+        with sqlite3.connect(store.path) as db:
+            db.execute("UPDATE llm_usage SET created_at='2026-10-24T16:00:00+00:00'")
+        before = set(self.registry._workspaces)
+        response = self.client.get('/api/admin/usage?start_date=2026-10-25&end_date=2026-10-25&search=usage-operator')
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()
+        self.assertEqual(set(self.registry._workspaces), before)
+        self.assertEqual(result['summary']['login_count'], 2)
+        self.assertEqual(result['summary']['login_users'], 1)
+        self.assertEqual(result['daily'][0]['login_users'], 1)
+        self.assertEqual(result['summary']['copy_count'], 1)
+        self.assertEqual(result['summary']['publish_count'], 3)
+        self.assertEqual(result['summary']['publish_succeeded'], 1)
+        self.assertEqual(result['summary']['publish_failed'], 1)
+        self.assertEqual(result['publish_statuses'], {'succeeded': 1, 'failed': 1, 'queued': 1})
+        self.assertEqual(result['rankings']['total_tokens'][0]['id'], user_id)
+        self.assertEqual(result['rankings']['total_tokens'][0]['value'], 20)
+        self.assertEqual(result['summary']['total_tokens'], 20)
+        self.assertEqual(result['summary']['unknown_usage_count'], 1)
+        self.assertEqual(result['summary']['request_count'], 2)
+        self.assertEqual(result['token_breakdown'][0]['total_tokens'], 20)
+        self.assertNotIn('password_hash', result['users'][0])
+        details = self.client.get(f'/api/admin/usage/requests?user_id={user_id}&start_date=2026-10-25&end_date=2026-10-25&page_size=1')
+        self.assertEqual(details.status_code, 200, details.text)
+        self.assertEqual(details.json()['total'], 2)
+        self.assertEqual(len(details.json()['items']), 1)
+        with sqlite3.connect(store.path) as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM llm_usage WHERE total_tokens IS NULL').fetchone()[0], 1)
+        empty = self.client.get('/api/admin/usage?start_date=2026-10-25&end_date=2026-10-26&search=no-such-user').json()
+        self.assertEqual(empty['total'], 0)
+        self.assertEqual(len(empty['daily']), 2)
+        self.assertEqual(empty['summary']['total_tokens'], 0)
+        self.assertEqual(empty['rankings']['publish_count'], [])
+
     def test_deleted_sheet_plan_stays_deleted_when_history_is_scanned(self):
         user = self.bootstrap_admin()
         name = "浪琴周报"

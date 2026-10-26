@@ -65,6 +65,7 @@ class BrandCopyHistory:
                     candidate_briefs TEXT NOT NULL DEFAULT '{}', version INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS studio_recent ON copy_brand_generations(brand_id,updated_at DESC);
+                CREATE INDEX IF NOT EXISTS studio_usage_date ON copy_brand_generations(julianday(created_at));
                 CREATE TABLE IF NOT EXISTS copy_brand_edits (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, generation_id TEXT NOT NULL REFERENCES copy_brand_generations(id),
                     field TEXT NOT NULL, candidate_index INTEGER NOT NULL, before_text TEXT NOT NULL,

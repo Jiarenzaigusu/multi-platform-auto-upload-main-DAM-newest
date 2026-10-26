@@ -527,7 +527,7 @@ def create_app(
         if dashboard.get("empty") or not dashboard.get("summary"):
             return {"status": "empty", "scopes": {}}
         workspace = current_workspace(request)
-        return cached_category_insights(dashboard, OpenAICompatibleProvider(workspace.llm_registry), workspace.paths.runtime / "category-insights.sqlite3")
+        return cached_category_insights(dashboard, OpenAICompatibleProvider(workspace.llm_registry, feature="category_insights"), workspace.paths.runtime / "category-insights.sqlite3")
 
     @app.post("/api/dashboard/analysis")
     def dashboard_analysis(request: Request, period: str = Query(default="latest"), user: object = Depends(require_user)) -> dict:
@@ -537,7 +537,7 @@ def create_app(
         dashboard = dashboard_data(request, period, user)
         if dashboard.get("empty") or not dashboard.get("summary"):
             raise HTTPException(status_code=422, detail="当前周期暂无可分析的品牌数据")
-        provider = OpenAICompatibleProvider(current_workspace(request).llm_registry)
+        provider = OpenAICompatibleProvider(current_workspace(request).llm_registry, feature="dashboard_analysis")
         try:
             return generate_analysis(dashboard, provider)
         except LLMAdapterError as exc:
@@ -585,7 +585,7 @@ def create_app(
             tools = DashboardTools(mysql_database, dashboard, payload.content_type, payload.tag_id)
             store = ConversationStore(workspace.paths.runtime / "dashboard-chat.sqlite3")
             conversation_id, history = store.open(dashboard["brand"]["id"], payload.period, payload.content_type, payload.tag_id, payload.conversation_id)
-            provider = OpenAICompatibleProvider(workspace.llm_registry)
+            provider = OpenAICompatibleProvider(workspace.llm_registry, feature="dashboard_chat")
             memory = []
             if memory_enabled():
                 workspace.dashboard_memory.store.bootstrap(dashboard["brand"]["id"])
@@ -815,7 +815,7 @@ def create_app(
                 saved_record = json.loads(table_record_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError) as exc:
                 raise HTTPException(status_code=500, detail="已有表格方案 JSON 无法读取") from exc
-        provider = OpenAICompatibleProvider(workspace.llm_registry, timeout_seconds=120)
+        provider = OpenAICompatibleProvider(workspace.llm_registry, timeout_seconds=120, feature="smart_sheet")
         if saved_record is None and not provider.ready:
             raise HTTPException(status_code=409, detail="新建表格方案前，请先配置并启用 LLM API Key")
         brand_key = user.brand_key or "unbranded"
@@ -2084,6 +2084,10 @@ def create_app(
             workspace=workspace,
         )
 
+    from webapp.usage import UsageStore, create_usage_router
+    usage_store = getattr(workspace_registry, "usage_store", None) or UsageStore(data_paths.system / "usage.sqlite3")
+    app.state.usage_store = usage_store
+    app.include_router(create_usage_router(data_paths, auth_service.store, copy_history, usage_store))
     app.include_router(create_brand_data_router(mysql_database, auth_service))
     app.include_router(create_dashboard_memory_router(lambda user: resolve_data_brand(mysql_database, user), current_workspace))
     app.include_router(

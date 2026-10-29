@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from contextvars import ContextVar
 import json
+import logging
 import ssl
 import time
 from typing import Any, ContextManager, Iterator, Protocol
@@ -45,7 +46,7 @@ class ChatProvider(Protocol):
         messages: list[dict[str, Any]],
         *,
         tools: list[dict[str, Any]] | None = None,
-        tool_choice: dict[str, Any] | None = None,
+        tool_choice: dict[str, Any] | str | None = None,
         response_format: dict[str, str] | None = None,
         temperature: float = 0.4,
     ) -> dict[str, Any]: ...
@@ -54,8 +55,9 @@ class ChatProvider(Protocol):
 class OpenAICompatibleProvider:
     """Calls the active adapter while exposing one chat-style interface."""
 
-    def __init__(self, registry: LLMAdapterRegistry, timeout_seconds: float = 90) -> None:
+    def __init__(self, registry: LLMAdapterRegistry, timeout_seconds: float = 90, *, feature: str = "other") -> None:
         self._registry = registry
+        self.feature = feature
         self._timeout_seconds = timeout_seconds
         self._ssl_context = ssl.create_default_context(cafile=certifi.where())
         self._session_credentials: ContextVar[AdapterCredentials | None] = ContextVar(
@@ -97,7 +99,7 @@ class OpenAICompatibleProvider:
         messages: list[dict[str, Any]],
         *,
         tools: list[dict[str, Any]] | None = None,
-        tool_choice: dict[str, Any] | None = None,
+        tool_choice: dict[str, Any] | str | None = None,
         response_format: dict[str, str] | None = None,
         temperature: float = 0.4,
     ) -> dict[str, Any]:
@@ -135,7 +137,7 @@ class OpenAICompatibleProvider:
             "max_tokens": 1,
         }
         self._disable_deepseek_thinking(payload, credentials)
-        self._request_message(credentials, payload, min(self._timeout_seconds, probe_timeout))
+        self._request_message(credentials, payload, min(self._timeout_seconds, probe_timeout), feature="adapter_probe")
 
     @staticmethod
     def _disable_deepseek_thinking(
@@ -153,12 +155,14 @@ class OpenAICompatibleProvider:
         active: AdapterCredentials,
         payload: dict[str, Any],
         timeout_seconds: float,
+        *, feature: str | None = None,
     ) -> dict[str, Any]:
         document = self._post_json(
             active,
             "chat/completions",
             payload,
             timeout_seconds,
+            feature=feature,
         )
         try:
             message = document["choices"][0]["message"]
@@ -178,6 +182,7 @@ class OpenAICompatibleProvider:
         path: str,
         payload: dict[str, Any],
         timeout_seconds: float,
+        *, feature: str | None = None,
     ) -> dict[str, Any]:
         definition = active.definition
         request = Request(
@@ -198,8 +203,18 @@ class OpenAICompatibleProvider:
                 )
                 with opener.open(request, timeout=timeout_seconds) as response:
                     raw = response.read(2_000_001)
+                if len(raw) > 2_000_000:
+                    raise AdapterResponseError(f"{definition.label} 响应超过 2 MB 限制")
+                try:
+                    document = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    raise AdapterResponseError(f"{definition.label} 返回了无效 JSON") from exc
+                if not isinstance(document, dict):
+                    raise AdapterResponseError(f"{definition.label} 返回的响应不是对象")
+                self._record_usage(active, document.get("usage"), "response", feature)
                 break
             except HTTPError as exc:
+                self._record_usage(active, None, "http_error", feature)
                 if exc.code in transient_http_codes and attempt + 1 < max_attempts:
                     time.sleep(attempt + 1)
                     continue
@@ -209,19 +224,25 @@ class OpenAICompatibleProvider:
                     f"{definition.label} 返回 HTTP {exc.code}{suffix}"
                 ) from exc
             except (URLError, TimeoutError, OSError) as exc:
+                self._record_usage(active, None, "transport_error", feature)
                 if attempt + 1 < max_attempts:
                     time.sleep(attempt + 1)
                     continue
                 raise AdapterServiceError(
                     f"无法连接 {definition.label}（已自动重试）：{exc}"
                 ) from exc
+            except AdapterResponseError:
+                self._record_usage(active, None, "invalid_response", feature)
+                raise
 
-        if len(raw) > 2_000_000:
-            raise AdapterResponseError(f"{definition.label} 响应超过 2 MB 限制")
-        try:
-            document = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise AdapterResponseError(f"{definition.label} 返回了无效 JSON") from exc
-        if not isinstance(document, dict):
-            raise AdapterResponseError(f"{definition.label} 返回的响应不是对象")
         return document
+
+    def _record_usage(self, active, usage, status, feature):
+        recorder = self._registry.usage_recorder
+        if recorder is not None:
+            try:
+                recorder(provider=active.definition.kind.value, model=active.definition.model,
+                         feature=feature or self.feature, usage=usage, status=status)
+            except Exception:
+                # Never include credentials, response bodies or exception text in logs.
+                logging.getLogger(__name__).error("LLM usage persistence failed")

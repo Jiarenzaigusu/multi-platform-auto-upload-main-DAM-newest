@@ -21,7 +21,7 @@ from webapp.api.main import WebSettings, create_app, server_bind_address
 from webapp.api.models import validate_publish_request
 from webapp.api.tasks import TaskManager
 from webapp.auth import AuthStore
-from webapp.mysql_demo import MySQLSettings
+from webapp.mysql_demo import MySQLDemoError, MySQLSettings
 from webapp.workspaces import AppDataPaths, UserWorkspaceRegistry
 
 
@@ -208,6 +208,78 @@ class MultiUserApiTests(unittest.TestCase):
         self.registry.close()
         self.temp_dir.cleanup()
 
+    def test_usage_dashboard_permissions_and_date_validation(self):
+        self.assertEqual(self.client.get('/api/admin/usage').status_code, 401)
+        self.bootstrap_admin()
+        user = self.create_user('usage-operator')
+        for query in ('start_date=2026-10-27&end_date=2026-10-26',
+                      'start_date=2020-01-01&end_date=2026-10-26', 'start_date=0001-01-01',
+                      'page_size=1000', 'start_date=invalid'):
+            self.assertEqual(self.client.get('/api/admin/usage?' + query).status_code, 422)
+        self.login('usage-operator', 'operator-password-123')
+        self.assertEqual(self.client.get('/api/admin/usage').status_code, 403)
+        self.assertEqual(self.client.get('/api/admin/usage/requests?user_id=' + user['id'] +
+                                        '&start_date=2026-10-01&end_date=2026-10-26').status_code, 403)
+
+    def test_usage_aggregates_retained_data_and_beijing_days_without_starting_workspaces(self):
+        self.bootstrap_admin()
+        user = self.create_user('usage-operator')
+        user_id = user['id']
+        with sqlite3.connect(self.data_paths.auth_database) as db:
+            for stamp in ('2026-10-24T15:59:59+00:00', '2026-10-24T16:00:00+00:00',
+                          '2026-10-24T17:00:00+00:00', '2026-10-25T16:00:00+00:00'):
+                db.execute("INSERT INTO audit_logs(user_id,action,resource_type,resource_id,ip_address,detail,created_at) VALUES (?, 'login','','','','',?)", (user_id, stamp))
+        with sqlite3.connect(self.app.state.copy_history.path) as db:
+            db.execute("INSERT INTO copy_brand_generations(id,brand_id,owner_id,brief,original,titles,bodies,created_at,updated_at) VALUES ('generation','brand',?,'{}','{}','[]','[]',?,?)",
+                       (user_id, '2026-10-25T00:00:00+08:00', '2026-10-25T00:00:00+08:00'))
+        runtime = self.data_paths.users / user_id / 'runtime'
+        runtime.mkdir(parents=True, exist_ok=True)
+        (runtime / 'state.json').write_text(json.dumps({'jobs': {
+            'publish': {'kind': 'publish', 'status': 'succeeded', 'created_at': '2026-10-24T16:00:00+00:00'},
+            'failed': {'kind': 'publish', 'status': 'failed', 'created_at': '2026-10-24T16:00:00+00:00'},
+            'queued': {'kind': 'publish', 'status': 'queued', 'created_at': '2026-10-24T16:00:00+00:00'},
+            'outside': {'kind': 'publish', 'status': 'succeeded', 'created_at': '2026-10-25T16:00:00+00:00'},
+            'check': {'kind': 'check', 'status': 'failed', 'created_at': '2026-10-24T16:00:00+00:00'},
+        }}))
+        store = self.registry.usage_store
+        store.record(user_id=user_id, provider='deepseek', model='test-model', feature='ai_copy',
+                     usage={'prompt_tokens': 12, 'completion_tokens': 8}, status='response')
+        store.record(user_id=user_id, provider='deepseek', model='test-model', feature='ai_copy',
+                     usage=None, status='transport_error')
+        with sqlite3.connect(store.path) as db:
+            db.execute("UPDATE llm_usage SET created_at='2026-10-24T16:00:00+00:00'")
+        before = set(self.registry._workspaces)
+        response = self.client.get('/api/admin/usage?start_date=2026-10-25&end_date=2026-10-25&search=usage-operator')
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()
+        self.assertEqual(set(self.registry._workspaces), before)
+        self.assertEqual(result['summary']['login_count'], 2)
+        self.assertEqual(result['summary']['login_users'], 1)
+        self.assertEqual(result['daily'][0]['login_users'], 1)
+        self.assertEqual(result['summary']['copy_count'], 1)
+        self.assertEqual(result['summary']['publish_count'], 3)
+        self.assertEqual(result['summary']['publish_succeeded'], 1)
+        self.assertEqual(result['summary']['publish_failed'], 1)
+        self.assertEqual(result['publish_statuses'], {'succeeded': 1, 'failed': 1, 'queued': 1})
+        self.assertEqual(result['rankings']['total_tokens'][0]['id'], user_id)
+        self.assertEqual(result['rankings']['total_tokens'][0]['value'], 20)
+        self.assertEqual(result['summary']['total_tokens'], 20)
+        self.assertEqual(result['summary']['unknown_usage_count'], 1)
+        self.assertEqual(result['summary']['request_count'], 2)
+        self.assertEqual(result['token_breakdown'][0]['total_tokens'], 20)
+        self.assertNotIn('password_hash', result['users'][0])
+        details = self.client.get(f'/api/admin/usage/requests?user_id={user_id}&start_date=2026-10-25&end_date=2026-10-25&page_size=1')
+        self.assertEqual(details.status_code, 200, details.text)
+        self.assertEqual(details.json()['total'], 2)
+        self.assertEqual(len(details.json()['items']), 1)
+        with sqlite3.connect(store.path) as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM llm_usage WHERE total_tokens IS NULL').fetchone()[0], 1)
+        empty = self.client.get('/api/admin/usage?start_date=2026-10-25&end_date=2026-10-26&search=no-such-user').json()
+        self.assertEqual(empty['total'], 0)
+        self.assertEqual(len(empty['daily']), 2)
+        self.assertEqual(empty['summary']['total_tokens'], 0)
+        self.assertEqual(empty['rankings']['publish_count'], [])
+
     def test_deleted_sheet_plan_stays_deleted_when_history_is_scanned(self):
         user = self.bootstrap_admin()
         name = "浪琴周报"
@@ -280,36 +352,58 @@ class MultiUserApiTests(unittest.TestCase):
         response = self.client.post("/api/dashboard/chat", headers=self.csrf_headers(), json=payload)
         self.assertEqual(response.status_code, 422, response.text)
 
-    def test_brand_data_requires_admin_binding_and_filters_by_brand_id(self):
+    def test_registration_brand_catalog_is_public_and_excludes_ambiguous_names(self):
+        response = self.client.get("/api/auth/brands")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json(), {"configured": False, "brands": []})
+        database = self.app.state.mysql_database
+        database.settings = MySQLSettings(
+            host="db.internal", database="business", user="app", password="secret"
+        )
+        with patch.object(database, "execute", return_value=[
+            (1, "星巴克"), (2, "Nike"), (3, " ＮＩＫＥ "), (4, "   "),
+        ]):
+            response = self.client.get("/api/auth/brands")
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json(), {"configured": True, "brands": [{"id": 1, "name": "星巴克"}]})
+            self.assertEqual(self.client.get("/api/admin/brand-access").status_code, 401)
+            self.assertEqual(self.client.get("/api/dashboard").status_code, 401)
+
+        with patch.object(database, "execute", side_effect=MySQLDemoError("测试连接失败")):
+            response = self.client.get("/api/auth/brands")
+            self.assertEqual(response.status_code, 503, response.text)
+
+    def test_registered_brand_grants_data_access_and_filters_by_brand_id(self):
         self.bootstrap_admin()
         operator = self.create_user("samebrand")
         database = self.app.state.mysql_database
         database.settings = MySQLSettings(
             host="db.internal", database="business", user="app", password="secret"
         )
-        bindings = {}
         calls = []
+        bindings = {}
 
         def execute(query, parameters=None):
             values = tuple(parameters or ())
             calls.append((query, values))
             if query.startswith("SELECT id, name FROM brands"):
                 return [(1, "星巴克"), (2, "其他品牌")]
-            if query.startswith("SELECT user_id, brand_id"):
+            if query.startswith("SELECT ub.brand_id, b.name"):
+                brand_id = bindings.get(values[0])
+                return [(brand_id, "星巴克" if brand_id == 1 else "其他品牌")] if brand_id else []
+            if query.startswith("SELECT user_id, brand_id FROM user_brand_bindings"):
                 return list(bindings.items())
-            if query.startswith("SELECT id FROM brands"):
-                return [(values[0],)] if values[0] in {1, 2} else []
+            if query.startswith("INSERT IGNORE INTO user_brand_bindings"):
+                bindings.setdefault(values[0], values[1])
+                return []
             if query.startswith("INSERT INTO user_brand_bindings"):
                 bindings[values[0]] = values[1]
                 return []
             if query.startswith("DELETE FROM user_brand_bindings"):
                 bindings.pop(values[0], None)
                 return []
-            if query.startswith("SELECT b.id, b.name"):
-                brand_id = bindings.get(values[0])
-                return [(brand_id, "星巴克" if brand_id == 1 else "其他品牌")] if brand_id else []
-            if query.startswith("SELECT 1 FROM user_brand_bindings"):
-                return []
+            if query.startswith("SELECT 1 FROM content_performance"):
+                return [(1,)] if values == (1, "1383899085827225") else []
             if query.startswith("SELECT `年份`, `下载周期`, COUNT(*) FROM content_performance"):
                 return [(2026, "8月", 1)]
             if query.startswith("SHOW COLUMNS FROM content_performance"):
@@ -317,11 +411,11 @@ class MultiUserApiTests(unittest.TestCase):
             if "LIMIT 20001" in query:
                 return [(2026, "8月", "1383899085827225", 10)]
             if "GROUP BY `年份`, `下载周期`, `汇总分类`" in query:
-                return [(2026, "8月", "图文", "", 1, 100, 120, 2, 39.5, 20, 10)]
+                return [(2026, "8月", "图文", "", 1, 100, 120, 2, 39.5, 20, 10, 0)]
             if "FROM content_performance" in query and "COUNT(*)" in query:
                 return [(2026, "8月", 1, 50, 120, 39.5, 20, 100, 2, 30)]
             if "FROM content_performance" in query:
-                return [("图文", "", "1383899085827225", "真实作品", "2026-07-30 16:44:48", 100, 39.5, 20, 10)]
+                return [("图文", "", "1383899085827225", "真实作品", "2026-07-30 16:44:48", 100, 39.5, 20, 10, "否")]
             raise AssertionError(query)
 
         with patch.object(database, "execute", side_effect=execute):
@@ -338,20 +432,18 @@ class MultiUserApiTests(unittest.TestCase):
                 headers=self.csrf_headers(), json_body={"brand_id": 1},
             )
             self.assertEqual(forbidden_binding.status_code, 403, forbidden_binding.text)
-            self.assertEqual(bindings, {})
-
-            self.login("admin", "admin-password-123")
-            response = self.client.request(
-                "PUT", f"/api/admin/users/{operator['id']}/brand-binding",
-                headers=self.csrf_headers(), json_body={"brand_id": 1},
+            registered = self.client.post(
+                "/api/auth/register",
+                json={"username": "registeredbrand", "display_name": "注册用户",
+                      "brand_name": "　星巴克　", "password": "operator-password-123"},
             )
-            self.assertEqual(response.status_code, 200, response.text)
-            self.assertEqual(bindings[operator["id"]], 1)
-
-            self.login("samebrand", "operator-password-123")
+            self.assertEqual(registered.status_code, 201, registered.text)
+            self.assertEqual(registered.json()["brand_name"], "星巴克")
+            self.assertEqual(registered.json()["role"], "operator")
             bound_access = self.client.get("/api/brand-access/me")
             self.assertEqual(bound_access.status_code, 200, bound_access.text)
             self.assertEqual(bound_access.json()["brand"], {"id": 1, "name": "星巴克"})
+            self.assertEqual(bindings[registered.json()["id"]], 1)
             database_sources = self.client.get("/api/sheet-fill/database-sources")
             self.assertEqual(database_sources.status_code, 200, database_sources.text)
             self.assertEqual(database_sources.json()["brand"], "星巴克")
@@ -372,15 +464,63 @@ class MultiUserApiTests(unittest.TestCase):
             self.assertEqual(scoped.json()["brand"]["id"], 1)
             self.assertEqual(scoped.json()["summary"]["current"]["content_viewers"], 50)
             self.assertEqual(scoped.json()["tags"]["image"][0]["samples"][0]["content_id"], "1383899085827225")
+            forged_scope = self.client.get("/api/dashboard?brand_id=2")
+            self.assertEqual(forged_scope.status_code, 200, forged_scope.text)
+            self.assertEqual(forged_scope.json()["brand"]["id"], 1)
             content_calls = [(query, values) for query, values in calls if "FROM content_performance" in query and values]
             self.assertTrue(content_calls)
             self.assertTrue(all(values[0] == 1 for _, values in content_calls))
             private_detail = self.client.get("/api/guanghe/content/other-brand-content")
             self.assertEqual(private_detail.status_code, 403, private_detail.text)
+            with patch("webapp.api.main.content_detail", return_value={"content_id": "1383899085827225"}) as detail:
+                own_detail = self.client.get("/api/guanghe/content/1383899085827225")
+                self.assertEqual(own_detail.status_code, 200, own_detail.text)
+                detail.assert_called_once_with("1383899085827225")
 
             self.login("admin", "admin-password-123")
             admin_unbound = self.client.get("/api/dashboard")
             self.assertEqual(admin_unbound.status_code, 403, admin_unbound.text)
+
+            # A stale account label or ordinary profile save never replaces the ID.
+            preserved = dict(bindings)
+            edited = self.client.patch(
+                f"/api/admin/users/{registered.json()['id']}", headers=self.csrf_headers(),
+                json={"display_name": "已修改显示名", "brand_name": "其他品牌"},
+            )
+            self.assertEqual(edited.status_code, 200, edited.text)
+            access = self.client.get("/api/admin/brand-access")
+            self.assertEqual(access.status_code, 200, access.text)
+            self.assertEqual(access.json()["bindings"][registered.json()["id"]], 1)
+            self.login("registeredbrand", "operator-password-123")
+            for _ in range(2):
+                self.assertEqual(self.client.get("/api/brand-access/me").json()["brand"]["id"], 1)
+            self.assertEqual(self.client.get("/api/dashboard").json()["brand"]["id"], 1)
+            self.assertEqual(bindings, preserved)
+
+            # Only an explicit administrator brand change updates the saved ID.
+            self.login("admin", "admin-password-123")
+            updated = self.client.request(
+                "PUT", f"/api/admin/users/{registered.json()['id']}/brand-binding",
+                headers=self.csrf_headers(), json_body={"brand_id": 2},
+            )
+            self.assertEqual(updated.status_code, 200, updated.text)
+            users = self.client.get("/api/admin/users").json()
+            self.assertEqual(next(user for user in users if user["id"] == registered.json()["id"])["brand_name"], "其他品牌")
+            self.login("registeredbrand", "operator-password-123")
+            self.assertEqual(self.client.get("/api/brand-access/me").json()["brand"]["id"], 2)
+            switched = self.client.get("/api/dashboard")
+            self.assertEqual(switched.status_code, 200, switched.text)
+            self.assertEqual(switched.json()["brand"]["id"], 2)
+            self.login("admin", "admin-password-123")
+            cleared = self.client.request(
+                "PUT", f"/api/admin/users/{registered.json()['id']}/brand-binding",
+                headers=self.csrf_headers(), json_body={"brand_id": None},
+            )
+            self.assertEqual(cleared.status_code, 200, cleared.text)
+            self.login("registeredbrand", "operator-password-123")
+            self.assertIsNone(self.client.get("/api/brand-access/me").json()["brand"])
+            self.assertEqual(self.client.get("/api/dashboard").status_code, 403)
+            self.assertNotIn(registered.json()["id"], bindings)
 
     def test_direct_http_ip_login_preserves_session_and_csrf_flow(self):
         direct_headers = {
@@ -862,7 +1002,16 @@ class LocalAgentApiTests(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def csrf_headers(self) -> dict[str, str]:
-        return {"X-CSRF-Token": self.client.cookies["mpau_csrf_v2"]}
+        headers = {"X-CSRF-Token": self.client.cookies["mpau_csrf_v2"], "Origin": "http://testserver"}
+        if getattr(self, "agent_token", ""):
+            challenge = self.client.post("/api/agent/local-identity/challenge", headers=headers)
+            if challenge.status_code == 200:
+                confirmed = self.agent_post_json("/api/agent/local-identity/confirm", {
+                    "ticket": challenge.json()["ticket"], "origin": "http://testserver",
+                })
+                if confirmed.status_code == 200:
+                    headers["X-MPAU-Agent-Proof"] = confirmed.json()["proof"]
+        return headers
 
     def post_json(self, path: str, payload: dict) -> _AsgiResponse:
         return self.client.post(path, headers=self.csrf_headers(), json=payload)
@@ -908,6 +1057,89 @@ class LocalAgentApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()
+
+    def test_local_job_requires_a_proof_from_the_paired_helper(self):
+        self.connect_agent()
+        base = {"X-CSRF-Token": self.client.cookies["mpau_csrf_v2"], "Origin": "http://testserver"}
+        rejected = self.client.post("/api/accounts/jd/shop1/login", headers=base)
+        self.assertEqual(rejected.status_code, 409)
+        accepted = self.client.post("/api/accounts/jd/shop1/login", headers=self.csrf_headers())
+        self.assertEqual(accepted.status_code, 202, accepted.text)
+        stored = self.registry.get(self.user["id"]).store.get_job(accepted.json()["job"]["id"])
+        self.assertEqual(stored["payload"]["target_agent_id"], "b"*32)
+
+    def test_identity_confirmation_cannot_change_origin_or_be_reused(self):
+        self.connect_agent()
+        base = {"X-CSRF-Token": self.client.cookies["mpau_csrf_v2"], "Origin": "http://testserver"}
+        challenge = self.client.post("/api/agent/local-identity/challenge", headers=base).json()
+        wrong = self.agent_post_json("/api/agent/local-identity/confirm", {
+            "ticket": challenge["ticket"], "origin": "https://wrong.example",
+        })
+        self.assertEqual(wrong.status_code, 403)
+        correct = self.agent_post_json("/api/agent/local-identity/confirm", {
+            "ticket": challenge["ticket"], "origin": "http://testserver",
+        })
+        self.assertEqual(correct.status_code, 200, correct.text)
+        repeated = self.agent_post_json("/api/agent/local-identity/confirm", {
+            "ticket": challenge["ticket"], "origin": "http://testserver",
+        })
+        self.assertEqual(repeated.status_code, 409)
+
+    def test_repairing_a_device_invalidates_previous_browser_proofs(self):
+        self.connect_agent()
+        old_headers = self.csrf_headers()
+        manager = self.registry.get(self.user["id"]).task_manager
+        manager.disconnect_all_agents()
+        self.connect_agent()
+        result = self.client.post("/api/accounts/jd/shop1/login", headers=old_headers)
+        self.assertEqual(result.status_code, 409)
+
+    def test_running_task_renewal_restores_server_verified_pairing_after_presence_loss(self):
+        self.connect_agent()
+        created = self.client.post("/api/accounts/jd/shop1/check", headers=self.csrf_headers())
+        self.assertEqual(created.status_code, 202, created.text)
+        job_id = created.json()["job"]["id"]
+        self.agent_post_json("/api/agent/claim", {"agent_id":"b"*32})
+        manager = self.registry.get(self.user["id"]).task_manager
+        manager._agents.clear()
+        manager._dropped_agents.clear()
+        manager._known_device_bindings.clear()
+        renewed = self.agent_post_json(f"/api/agent/jobs/{job_id}/heartbeat", {"agent_id":"b"*32})
+        self.assertEqual(renewed.status_code, 200, renewed.text)
+        self.assertEqual(manager._agents["b"*32]["binding_id"], manager.store.get_job(job_id)["payload"]["target_binding_id"])
+
+    def test_cross_tab_cookie_switch_rejects_old_expected_user(self):
+        first_user_id = self.user["id"]
+        service = self.app.state.auth_service
+        second = service.create_user(actor_user_id=first_user_id, username="second_tab", display_name="second",
+                                     password="second-password-123", role="operator", ip_address="test")
+        logged_in = self.client.post("/api/auth/login", json={"username":"second_tab","password":"second-password-123"})
+        self.assertEqual(logged_in.status_code, 200, logged_in.text)
+        response = self.client.post("/api/accounts/jd/shop1/login", headers={
+            "X-CSRF-Token":self.client.cookies["mpau_csrf_v2"], "X-MPAU-User-ID":first_user_id,
+        })
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(self.registry.get(second.id).store.list_jobs(), [])
+
+    def test_rate_limited_completion_pauses_and_explicit_resume_restores_queue(self):
+        self.connect_agent()
+        workspace = self.registry.get(self.user["id"])
+        first = workspace.store.create_job(kind="publish", platform="jd", account="shop1",
+            payload={"target_agent_id":"b"*32,"managed_upload":False,
+                     "target_binding_id":workspace.task_manager._agents["b"*32]["binding_id"]})
+        second = workspace.store.create_job(kind="publish", platform="jd", account="shop1",
+            payload={"target_agent_id":"b"*32,"managed_upload":False,
+                     "target_binding_id":workspace.task_manager._agents["b"*32]["binding_id"]})
+        self.agent_post_json("/api/agent/claim", {"agent_id":"b"*32})
+        done = self.agent_post_json(f"/api/agent/jobs/{first['id']}/complete", {
+            "agent_id":"b"*32,"status":"failed","result":{"pause_account":True,"pause_reason":"rate_limited"},
+        })
+        self.assertEqual(done.status_code, 200, done.text)
+        self.assertIsNone(workspace.task_manager.claim_next_job("b"*32))
+        self.assertEqual(len(self.client.get("/api/agent/status").json()["paused_accounts"]), 1)
+        resumed = self.client.post("/api/accounts/jd/shop1/resume", headers=self.csrf_headers())
+        self.assertEqual(resumed.status_code, 200, resumed.text)
+        self.assertEqual(workspace.task_manager.claim_next_job("b"*32)["id"], second["id"])
 
     def test_local_agent_claim_complete_and_cookie_deletion_workflow(self):
         workspace = self.registry.get(self.user["id"])
@@ -999,7 +1231,8 @@ class LocalAgentApiTests(unittest.TestCase):
             title="自定义封面传输测试",
             managed_upload=True,
         )
-        job = workspace.task_manager.submit_publish_task(request)
+        self.connect_agent()
+        job = workspace.task_manager.submit_publish_task(request, target_agent_id="b" * 32)
 
         self.connect_agent()
         claimed = self.agent_post_json(

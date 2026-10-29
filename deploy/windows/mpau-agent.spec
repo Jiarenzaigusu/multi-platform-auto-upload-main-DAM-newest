@@ -5,7 +5,6 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 project_root = Path.cwd()
 datas = collect_data_files("patchright")
-datas.append((str(project_root / "utils" / "stealth.min.js"), "utils"))
 datas += [
     (str(path), "tmall_path_import")
     for path in (project_root / "local_agent" / "assets" / "tmall_path_import").iterdir()

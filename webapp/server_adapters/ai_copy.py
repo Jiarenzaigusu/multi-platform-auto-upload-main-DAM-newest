@@ -74,7 +74,7 @@ def build_server_ai_copy_service(
         ),
     )
     return AiCopyService(
-        OpenAICompatibleProvider(registry),
+        OpenAICompatibleProvider(registry, feature="ai_copy"),
         product_tool,
         SellingPointCatalogStore(
             max_workbook_bytes=settings.max_selling_point_workbook_bytes,

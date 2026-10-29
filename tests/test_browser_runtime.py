@@ -56,13 +56,22 @@ class FakeContext:
     def __init__(self) -> None:
         self.closed = False
         self.storage_paths: list[str] = []
+        self.storage_options: list[dict] = []
         self.init_scripts: list[str] = []
+        self.listeners: dict[str, list] = {}
+
+    def on(self, event, callback) -> None:
+        self.listeners.setdefault(event, []).append(callback)
+
+    def remove_listener(self, event, callback) -> None:
+        self.listeners[event].remove(callback)
 
     async def add_init_script(self, *, path: str) -> None:
         self.init_scripts.append(path)
 
-    async def storage_state(self, *, path: str) -> None:
+    async def storage_state(self, *, path: str, **options) -> None:
         self.storage_paths.append(path)
+        self.storage_options.append(options)
         Path(path).write_text("{}", encoding="utf-8")
 
     async def close(self) -> None:
@@ -213,6 +222,7 @@ class TmallSessionPoolTests(unittest.TestCase):
                         first.browser.context_options[0]["device_scale_factor"],
                         1,
                     )
+                    self.assertEqual(first_context.init_scripts, [])
                 async with pool.lease(self.account_file, headless=False) as second:
                     self.assertIs(second, first)
                     self.assertIs(second.browser, first_browser)
@@ -290,6 +300,9 @@ class JdSessionPoolTests(unittest.TestCase):
                         self.assertIs(second.browser, first_browser)
                         self.assertIs(second.context, first_context)
                     self.assertEqual(len(browsers), 1)
+                    self.assertEqual(first_context.init_scripts, [])
+                    await first.save_storage_state()
+                    self.assertEqual(first_context.storage_options[-1], {"indexed_db": True})
                 finally:
                     await pool.close()
 
@@ -339,7 +352,7 @@ class SocialSessionPoolTests(unittest.TestCase):
         self.assertIs(DouyinSessionPool()._launcher, launch_browser)
         self.assertIs(XiaohongshuSessionPool()._launcher, launch_browser)
 
-    def test_xiaohongshu_pool_reuses_browser_and_injects_stealth_script(self):
+    def test_xiaohongshu_pool_reuses_browser_without_environment_injection(self):
         async def scenario():
             with tempfile.TemporaryDirectory() as temp_dir:
                 account_file = Path(temp_dir) / "xiaohongshu_shop1.json"
@@ -367,8 +380,7 @@ class SocialSessionPoolTests(unittest.TestCase):
                     self.assertEqual(len(browsers), 1)
                     self.assertIn("permissions", browsers[0].context_options[0])
                     self.assertEqual(browsers[0].context_options[0]["permissions"], ["geolocation"])
-                    self.assertTrue(first_context.init_scripts)
-                    self.assertTrue(str(first_context.init_scripts[0]).endswith("utils/stealth.min.js"))
+                    self.assertEqual(first_context.init_scripts, [])
                 finally:
                     await pool.close()
 
@@ -404,8 +416,8 @@ class SocialSessionPoolTests(unittest.TestCase):
                         pass
                     self.assertIsNot(xhs_session, douyin_session)
                     self.assertEqual(len(browsers), 2)
-                    self.assertTrue(xhs_session.context.init_scripts)
-                    self.assertTrue(douyin_session.context.init_scripts)
+                    self.assertEqual(xhs_session.context.init_scripts, [])
+                    self.assertEqual(douyin_session.context.init_scripts, [])
                 finally:
                     await xhs_pool.close()
                     await douyin_pool.close()

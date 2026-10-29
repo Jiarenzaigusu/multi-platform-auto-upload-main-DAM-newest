@@ -17,23 +17,25 @@ const path = ref([])
 const selected = ref([])
 const error = ref('')
 const configured = ref(false)
-const connecting = ref(false)
-const connection = ref({ host: '', key: '', secret: '', tenant: '', catalog: '' })
 
 const title = computed(() => props.mode === 'video' ? '从 DAM 选择视频' : props.mode === 'cover' ? '从 DAM 选择封面' : '从 DAM 选择图片')
 // DAM is the source of truth; platform-specific format validation remains in the publish form.
 const filteredAssets = computed(() => assets.value)
 
 async function show() {
+  if (loading.value) return
   open.value = true
+  configured.value = false
   error.value = ''
+  folders.value = []
+  assets.value = []
   selected.value = []
   path.value = []
   loading.value = true
   try {
     const status = await apiRequest('/api/dam/status')
     configured.value = status.configured
-    if (!status.configured) return
+    if (!status.configured) throw new Error('DAM 素材库尚未在服务端配置')
     await initializeBinding(status.bindings || [], status.binding)
   } catch (cause) {
     error.value = cause.message
@@ -43,45 +45,12 @@ async function show() {
 }
 
 async function initializeBinding(bindings, preferredBinding = null) {
-  const binding = preferredBinding || bindings.find((item) => (
-    !connection.value.tenant || (item.tenantCode === connection.value.tenant && item.catalogCode === connection.value.catalog)
-  )) || bindings[0]
+  const binding = preferredBinding || bindings[0]
   if (binding?.scopeMode === 'FOLDER_ROOTS') {
     folders.value = (binding.rootCollectionIds || []).map((id) => ({ id, name: `授权目录 #${id}`, hasChildren: true }))
   } else {
     await loadFolders(null)
   }
-}
-
-async function connectDam() {
-  connecting.value = true
-  error.value = ''
-  try {
-    const result = await apiRequest('/api/dam/session', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(connection.value),
-    })
-    configured.value = true
-    path.value = []
-    assets.value = []
-    selected.value = []
-    await initializeBinding(result.bindings || [], result.binding)
-  } catch (cause) {
-    error.value = cause.message
-  } finally {
-    connecting.value = false
-  }
-}
-
-async function disconnectDam() {
-  await apiRequest('/api/dam/session', { method: 'DELETE' })
-  configured.value = false
-  folders.value = []
-  assets.value = []
-  path.value = []
-  selected.value = []
-  connection.value.secret = ''
 }
 
 async function loadFolders(parentId) {
@@ -171,21 +140,15 @@ async function importSelected() {
   <button type="button" class="dam-open-button" @click="show">{{ title }}</button>
   <Teleport to="body">
     <div v-if="open" class="dam-picker-backdrop" @click.self="open = false">
-      <section class="dam-picker" :class="{ 'dam-picker-login': !configured }" role="dialog" aria-modal="true" :aria-label="title">
+      <section class="dam-picker" :class="{ 'dam-picker-status': !configured }" role="dialog" aria-modal="true" :aria-label="title">
         <header>
           <div><small>DAM OPENAPI</small><h2>{{ title }}</h2></div>
-          <div class="dam-picker-header-actions"><button v-if="configured" type="button" class="quiet" @click="disconnectDam">更换连接</button><button type="button" class="quiet" @click="open = false">关闭</button></div>
+          <div class="dam-picker-header-actions"><button type="button" class="quiet" :disabled="loading || importing" @click="show">{{ loading ? '正在加载…' : '重新加载' }}</button><button type="button" class="quiet" @click="open = false">关闭</button></div>
         </header>
-        <form v-if="!configured" class="dam-login" @submit.prevent="connectDam">
-          <div><small>测试期连接</small><h3>连接 DAM OpenAPI</h3><p>凭证只保存在当前服务进程内，不写入浏览器存储或数据库。</p></div>
-          <label><span>API Host</span><input v-model.trim="connection.host" required placeholder="https://.../ddc-dam-backend" /></label>
-          <label><span>Key ID</span><input v-model.trim="connection.key" required autocomplete="off" placeholder="dam_xxxxxxxx" /></label>
-          <label><span>Secret</span><input v-model="connection.secret" required type="password" autocomplete="new-password" /></label>
-          <label><span>Tenant</span><input v-model.trim="connection.tenant" required /></label>
-          <label><span>Catalog</span><input v-model.trim="connection.catalog" required /></label>
+        <div v-if="!configured" class="dam-picker-empty" role="status">
+          <p v-if="loading">正在连接 DAM 素材库…</p>
           <p v-if="error" class="form-error">{{ error }}</p>
-          <button type="submit" :disabled="connecting">{{ connecting ? '正在验证…' : '验证并连接' }}</button>
-        </form>
+        </div>
         <template v-else>
           <div class="dam-picker-path"><button type="button" :disabled="!path.length" @click="goUp">← .. 返回上一级</button><span v-for="item in path" :key="item.id">/ {{ item.name }}</span></div>
           <p v-if="error" class="form-error">{{ error }}</p>

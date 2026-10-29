@@ -2,6 +2,8 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 
 import { apiRequest } from '../api-client.js'
+import { useBrandOptions } from '../brand-options.js'
+import BrandSelect from './BrandSelect.vue'
 
 const emit = defineEmits(['authenticated'])
 
@@ -10,6 +12,7 @@ const setupRequired = ref(false)
 const authMode = ref('login')
 const submitting = ref(false)
 const error = ref('')
+const { brands, loading: brandsLoading, message: brandMessage, reload: reloadBrands } = useBrandOptions()
 const form = reactive({
   username: '',
   displayName: '',
@@ -51,8 +54,8 @@ async function submit() {
     error.value = '两次输入的密码不一致'
     return
   }
-  if ((setupRequired.value || registering.value) && !normalizeBrandName(form.brandName)) {
-    error.value = '请输入账户展示品牌名；数据品牌权限由管理员设置。'
+  if ((registering.value || (setupRequired.value && brands.value.length)) && !brands.value.some((brand) => brand.name === form.brandName)) {
+    error.value = '请从列表中选择所属品牌。'
     return
   }
   form.brandName = normalizeBrandName(form.brandName)
@@ -138,16 +141,10 @@ onMounted(loadStatus)
           />
         </label>
         <label v-if="setupRequired || registering">
-          <span>账户展示品牌名</span>
-          <input
-            v-model="form.brandName"
-            autocomplete="organization"
-            maxlength="120"
-            required
-            spellcheck="false"
-            placeholder="请输入系统中登记的品牌名，例如：Nike"
-          />
-          <small>仅用于账户资料；数据品牌权限由管理员设置。</small>
+          <span>所属品牌</span>
+          <BrandSelect v-model="form.brandName" :brands="brands" :loading="brandsLoading" :required="registering || brands.length > 0" />
+          <small>{{ brandMessage || '注册后可访问所选品牌的数据。' }}<template v-if="setupRequired && !brandsLoading && !brands.length"> 可先创建管理员，之后再分配品牌。</template></small>
+          <button v-if="brandMessage && !brandsLoading" class="brand-retry" type="button" @click="reloadBrands">重新读取品牌列表</button>
         </label>
         <label>
           <span>密码</span>
@@ -173,7 +170,7 @@ onMounted(loadStatus)
           />
         </label>
         <p v-if="error" class="auth-error" role="alert">{{ error }}</p>
-        <button class="auth-submit" :disabled="submitting" type="submit">
+        <button class="auth-submit" :disabled="submitting || ((setupRequired || registering) && brandsLoading) || (registering && !brands.length)" type="submit">
           {{ submitting ? '正在验证…' : setupRequired ? '创建并登录' : registering ? '注册并进入发布台' : '安全登录' }}
         </button>
       </form>
@@ -367,7 +364,8 @@ onMounted(loadStatus)
   font-weight: 850;
 }
 
-.auth-card input {
+.auth-card input,
+.auth-card select {
   width: 100%;
   padding: 11px 12px;
   border: 1px solid #cbd8d0;
@@ -378,9 +376,20 @@ onMounted(loadStatus)
   font-size: 12px;
 }
 
-.auth-card input:focus {
+.auth-card input:focus,
+.auth-card select:focus {
   border-color: #779e65;
   box-shadow: 0 0 0 3px rgba(133, 174, 101, .16);
+}
+
+.brand-retry {
+  padding: 0;
+  border: 0;
+  color: #2e6448;
+  background: transparent;
+  text-align: left;
+  font-size: 11px;
+  cursor: pointer;
 }
 
 .auth-card label small {

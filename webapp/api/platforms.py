@@ -373,7 +373,7 @@ async def login_jd_account(
     paths: UserDataPaths,
     session_pool: JdSessionPool,
 ) -> dict:
-    """京东账号登录：打开可见浏览器等待用户手动登录。"""
+    """京东手动登录：始终使用空白会话，成功后替换旧状态。"""
     account_file = resolve_account_file(paths, "jd", account_name)
     try:
         async with session_pool.lease(
@@ -385,6 +385,7 @@ async def login_jd_account(
                 handle=True,
                 return_detail=True,
                 session=session,
+                force_relogin=True,
             )
     finally:
         secure_account_file(account_file)

@@ -2,6 +2,8 @@
 import { onMounted, reactive, ref } from 'vue'
 
 import { apiRequest } from '../../api-client.js'
+import { useBrandOptions } from '../../brand-options.js'
+import BrandSelect from '../../components/BrandSelect.vue'
 
 const props = defineProps({
   currentUserId: { type: String, required: true },
@@ -9,8 +11,10 @@ const props = defineProps({
 const emit = defineEmits(['brand-binding-changed'])
 
 const users = ref([])
-const brandAccess = ref({ configured: false, brands: [], bindings: {} })
 const bindingDrafts = reactive({})
+const originalBindings = reactive({})
+const currentBrandLabels = reactive({})
+const { brands, loading: brandsLoading, message: brandMessage, reload: reloadBrands } = useBrandOptions()
 const loading = ref(true)
 const busyUserId = ref('')
 const creating = ref(false)
@@ -34,10 +38,18 @@ async function loadUsers() {
   loading.value = true
   error.value = ''
   try {
-    users.value = await apiRequest('/api/admin/users')
-    brandAccess.value = await apiRequest('/api/admin/brand-access')
-    for (const user of users.value) {
-      bindingDrafts[user.id] = String(brandAccess.value.bindings[user.id] || '')
+    const [loadedUsers, access] = await Promise.all([
+      apiRequest('/api/admin/users'),
+      apiRequest('/api/admin/brand-access'),
+    ])
+    users.value = loadedUsers
+    for (const user of loadedUsers) {
+      const brandId = access.bindings[user.id]
+      const brand = access.brands.find((entry) => entry.id === brandId)
+      const value = brandId ? String(brandId) : user.brand_name ? `existing:${user.id}` : ''
+      bindingDrafts[user.id] = value
+      originalBindings[user.id] = value
+      currentBrandLabels[user.id] = brand?.name || (brandId ? `原绑定品牌 ID ${brandId}` : user.brand_name)
     }
   } catch (requestError) {
     error.value = requestError.message
@@ -46,30 +58,12 @@ async function loadUsers() {
   }
 }
 
-async function saveBrandBinding(user) {
-  busyUserId.value = user.id
-  error.value = ''
-  notice.value = ''
-  try {
-    const brandId = bindingDrafts[user.id]
-    await apiRequest(`/api/admin/users/${user.id}/brand-binding`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ brand_id: brandId ? Number(brandId) : null }),
-    })
-    brandAccess.value.bindings[user.id] = brandId ? Number(brandId) : null
-    if (user.id === props.currentUserId) emit('brand-binding-changed')
-    notice.value = `已更新 ${user.username} 的数据品牌权限。`
-  } catch (requestError) {
-    error.value = requestError.message
-    bindingDrafts[user.id] = String(brandAccess.value.bindings[user.id] || '')
-  } finally {
-    busyUserId.value = ''
-  }
-}
-
 /** Provision a new company account without opening public registration. */
 async function createUser() {
+  if (!brands.value.some((brand) => brand.name === createForm.brandName)) {
+    error.value = '请从列表中选择所属品牌。'
+    return
+  }
   creating.value = true
   error.value = ''
   notice.value = ''
@@ -106,12 +100,23 @@ async function saveUser(user) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         display_name: user.display_name.trim(),
-        brand_name: normalizeBrandName(user.brand_name || ''),
         role: user.role,
         status: user.status,
       }),
     })
     Object.assign(user, updated)
+    if (bindingDrafts[user.id] !== originalBindings[user.id]) {
+      const binding = await apiRequest(`/api/admin/users/${user.id}/brand-binding`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ brand_id: bindingDrafts[user.id] ? Number(bindingDrafts[user.id]) : null }),
+      })
+      user.brand_name = binding.brand_name
+      user.brand_key = binding.brand_key
+      originalBindings[user.id] = bindingDrafts[user.id]
+      currentBrandLabels[user.id] = binding.brand_name
+    }
+    if (user.id === props.currentUserId) emit('brand-binding-changed', user)
     notice.value = `已更新 ${updated.username}。`
   } catch (requestError) {
     error.value = requestError.message
@@ -214,15 +219,8 @@ onMounted(loadUsers)
                 <input v-model="user.display_name" maxlength="80" />
               </label>
               <label>
-                <span>账户展示品牌名（不授予数据权限）</span>
-                <input v-model="user.brand_name" maxlength="120" spellcheck="false" />
-              </label>
-              <label>
-                <span>数据品牌权限</span>
-                <select v-model="bindingDrafts[user.id]" :disabled="!brandAccess.configured">
-                  <option value="">未绑定</option>
-                  <option v-for="brand in brandAccess.brands" :key="brand.id" :value="String(brand.id)">{{ brand.name }}（ID {{ brand.id }}）</option>
-                </select>
+                <span>所属品牌</span>
+                <BrandSelect v-model="bindingDrafts[user.id]" :brands="brands" :loading="brandsLoading" value-field="id" :current-label="currentBrandLabels[user.id]" />
               </label>
               <label>
                 <span>角色</span>
@@ -240,9 +238,9 @@ onMounted(loadUsers)
               </label>
             </div>
 
+            <p class="user-brand-help">{{ brandMessage || '默认保留原品牌绑定，选择其他品牌并保存后才会更改。' }}</p>
             <div class="user-save-row">
               <button class="user-save" :disabled="busyUserId === user.id" type="button" @click="saveUser(user)">保存资料</button>
-              <button class="user-save" :disabled="busyUserId === user.id || !brandAccess.configured" type="button" @click="saveBrandBinding(user)">保存数据品牌权限</button>
             </div>
 
             <div class="user-security">
@@ -262,10 +260,11 @@ onMounted(loadUsers)
       <form @submit.prevent="createUser">
         <label><span>用户名</span><input v-model="createForm.username" autocomplete="off" minlength="3" maxlength="64" required placeholder="例如 zhangsan" /></label>
         <label><span>显示名称</span><input v-model="createForm.displayName" autocomplete="off" maxlength="80" placeholder="例如 张三" /></label>
-        <label><span>账户展示品牌名</span><input v-model="createForm.brandName" autocomplete="organization" maxlength="120" required spellcheck="false" placeholder="例如 Nike" /></label>
+        <label><span>所属品牌</span><BrandSelect v-model="createForm.brandName" :brands="brands" :loading="brandsLoading" required /><small>{{ brandMessage || '创建后可访问所选品牌的数据。' }}</small></label>
+        <button v-if="brandMessage && !brandsLoading" type="button" @click="reloadBrands">重新读取品牌列表</button>
         <label><span>初始密码</span><input v-model="createForm.password" autocomplete="new-password" minlength="10" maxlength="256" required type="password" /></label>
         <label><span>角色</span><select v-model="createForm.role"><option value="operator">操作员</option><option value="admin">管理员</option></select></label>
-        <button :disabled="creating" type="submit">{{ creating ? '正在创建…' : '创建公司账号' }}</button>
+        <button :disabled="creating || brandsLoading || !brands.length" type="submit">{{ creating ? '正在创建…' : '创建公司账号' }}</button>
       </form>
       <dl><dt>管理员</dt><dd>用户管理、发布、AI 与模型配置</dd><dt>操作员</dt><dd>发布、AI 与自己的模型配置</dd></dl>
     </aside>
@@ -416,6 +415,13 @@ onMounted(loadUsers)
   color: #496158;
   font-size: 11px;
   font-weight: 850;
+}
+
+.user-brand-help,
+.create-user-card label > small {
+  margin: 0;
+  color: #496158;
+  font-size: 11px;
 }
 
 .user-profile input,

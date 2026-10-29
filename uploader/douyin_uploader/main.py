@@ -13,6 +13,7 @@ from patchright.async_api import Page
 
 from utils.config import DEBUG_MODE, LOCAL_EDGE_HEADLESS
 from uploader.base_video import BaseVideoUploader
+from uploader.publish_guard import publish_once, save_confirmed_state
 from utils.log import douyin_logger
 
 DOUYIN_PUBLISH_STRATEGY_IMMEDIATE = "immediate"
@@ -66,16 +67,16 @@ async def _handle_sms_verify(page: Page, account_file: str) -> bool:
 
     # 轮询等待 code 文件出现，最多等 5 分钟
     # 同时检测弹窗是否还在，消失说明超时自动关闭了（抖音弹窗有计时器），
-    # 此时 input 已不可用，需要重新触发弹窗（下一轮 while True 会重新检测并点发布）
+    # 此时 input 已不可用；只等待平台确认，不重新点击发布。
     code_path = _verify_code_path(account_file)
     code_path.unlink(missing_ok=True)
     for _ in range(150):
         await asyncio.sleep(2)
         if code_path.exists():
             break
-        # 弹窗被关闭（抖音超时）→ 放弃本次，外层 while True 会重新发布并触发弹窗
+        # 弹窗被关闭（抖音超时）→ 继续等待确认，超时后交由人工核对。
         if not await verify_panel.is_visible():
-            douyin_logger.warning(_msg("⚠️", "弹窗超时自动关闭，等待重新触发"))
+            douyin_logger.warning(_msg("⚠️", "弹窗超时自动关闭，等待平台确认，不自动重发"))
             return False
     else:
         douyin_logger.error(_msg("😵", "等待验证码超时（5分钟），小人放弃了"))
@@ -760,30 +761,20 @@ class DouYinVideo(DouYinBaseUploader):
             douyin_logger.success(_msg("🥳", "cookie 更新完毕"))
             return {"mode": "dry_run", "final_url": page.url}
 
-        while True:
-            if await _handle_sms_verify(page, self.account_file):
-                douyin_logger.info(_msg("🏃", "验证完成，小人继续冲刺发布"))
-                await asyncio.sleep(1)
-                continue
+        await self.handle_auto_video_cover(page)
+        async def observe_submission():
+            await self.handle_auto_video_cover(page)
+            return await _handle_sms_verify(page, self.account_file)
 
-            try:
-                publish_button = page.get_by_role("button", name="发布", exact=True)
-                if await publish_button.count():
-                    await publish_button.click()
-                await page.wait_for_url(
-                    "https://creator.douyin.com/creator-micro/content/manage**",
-                    timeout=3000,
-                )
-                douyin_logger.success(_msg("🥳", "视频发布成功，小人开心收工"))
-                await context.storage_state(path=self.account_file)
-                douyin_logger.success(_msg("🥳", "cookie 更新完毕"))
-                return {"mode": "publish", "final_url": page.url}
-            except Exception:
-                await self.handle_auto_video_cover(page)
-                douyin_logger.info(_msg("🏃", "小人正在冲刺发布视频"))
-                if self.debug:
-                    await page.screenshot(full_page=True)
-                await asyncio.sleep(0.5)
+        await publish_once(
+            page, page.get_by_role("button", name="发布", exact=True),
+            "https://creator.douyin.com/creator-micro/content/manage**",
+            logger=douyin_logger, timeout_seconds=600,
+            observe=observe_submission,
+        )
+        douyin_logger.success(_msg("🥳", "视频发布已取得平台确认"))
+        await save_confirmed_state(context, self.account_file, douyin_logger)
+        return {"mode": "publish", "final_url": page.url}
 
     async def upload_in_session(self, session) -> dict:
         douyin_logger.info(_msg("🧍", "小人先检查 cookie、视频文件、封面和发布时间"))
@@ -881,20 +872,12 @@ class DouYinNote(DouYinBaseUploader):
             douyin_logger.info(_msg("📸", f"截图已保存: {screenshot_path}"))
             return
 
-        while True:
-            try:
-                publish_button = page.get_by_role("button", name="发布", exact=True)
-                if await publish_button.count():
-                    await publish_button.click()
-                await page.wait_for_url(
-                    "**/creator-micro/content/manage?enter_from=publish**",
-                    timeout=3000,
-                )
-                douyin_logger.success(_msg("🥳", "图文发布成功，小人开心收工"))
-                break
-            except Exception:
-                douyin_logger.info(_msg("🏃", "小人正在冲刺发布图文"))
-                await asyncio.sleep(0.5)
+        await publish_once(
+            page, page.get_by_role("button", name="发布", exact=True),
+            "**/creator-micro/content/manage**", logger=douyin_logger,
+            timeout_seconds=600, observe=lambda: _handle_sms_verify(page, self.account_file),
+        )
+        douyin_logger.success(_msg("🥳", "图文发布已取得平台确认"))
 
     async def _upload_in_context(self, context: BrowserContext) -> dict:
         upload_success = False
@@ -906,8 +889,7 @@ class DouYinNote(DouYinBaseUploader):
         await self.upload_note_content(page)
         upload_success = True
         if upload_success:
-            await context.storage_state(path=self.account_file)
-            douyin_logger.success(_msg("🥳", "cookie 更新完毕"))
+            await save_confirmed_state(context, self.account_file, douyin_logger)
         return {"mode": "dry_run" if self.dry_run else "publish", "final_url": page.url}
 
     async def upload_in_session(self, session) -> dict:

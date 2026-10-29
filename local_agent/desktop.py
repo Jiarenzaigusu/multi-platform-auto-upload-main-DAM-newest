@@ -17,7 +17,7 @@ from local_agent.client import AgentApiClient, AgentApiError
 from local_agent.credentials import AgentConnectionStore, StoredConnection
 from local_agent.main import LocalAgentApplication, _server_url
 from local_agent.path_import import run_path_import
-from local_agent.paths import default_data_root
+from local_agent.paths import default_data_root, regenerate_agent_id
 from local_agent import theme
 from local_agent import updater
 from utils.log import logger
@@ -218,7 +218,7 @@ def _pairing_dialog(
     root.resizable(False, False)
     root.configure(bg=theme.CREAM)
     theme.apply_tk_scaling(root)
-    theme.center_window(root, 520, 540)
+    theme.center_window(root, 520, 580)
     result: dict[str, StoredConnection] = {}
 
     theme.header_band(
@@ -303,6 +303,19 @@ def _pairing_dialog(
     def pairing_failed(message: str) -> None:
         status.set(message)
         button.configure(state="normal", text="完成配对")
+        if "设备 ID 已归属其他用户" in message:
+            reset_button.pack(fill="x", pady=(8, 0))
+
+    def reset_identifier() -> None:
+        if not messagebox.askyesno("重建设备标识", "检测到本机设备标识与另一用户冲突。是否为本机生成新标识后重新配对？不会修改另一用户的设备授权。"):
+            return
+        try:
+            regenerate_agent_id(data_root)
+        except OSError:
+            status.set("无法写入本机设备标识，请检查助手数据目录权限")
+            return
+        reset_button.pack_forget()
+        status.set("已重建本机设备标识，原配对码未被消耗，请再次点击完成配对")
 
     def pairing_succeeded() -> None:
         set_autostart(True)
@@ -311,6 +324,7 @@ def _pairing_dialog(
 
     button = theme.primary_button(body, "完成配对", finish_pairing)
     button.pack(fill="x", ipady=5, pady=(18, 0))
+    reset_button = tk.Button(body, text="重建设备标识并重新配对", command=reset_identifier)
     root.bind("<Return>", lambda _e: finish_pairing())
     tk.Label(
         body,

@@ -196,6 +196,8 @@ class AuthStore:
                     ON sessions(user_id);
                 CREATE INDEX IF NOT EXISTS idx_audit_user_created
                     ON audit_logs(user_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_audit_action_day
+                    ON audit_logs(action, julianday(created_at));
                 CREATE INDEX IF NOT EXISTS idx_users_brand_key
                     ON users(brand_key);
                 """
@@ -632,6 +634,12 @@ class AuthStore:
                 connection.rollback()
                 return None
             user = self._user(row)
+            owner = connection.execute(
+                "SELECT user_id FROM agent_devices WHERE agent_id = ?", (agent_id,)
+            ).fetchone()
+            if owner is not None and owner["user_id"] != user.id:
+                connection.rollback()
+                raise ValueError("设备 ID 已归属其他用户，请在助手中重建本机设备标识后重新配对")
             updated = connection.execute(
                 "UPDATE agent_pairing_codes SET used_at = ? "
                 "WHERE id = ? AND used_at IS NULL",

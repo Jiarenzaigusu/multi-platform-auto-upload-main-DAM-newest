@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import copy_context
 import hashlib
 import http.client
 import json
@@ -42,6 +43,7 @@ from webapp.api.agent_tasks import AgentTaskManager
 from webapp.api.models import validate_publish_request
 from webapp.api.store import JobStore
 from webapp.workspaces import AppDataPaths, UserWorkspaceRegistry
+from webapp.execution_context import verified_agent_id
 
 USER_ID = "a" * 32
 AGENT_ID = "b" * 32
@@ -87,6 +89,8 @@ class AgentTaskManagerTests(unittest.TestCase):
             user_id=USER_ID,
             paths=self.paths,
         )
+        marker = verified_agent_id.set(AGENT_ID)
+        self.addCleanup(verified_agent_id.reset, marker)
 
     def tearDown(self) -> None:
         self.manager.shutdown()
@@ -303,6 +307,7 @@ class AgentTaskManagerTests(unittest.TestCase):
         self.assertIn(str(article.resolve()), xml)
 
     def test_agent_claims_and_completes_a_queued_job(self):
+        self.connect()
         job = self.manager.submit_account_task(
             kind="login", platform="tmall", account="shop1", headed=True
         )
@@ -342,6 +347,7 @@ class AgentTaskManagerTests(unittest.TestCase):
         self.assertNotIn(AGENT_ID, self.manager._agents, "代理应已被判定离线")
 
     def test_dropped_agent_is_revived_on_heartbeat_instead_of_failing(self):
+        self.connect()
         # 续约晚了（例如被长任务阻塞）会被判离线。此时带着有效设备令牌发来的
         # 心跳应恢复在线，而不是报错让客户端取消任务。
         job = self.manager.submit_account_task(
@@ -362,6 +368,7 @@ class AgentTaskManagerTests(unittest.TestCase):
         )
 
     def test_dropped_agent_is_revived_on_claim(self):
+        self.connect()
         job = self.manager.submit_account_task(
             kind="check", platform="tmall", account="shop1", headed=False
         )
@@ -393,6 +400,7 @@ class AgentTaskManagerTests(unittest.TestCase):
         self.assertEqual(claimed["id"], created["id"])
 
     def test_publish_lease_expiry_becomes_uncertain_and_cleans_upload(self):
+        self.connect()
         video_dir = self.paths.uploads / ("d" * 32)
         video_dir.mkdir()
         video = video_dir / "demo.mp4"
@@ -463,6 +471,7 @@ class AgentTaskManagerTests(unittest.TestCase):
         self.assertEqual(client.calls, 1)
 
     def test_batch_publish_is_persisted_with_one_state_write(self):
+        self.connect()
         video = self.paths.media / "demo.mp4"
         video.write_bytes(b"video")
         request = validate_publish_request(
@@ -484,6 +493,7 @@ class AgentTaskManagerTests(unittest.TestCase):
         self.assertEqual(write.call_count, 1)
 
     def test_batch_publish_is_claimed_in_excel_row_order(self):
+        self.connect()
         video = self.paths.media / "ordered.mp4"
         video.write_bytes(b"video")
         request = validate_publish_request(
@@ -565,7 +575,121 @@ class AgentTaskManagerTests(unittest.TestCase):
         self.assertEqual(payload["image_paths"], [])
         self.assertIsNone(payload["cover_image_path"])
         self.assertEqual(payload["local_assets"]["video"]["asset_id"], authorized["asset_id"])
+        self.assertEqual(payload["target_agent_id"], AGENT_ID)
         self.assertNotIn(ticket["ticket"], str(payload))
+
+    def _submit_direct_asset_job(self, agent_id=AGENT_ID):
+        ticket = self.manager.issue_local_upload_ticket(
+            agent_id=agent_id, origin="https://console.example",
+            filename="demo.mp4", size=5, kind="video", max_size=100,
+        )
+        self.manager.authorize_local_upload(
+            ticket=ticket["ticket"], agent_id=agent_id,
+            origin="https://console.example", reserve=True,
+        )
+        completed = self.manager.complete_local_upload(
+            ticket=ticket["ticket"], agent_id=agent_id,
+            origin="https://console.example", sha256="a" * 64, size=5,
+        )
+        fixture = self.paths.runtime / "validation.mp4"
+        fixture.write_bytes(b"video")
+        request = validate_publish_request(
+            platform="tmall", account="shop1", video_path=fixture,
+            original_filename="demo.mp4", title="设备归属测试",
+        )
+        asset = {key: completed[key] for key in (
+            "asset_id", "filename", "size", "kind", "sha256",
+        )}
+        return self.manager.submit_publish_task(request, local_assets={"video": asset}, target_agent_id=agent_id)
+
+    def test_other_device_skips_local_asset_job_without_blocking_its_queue(self):
+        self.connect()
+        local_job = self._submit_direct_asset_job()
+        self.manager.disconnect_agent(AGENT_ID)
+        other_id = "c" * 32
+        self.manager.connect_agent(
+            agent_id=other_id, device_name="Other-PC", system="Windows", version="test",
+        )
+        other_job = self.manager.submit_account_task(
+            kind="check", platform="tmall", account="shop2", target_agent_id=other_id,
+        )
+
+        claimed = self.manager.claim_next_job(other_id)
+
+        self.assertEqual(claimed["id"], other_job["id"])
+        self.assertEqual(self.store.get_job(local_job["id"])["status"], "queued")
+        self.manager.disconnect_agent(other_id)
+        self.connect()
+        self.assertEqual(self.manager.claim_next_job(AGENT_ID)["id"], local_job["id"])
+
+    def test_local_asset_target_survives_manager_and_store_restart(self):
+        self.connect()
+        job = self._submit_direct_asset_job()
+        self.manager.shutdown()
+        self.store = JobStore(self.paths.runtime)
+        self.manager = AgentTaskManager(self.store, user_id=USER_ID, paths=self.paths)
+        other_id = "c" * 32
+        self.manager.connect_agent(
+            agent_id=other_id, device_name="Other-PC", system="Windows", version="test",
+        )
+        self.assertIsNone(self.manager.claim_next_job(other_id))
+        self.manager.disconnect_agent(other_id)
+        self.connect()
+        self.assertEqual(self.manager.claim_next_job(AGENT_ID)["id"], job["id"])
+
+    def test_legacy_local_asset_target_is_recovered_from_server_records(self):
+        self.connect()
+        job = self._submit_direct_asset_job()
+        payload = dict(job["payload"])
+        payload.pop("target_agent_id")
+        self.store.update_job(job["id"], payload=payload)
+
+        claimed = self.manager.claim_next_job(AGENT_ID)
+
+        self.assertEqual(claimed["id"], job["id"])
+        self.assertEqual(claimed["payload"]["target_agent_id"], AGENT_ID)
+
+    def test_legacy_local_asset_without_ownership_fails_without_blocking_queue(self):
+        self.connect()
+        job = self._submit_direct_asset_job()
+        payload = dict(job["payload"])
+        payload.pop("target_agent_id")
+        self.store.update_job(job["id"], payload=payload)
+        self.manager._local_assets.clear()
+        next_job = self.manager.submit_account_task(
+            kind="check", platform="tmall", account="shop2",
+        )
+
+        self.assertEqual(self.manager.claim_next_job(AGENT_ID)["id"], next_job["id"])
+        failed = self.store.get_job(job["id"])
+        self.assertEqual(failed["status"], "failed")
+        self.assertIn("重新上传", failed["message"])
+
+    def test_local_asset_owner_comes_from_server_records_not_supplied_device_id(self):
+        self.connect()
+        job = self._submit_direct_asset_job()
+        assets = job["payload"]["local_assets"]
+        assets["video"]["agent_id"] = "c" * 32
+        self.assertEqual(self.manager._local_asset_agent_id(assets), AGENT_ID)
+
+        self.manager._local_assets[assets["video"]["asset_id"]]["user_id"] = "d" * 32
+        with self.assertRaisesRegex(ValueError, "不属于当前用户"):
+            self.manager._local_asset_agent_id(assets)
+
+    def test_mixed_device_assets_are_rejected(self):
+        self.connect()
+        first = self._submit_direct_asset_job()
+        self.manager.disconnect_agent(AGENT_ID)
+        other_id = "c" * 32
+        self.manager.connect_agent(
+            agent_id=other_id, device_name="Other-PC", system="Windows", version="test",
+        )
+        second = self._submit_direct_asset_job(other_id)
+        with self.assertRaisesRegex(ValueError, "同一台"):
+            self.manager._local_asset_agent_id({"images": [
+                first["payload"]["local_assets"]["video"],
+                second["payload"]["local_assets"]["video"],
+            ]})
 
     def test_tmall_product_lookup_round_trips_through_agent_job(self):
         self.connect()
@@ -580,7 +704,8 @@ class AgentTaskManagerTests(unittest.TestCase):
             except Exception as exc:
                 error.append(exc)
 
-        worker = threading.Thread(target=lookup)
+        context = copy_context()
+        worker = threading.Thread(target=lambda: context.run(lookup))
         worker.start()
         claimed = None
         for _ in range(50):
@@ -1658,6 +1783,9 @@ UPLOAD_ORIGIN = "https://console.example"
 
 
 class _FakeUploadClient:
+    def confirm_local_identity(self, ticket: str, origin: str):
+        return {"agent_id": AGENT_ID, "proof": "test-local-proof"}
+
     """Stand in for the cloud broker without any network access."""
 
     def __init__(self, *, size: int = 5, filename: str = "demo.mp4") -> None:
@@ -1904,6 +2032,19 @@ class LocalUploadCorsTests(unittest.TestCase):
 
                 self.assertEqual(status, 204)
                 self.assertCorsVisible(headers, origin)
+
+    def test_local_identity_exchange_uses_cors_and_never_creates_files(self):
+        status, headers, body = self._send("POST", "/v1/identity?ticket=identity-ticket", body=b"")
+        self.assertEqual(status, 200)
+        self.assertCorsVisible(headers)
+        self.assertEqual(json.loads(body)["proof"], "test-local-proof")
+        self.assertEqual(list(self.asset_root.iterdir()), [])
+
+    def test_local_identity_preflight_is_allowed_without_cloud_calls(self):
+        status, headers, _body = self._send("OPTIONS", "/v1/identity?ticket=identity-ticket", headers=PREFLIGHT_HEADERS)
+        self.assertEqual(status, 204)
+        self.assertCorsVisible(headers)
+        self.assertEqual(self.client.authorize_calls, [])
 
     def test_post_without_a_ticket_answers_403_with_cors_headers(self):
         status, headers, body = self._send("POST", "/v1/upload", body=b"video")

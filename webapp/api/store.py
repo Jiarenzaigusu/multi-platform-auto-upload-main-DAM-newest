@@ -359,6 +359,24 @@ class JobStore:
             self._write(state)
         return jobs
 
+    def pause_account(self, platform: str, account: str, reason: str) -> None:
+        with self._lock:
+            state = self._read()
+            state.setdefault("paused_accounts", {})[f"{platform}:{account}"] = {
+                "platform": platform, "account": account, "reason": reason, "paused_at": utc_now(),
+            }
+            self._write(state)
+
+    def resume_account(self, platform: str, account: str) -> None:
+        with self._lock:
+            state = self._read()
+            state.setdefault("paused_accounts", {}).pop(f"{platform}:{account}", None)
+            self._write(state)
+
+    def paused_accounts(self) -> dict[str, dict]:
+        with self._lock:
+            return deepcopy(self._state.get("paused_accounts", {}))
+
     def prune_terminal_jobs(
         self, *, max_count: int = 2000, older_than_days: int = 90
     ) -> list[dict[str, Any]]:

@@ -1671,7 +1671,10 @@ class TmallArticle:
             raise
         finally:
             if success:
-                await context.storage_state(path=self.account_file)
+                try:
+                    await context.storage_state(path=self.account_file)
+                except (Exception, asyncio.CancelledError):
+                    tmall_logger.warning("平台结果已确认，但登录状态保存失败；不会将发布成功改为失败")
             if page and not page.is_closed():
                 if session is not None:
                     await session.reveal_page(page)

@@ -30,7 +30,6 @@ from typing import Any, AsyncIterator, Awaitable, Callable
 
 from patchright.async_api import Browser, BrowserContext, Playwright, async_playwright
 
-from utils.base_social_media import set_init_script
 from utils.config import LOCAL_EDGE_PATH
 
 
@@ -243,13 +242,15 @@ class BrowserSession:
             fallback_options = dict(context_options)
             fallback_options.pop("storage_state", None)
             self.context = await self.browser.new_context(**fallback_options)
-        # 注入 stealth 反检测脚本（utils/stealth.min.js）
-        self.context = await set_init_script(self.context)
         self.touch()
         return self.context
 
     def context_options(self) -> dict[str, object]:
         """Return platform-specific BrowserContext options."""
+        return {}
+
+    def storage_state_options(self) -> dict[str, object]:
+        """Return additional platform-specific authentication snapshot options."""
         return {}
 
     async def save_storage_state(self) -> None:
@@ -263,7 +264,9 @@ class BrowserSession:
         self.account_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         temporary_file = self.account_file.with_name(f".{self.account_file.name}.tmp")
         try:
-            await self.context.storage_state(path=str(temporary_file))
+            await self.context.storage_state(
+                path=str(temporary_file), **self.storage_state_options()
+            )
             temporary_file.chmod(0o600)
             os.replace(temporary_file, self.account_file)
             self.account_file.chmod(0o600)

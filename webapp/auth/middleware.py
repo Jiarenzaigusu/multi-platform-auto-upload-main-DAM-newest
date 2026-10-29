@@ -6,6 +6,7 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.responses import Response
 
 from webapp.auth.service import AuthService
+from webapp.execution_context import AgentTargetError, verified_agent_id, verified_agent_binding
 
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 _CSRF_EXEMPT_PATHS = {
@@ -20,9 +21,10 @@ _SESSION_COOKIE = "mpau_session_v2"
 class AuthenticationMiddleware(BaseHTTPMiddleware):
     """Resolve opaque sessions and enforce CSRF on authenticated mutations."""
 
-    def __init__(self, app, service: AuthService) -> None:
+    def __init__(self, app, service: AuthService, target_resolver=None) -> None:
         super().__init__(app)
         self._service = service
+        self._target_resolver = target_resolver
 
     async def dispatch(
         self, request: Request, call_next: RequestResponseEndpoint
@@ -43,6 +45,10 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
         # an HTTP direct connection from storing its replacement session.
         session = self._service.resolve(request.cookies.get(_SESSION_COOKIE))
         request.state.auth_session = session
+        expected_user = request.headers.get("x-mpau-user-id")
+        if session is not None and expected_user and expected_user != session.user.id:
+            return JSONResponse(status_code=409, content={"detail": "登录身份已变化，请重新登录后再操作"},
+                                headers={"X-MPAU-Session-Changed": "1"})
 
         if (
             request.method not in _SAFE_METHODS
@@ -53,4 +59,20 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
             )
         ):
             return JSONResponse(status_code=403, content={"detail": "CSRF 校验失败"})
-        return await call_next(request)
+        target = None
+        if session is not None and self._target_resolver is not None and request.headers.get("x-mpau-agent-proof"):
+            try:
+                target = self._target_resolver(request, session)
+            except (AgentTargetError, PermissionError) as exc:
+                return JSONResponse(status_code=409, content={"detail": str(exc)})
+        selected, binding = target if isinstance(target, tuple) else (target, None)
+        marker = verified_agent_id.set(selected)
+        binding_marker = verified_agent_binding.set(binding)
+        try:
+            response = await call_next(request)
+            if session is not None:
+                response.headers["X-MPAU-User-ID"] = session.user.id
+            return response
+        finally:
+            verified_agent_id.reset(marker)
+            verified_agent_binding.reset(binding_marker)

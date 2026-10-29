@@ -27,7 +27,7 @@ from local_agent.paths import (
     user_paths,
 )
 from local_agent.runner import AgentJobRunner
-from uploader.errors import PublishResultUncertainError
+from uploader.errors import PublishResultUncertainError, PlatformRateLimitedError
 from utils.files import (
     validate_cover_image_filename,
     validate_jd_cover_image_file,
@@ -162,7 +162,7 @@ class LocalAgentApplication:
             "device_name": socket.gethostname() or "Local PC",
             "system": platform.platform()[:200],
             "version": __version__,
-            "capabilities": ["local_upload", "self_update"],
+            "capabilities": ["local_upload", "self_update", "local_identity"],
         }
 
     def stop(self, *_args) -> None:
@@ -526,6 +526,8 @@ class LocalAgentApplication:
             status = "uncertain"
             message = "平台提交结果无法确认，请先到平台后台核对，确认前不要重试"
             error = str(exc)
+            if getattr(exc, "rate_limited", False):
+                result = {"pause_account": True, "pause_reason": "rate_limited"}
         except AgentJobCancelledError as exc:
             status = "cancelled"
             message = "任务已按用户请求在本地执行前中断"
@@ -546,6 +548,9 @@ class LocalAgentApplication:
             status = "failed"
             message = "本地代理任务失败，请查看任务日志"
             error = str(exc)
+            if isinstance(exc, PlatformRateLimitedError) or getattr(exc, "status", "") == "rate_limited":
+                result = {"pause_account": True, "pause_reason": "rate_limited"}
+                message = "平台请求受限，该店铺已暂停发布，请在平台核对后手动恢复"
         finally:
             try:
                 logs = self.runner.finish_logs(job_id)

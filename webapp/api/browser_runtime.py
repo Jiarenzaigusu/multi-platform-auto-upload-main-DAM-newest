@@ -113,6 +113,7 @@ class BrowserRuntime:
             self._jd_sessions = JdSessionPool(
                 idle_timeout_seconds=self.idle_timeout_seconds,
                 max_sessions=self.max_sessions,
+                logger=user_platform_logger("jd", self.user_id),
             )
         return self._jd_sessions
 

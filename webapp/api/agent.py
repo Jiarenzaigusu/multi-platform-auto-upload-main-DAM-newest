@@ -114,6 +114,12 @@ class LocalUploadAuthorization(BaseModel):
     reserve: bool = True
 
 
+class LocalIdentityConfirmation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    ticket: str = Field(min_length=20, max_length=200)
+    origin: str = Field(min_length=1, max_length=512)
+
+
 class LocalUploadCompletion(LocalUploadAuthorization):
     asset_id: str = Field(min_length=32, max_length=32)
     sha256: str = Field(min_length=64, max_length=64)
@@ -126,7 +132,7 @@ def _validate_agent_id(agent_id: str) -> str:
     return agent_id
 
 
-def _agent_job_response(job: dict[str, Any]) -> dict[str, Any]:
+def _agent_job_response(job: dict[str, Any], *, user_id: str) -> dict[str, Any]:
     payload = dict(job.get("payload") or {})
     managed_upload = bool(payload.get("managed_upload"))
     image_paths = payload.get("image_paths")
@@ -141,6 +147,7 @@ def _agent_job_response(job: dict[str, Any]) -> dict[str, Any]:
         if key not in {"result", "error", "payload"}
     }
     response["payload"] = payload
+    response["user_id"] = user_id
     if job["kind"] == "publish":
         if payload.get("content_type", "video") == "article" and managed_upload:
             payload["image_filenames"] = [Path(path).name for path in image_paths or []]
@@ -191,6 +198,7 @@ def create_agent_router(
         manager = workspace_for_user(authenticated.user.id).task_manager
         if not getattr(manager, "remote_execution", False):
             raise HTTPException(status_code=409, detail="服务没有启用本地代理执行模式")
+        manager.note_authenticated_device(authenticated.device)
         return manager
 
     @router.post("/pairing-code")
@@ -353,7 +361,7 @@ def create_agent_router(
             raise HTTPException(status_code=400, detail="浏览器没有提供安全来源信息")
         try:
             return manager.issue_local_upload_ticket(
-                agent_id=agents[0]["agent_id"],
+                agent_id=manager.require_target(),
                 origin=origin,
                 filename=payload.filename,
                 size=payload.size,
@@ -362,6 +370,24 @@ def create_agent_router(
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @router.post("/local-identity/challenge")
+    def local_identity_challenge(request: Request):
+        workspace = workspace_resolver(request)
+        origin = request.headers.get("origin", "").strip().rstrip("/")
+        if not origin:
+            raise HTTPException(status_code=400, detail="浏览器没有提供安全来源信息")
+        return workspace.task_manager.issue_identity_challenge(origin=origin)
+
+    @router.post("/local-identity/confirm")
+    def confirm_local_identity(payload: LocalIdentityConfirmation, request: Request):
+        authenticated = authenticated_agent(request)
+        try:
+            return remote_manager(request).confirm_identity_challenge(
+                ticket=payload.ticket, origin=payload.origin, agent_id=authenticated.device.agent_id,
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
 
     @router.post("/local-upload/authorize")
     def authorize_local_upload(
@@ -426,6 +452,7 @@ def create_agent_router(
                 system=payload.system,
                 version=payload.version,
                 capabilities=payload.capabilities,
+                binding_id=authenticated.device.created_at,
             )
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -463,7 +490,7 @@ def create_agent_router(
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {
-            "job": _agent_job_response(job) if job else None,
+            "job": _agent_job_response(job, user_id=manager.user_id) if job else None,
             "lease_seconds": manager.lease_seconds,
         }
 
@@ -612,6 +639,6 @@ def create_agent_router(
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except (RuntimeError, ValueError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return {"job": _agent_job_response(job)}
+        return {"job": _agent_job_response(job, user_id=manager.user_id)}
 
     return router

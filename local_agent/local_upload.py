@@ -104,7 +104,7 @@ class LocalUploadServer:
             def do_OPTIONS(self) -> None:
                 origin = self._origin()
                 if (
-                    urlsplit(self.path).path != "/v1/upload"
+                    urlsplit(self.path).path not in {"/v1/upload", "/v1/identity"}
                     or not self._valid_local_host()
                     or not self._valid_origin(origin)
                     or not self._ticket()
@@ -125,6 +125,17 @@ class LocalUploadServer:
             def do_POST(self) -> None:
                 origin = self._origin()
                 ticket = self._ticket()
+                if urlsplit(self.path).path == "/v1/identity":
+                    if not self._valid_local_host() or not self._valid_origin(origin) or not ticket:
+                        self._json(403, {"detail": "本机身份验证请求无效"})
+                        return
+                    try:
+                        result = owner.client.confirm_local_identity(ticket, origin)
+                    except AgentApiError as exc:
+                        self._json(exc.status or 502, {"detail": str(exc)})
+                        return
+                    self._json(200, result)
+                    return
                 if (
                     urlsplit(self.path).path != "/v1/upload"
                     or not self._valid_local_host()

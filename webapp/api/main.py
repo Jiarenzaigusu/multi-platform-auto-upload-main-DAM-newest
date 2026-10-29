@@ -33,6 +33,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from utils.config import BASE_DIR
 from utils.log import logger
 from webapp.ai_copy import create_ai_copy_router
+from webapp.ai_copy.history import BrandCopyHistory
 from webapp.api.agent import create_agent_router
 from webapp.api.agent_batch import (
     parse_remote_douyin_article_batch_workbook,
@@ -45,7 +46,7 @@ from webapp.api.agent_batch import (
     parse_remote_xiaohongshu_video_batch_workbook,
 )
 from webapp.api.batch import BatchValidationError
-from webapp.api.brand_data import create_brand_data_router
+from webapp.api.brand_data import create_brand_data_router, resolve_data_brand
 from webapp.api.batch_douyin_article import parse_douyin_article_batch_workbook
 from webapp.api.batch_douyin_video import parse_douyin_video_batch_workbook
 from webapp.api.batch_jd_article import parse_jd_article_batch_workbook
@@ -55,7 +56,8 @@ from webapp.api.batch_tmall_article import parse_tmall_article_batch_workbook
 from webapp.api.batch_tmall_video import parse_tmall_video_batch_workbook
 from webapp.api.batch_xiaohongshu_article import parse_xiaohongshu_article_batch_workbook
 from webapp.api.batch_xiaohongshu_video import parse_xiaohongshu_video_batch_workbook
-from webapp.api.dam import DamApiError, DamOpenApiClient, DamSettings, stream_download
+from webapp.api.dam import DEFAULT_DAM_SETTINGS, DamApiError, DamOpenApiClient, DamSettings, stream_download
+from webapp.api.dashboard_memory import create_dashboard_memory_router
 from webapp.api.media import (
     MediaQuotaExceededError,
     UploadTooLargeError,
@@ -84,8 +86,10 @@ from webapp.api.tasks import TaskManager
 from webapp.auth import AuthService, AuthStore, create_auth_router
 from webapp.auth.dependencies import require_admin, require_operator, require_session, require_user
 from webapp.auth.middleware import AuthenticationMiddleware
+from webapp.execution_context import AgentTargetError
 from webapp.dashboard import DashboardRepository
 from webapp.dashboard_agent import ChatRequest, ConversationStore, DashboardTools, answer_question
+from webapp.dashboard_memory import memory_enabled
 from webapp.guanghe_api import GuangheApiError, content_detail
 from webapp.llm_adapter import OpenAICompatibleProvider, create_llm_adapter_router
 from webapp.mysql_demo import (
@@ -352,6 +356,8 @@ def create_app(
     app.state.workspace_registry = workspace_registry
     app.state.auth_service = auth_service
     app.state.mysql_database = mysql_database
+    copy_history = BrandCopyHistory(data_paths.system / "brand-copy.sqlite3")
+    app.state.copy_history = copy_history
     dam_sessions: dict[str, DamSettings] = {}
     dam_sessions_lock = Lock()
     trusted_browser_origins = set(settings.allowed_origins)
@@ -359,14 +365,24 @@ def create_app(
         TrustedHostMiddleware,
         allowed_hosts=list(settings.allowed_hosts),
     )
+    def resolve_browser_agent(request, session):
+        manager = workspace_registry.get(session.user.id).task_manager
+        origin = request.headers.get("origin") or f"{request.url.scheme}://{request.url.netloc}"
+        return manager.verify_identity_proof(request.headers["x-mpau-agent-proof"], origin=origin, include_binding=True)
+
+    app.add_middleware(AuthenticationMiddleware, service=auth_service, target_resolver=resolve_browser_agent)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(settings.allowed_origins),
         allow_methods=["*"],
         allow_headers=["*"],
         allow_credentials=True,
+        expose_headers=["X-MPAU-User-ID", "X-MPAU-Session-Changed"],
     )
-    app.add_middleware(AuthenticationMiddleware, service=auth_service)
+
+    @app.exception_handler(AgentTargetError)
+    async def invalid_agent_target(_request, exc):
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
 
     @app.middleware("http")
     async def reject_oversized_upload_requests(request: Request, call_next):
@@ -413,11 +429,15 @@ def create_app(
         user = require_operator(request)
         return workspace_registry.get(user.id)
 
+    def copy_actor(request: Request) -> tuple[str, bool]:
+        user = require_operator(request)
+        return user.id, user.role == "admin"
+
     def dam_client(request: Request) -> DamOpenApiClient:
         session = require_session(request)
         with dam_sessions_lock:
             session_settings = dam_sessions.get(session.session_id)
-        return DamOpenApiClient(session_settings or DamSettings())
+        return DamOpenApiClient(session_settings or DEFAULT_DAM_SETTINGS)
 
     def delete_account_and_cookie(
         workspace: UserWorkspace, platform: str, account: str
@@ -503,14 +523,8 @@ def create_app(
                 ),
             }
         try:
-            binding = mysql_database.execute(
-                "SELECT b.id, b.name FROM user_brand_bindings AS ub "
-                "JOIN brands AS b ON b.id = ub.brand_id WHERE ub.user_id = %s",
-                (user.id,),
-            )
-            if not binding:
-                raise HTTPException(status_code=403, detail="当前账户尚未由管理员绑定数据品牌")
-            return dashboard_repository.load(binding[0][0], binding[0][1], period)
+            brand = resolve_data_brand(mysql_database, user)
+            return dashboard_repository.load(brand["id"], brand["name"], period)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except MySQLDemoError as exc:
@@ -524,7 +538,7 @@ def create_app(
         if dashboard.get("empty") or not dashboard.get("summary"):
             return {"status": "empty", "scopes": {}}
         workspace = current_workspace(request)
-        return cached_category_insights(dashboard, OpenAICompatibleProvider(workspace.llm_registry), workspace.paths.runtime / "category-insights.sqlite3")
+        return cached_category_insights(dashboard, OpenAICompatibleProvider(workspace.llm_registry, feature="category_insights"), workspace.paths.runtime / "category-insights.sqlite3")
 
     @app.post("/api/dashboard/analysis")
     def dashboard_analysis(request: Request, period: str = Query(default="latest"), user: object = Depends(require_user)) -> dict:
@@ -534,7 +548,7 @@ def create_app(
         dashboard = dashboard_data(request, period, user)
         if dashboard.get("empty") or not dashboard.get("summary"):
             raise HTTPException(status_code=422, detail="当前周期暂无可分析的品牌数据")
-        provider = OpenAICompatibleProvider(current_workspace(request).llm_registry)
+        provider = OpenAICompatibleProvider(current_workspace(request).llm_registry, feature="dashboard_analysis")
         try:
             return generate_analysis(dashboard, provider)
         except LLMAdapterError as exc:
@@ -555,8 +569,12 @@ def create_app(
             raise HTTPException(status_code=422, detail="当前周期暂无可分析数据")
         try:
             tools = DashboardTools(mysql_database, dashboard, content_type, tag_id)
-            store = ConversationStore(current_workspace(request).paths.runtime / "dashboard-chat.sqlite3")
+            workspace = current_workspace(request)
+            store = ConversationStore(workspace.paths.runtime / "dashboard-chat.sqlite3")
             conversation_id, messages = store.open(dashboard["brand"]["id"], period, content_type, tag_id)
+            if memory_enabled():
+                workspace.dashboard_memory.store.bootstrap(dashboard["brand"]["id"])
+                workspace.dashboard_memory.notify()
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         references = tools.content_references([message['content'] for message in messages if message['role'] == 'assistant'])
@@ -578,19 +596,25 @@ def create_app(
             tools = DashboardTools(mysql_database, dashboard, payload.content_type, payload.tag_id)
             store = ConversationStore(workspace.paths.runtime / "dashboard-chat.sqlite3")
             conversation_id, history = store.open(dashboard["brand"]["id"], payload.period, payload.content_type, payload.tag_id, payload.conversation_id)
-            provider = OpenAICompatibleProvider(workspace.llm_registry)
-            answer, evidence = answer_question(provider, tools, history, payload.question)
+            provider = OpenAICompatibleProvider(workspace.llm_registry, feature="dashboard_chat")
+            memory = []
+            if memory_enabled():
+                workspace.dashboard_memory.store.bootstrap(dashboard["brand"]["id"])
+                memory = workspace.dashboard_memory.store.context(dashboard["brand"]["id"], payload.period, payload.content_type, payload.tag_id)
+            answer, evidence = answer_question(provider, tools, history, payload.question, memory=memory)
             references = tools.content_references([answer])
             if references:
                 evidence.append({'tool': 'get_content_references', 'result': references})
-            store.append(conversation_id, payload.question, answer, evidence)
+            message_ids = store.append(conversation_id, payload.question, answer, evidence, learn=memory_enabled())
+            if memory_enabled():
+                workspace.dashboard_memory.notify()
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except LLMAdapterError as exc:
             raise HTTPException(status_code=exc.status_code, detail="数据助手暂不可用，请检查 LLM 适配器配置后重试") from exc
         except MySQLDemoError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
-        return {"conversation_id": conversation_id, "answer": answer, "evidence": evidence, "model": provider.model}
+        return {"conversation_id": conversation_id, "answer": answer, "evidence": evidence, "model": provider.model, "memory_used": memory, **message_ids}
 
     @app.get("/api/guanghe/content/{content_id}")
     def guanghe_content(content_id: str, request: Request) -> dict:
@@ -598,11 +622,11 @@ def create_app(
         if not mysql_database.configured:
             raise HTTPException(status_code=503, detail="请先配置 MySQL 连接")
         try:
+            brand = resolve_data_brand(mysql_database, user)
             allowed = mysql_database.execute(
-                "SELECT 1 FROM user_brand_bindings AS ub "
-                "JOIN content_performance AS cp ON cp.brand_id = ub.brand_id "
-                "WHERE ub.user_id = %s AND cp.`内容ID` = %s LIMIT 1",
-                (user.id, content_id),
+                "SELECT 1 FROM content_performance "
+                "WHERE brand_id = %s AND `内容ID` = %s LIMIT 1",
+                (brand["id"], content_id),
             )
             if not allowed:
                 raise HTTPException(status_code=403, detail="当前账户无权查看此品牌内容")
@@ -616,19 +640,8 @@ def create_app(
 
     def sheet_database_brand(request: Request) -> tuple[int, str]:
         user = require_operator(request)
-        if not mysql_database.configured:
-            raise HTTPException(status_code=503, detail="请先配置 MySQL 连接")
-        try:
-            binding = mysql_database.execute(
-                "SELECT b.id, b.name FROM user_brand_bindings AS ub "
-                "JOIN brands AS b ON b.id = ub.brand_id WHERE ub.user_id = %s",
-                (user.id,),
-            )
-        except MySQLDemoError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        if not binding:
-            raise HTTPException(status_code=403, detail="当前账户尚未由管理员绑定数据品牌")
-        return int(binding[0][0]), str(binding[0][1])
+        brand = resolve_data_brand(mysql_database, user)
+        return brand["id"], brand["name"]
 
     @app.get("/api/sheet-fill/database-sources")
     def sheet_database_sources(request: Request, _: UserWorkspace = Depends(operator_workspace)) -> dict:
@@ -813,7 +826,7 @@ def create_app(
                 saved_record = json.loads(table_record_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError) as exc:
                 raise HTTPException(status_code=500, detail="已有表格方案 JSON 无法读取") from exc
-        provider = OpenAICompatibleProvider(workspace.llm_registry, timeout_seconds=120)
+        provider = OpenAICompatibleProvider(workspace.llm_registry, timeout_seconds=120, feature="smart_sheet")
         if saved_record is None and not provider.ready:
             raise HTTPException(status_code=409, detail="新建表格方案前，请先配置并启用 LLM API Key")
         brand_key = user.brand_key or "unbranded"
@@ -1179,17 +1192,19 @@ def create_app(
 
     @app.get("/api/dam/status")
     async def dam_status(request: Request, _: UserWorkspace = Depends(current_workspace)) -> dict:
-        """Return the current user's in-memory DAM session status."""
+        """Validate the session override or the built-in DAM connection."""
         client = dam_client(request)
         if not client.settings.configured:
             return {"configured": False, "bindings": [], "binding": None}
         try:
             bindings = await client.bindings()
-            binding = next((item for item in bindings if (
+            matched = [item for item in bindings if (
                 item.get("tenantCode") == client.settings.tenant
                 and item.get("catalogCode") == client.settings.catalog
-            )), None)
-            return {"configured": True, "bindings": bindings, "binding": binding}
+            )]
+            if len(matched) != 1:
+                raise HTTPException(status_code=403, detail="Tenant/Catalog 不在该 DAM Key 的授权绑定中")
+            return {"configured": True, "bindings": bindings, "binding": matched[0]}
         except DamApiError as exc:
             raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
@@ -1529,6 +1544,15 @@ def create_app(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {"job": _job_response(job)}
 
+    @app.post("/api/accounts/{platform}/{account}/resume")
+    def resume_account(platform: str, account: str, workspace: UserWorkspace = Depends(operator_workspace)):
+        try:
+            selected_platform, selected_account = validate_platform(platform), validate_account_name(account)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        workspace.task_manager.resume_account(selected_platform, selected_account)
+        return {"resumed": True}
+
     @app.get("/api/jobs")
     def list_jobs(
         limit: int = Query(500, ge=1, le=1000),
@@ -1809,7 +1833,7 @@ def create_app(
             agents = status.get("agents") or []
             if not agents:
                 raise ValidationError("本地执行助手未在线")
-            selected_agent_id = agents[0]["agent_id"]
+            selected_agent_id = manager.require_target()
             video_asset = (
                 manager.get_local_asset(video_asset_id, agent_id=selected_agent_id)
                 if video_asset_id
@@ -2080,7 +2104,12 @@ def create_app(
             workspace=workspace,
         )
 
+    from webapp.usage import UsageStore, create_usage_router
+    usage_store = getattr(workspace_registry, "usage_store", None) or UsageStore(data_paths.system / "usage.sqlite3")
+    app.state.usage_store = usage_store
+    app.include_router(create_usage_router(data_paths, auth_service.store, copy_history, usage_store))
     app.include_router(create_brand_data_router(mysql_database, auth_service))
+    app.include_router(create_dashboard_memory_router(lambda user: resolve_data_brand(mysql_database, user), current_workspace))
     app.include_router(
         create_auth_router(
             auth_service,
@@ -2096,7 +2125,9 @@ def create_app(
     )
     app.include_router(
         create_ai_copy_router(
-            lambda request: operator_workspace(request).ai_copy_service
+            lambda request: operator_workspace(request).ai_copy_service,
+            history=copy_history,
+            actor_for_request=copy_actor,
         )
     )
     app.include_router(
@@ -2115,7 +2146,10 @@ def create_app(
 
         @app.get("/")
         def frontend_index() -> FileResponse:
-            return FileResponse(settings.frontend_dist_dir / "index.html")
+            return FileResponse(
+                settings.frontend_dist_dir / "index.html",
+                headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+            )
     else:
 
         @app.get("/")

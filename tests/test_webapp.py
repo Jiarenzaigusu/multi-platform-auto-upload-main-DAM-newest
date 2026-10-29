@@ -1470,7 +1470,7 @@ class PublishRequestValidationTests(unittest.TestCase):
         file_input.click.assert_not_called()
         file_input.set_input_files.assert_awaited_once_with("/tmp/demo.mp4")
 
-    def test_jd_video_upload_reopens_page_once_after_processing_stall(self):
+    def test_jd_video_upload_does_not_reupload_after_processing_stall(self):
         uploader = object.__new__(JDVideo)
         uploader.file_path = "/tmp/demo.mp4"
         first_page = MagicMock()
@@ -1509,16 +1509,15 @@ class PublishRequestValidationTests(unittest.TestCase):
                 ),
             ),
         ):
-            page, frame = asyncio.run(uploader._open_page_and_upload_video(context))
+            with self.assertRaises(JdVideoProcessingStalledError):
+                asyncio.run(uploader._open_page_and_upload_video(context))
 
-        self.assertIs(page, second_page)
-        self.assertIs(frame, second_frame)
         first_page.close.assert_awaited_once()
         first_page.reload.assert_not_awaited()
         second_page.reload.assert_not_awaited()
-        self.assertEqual(context.new_page.await_count, 2)
+        self.assertEqual(context.new_page.await_count, 1)
 
-    def test_jd_video_upload_reopens_page_after_upload_page_is_closed(self):
+    def test_jd_video_upload_reopens_page_if_closed_before_file_delivery(self):
         uploader = object.__new__(JDVideo)
         uploader.file_path = "/tmp/demo.mp4"
         first_page = MagicMock()
@@ -1538,7 +1537,7 @@ class PublishRequestValidationTests(unittest.TestCase):
         with (
             patch(
                 "uploader.jd_video_uploader.main._wait_for_video_upload_surface",
-                new=AsyncMock(side_effect=[first_frame, second_frame]),
+                new=AsyncMock(side_effect=[JdVideoUploadRetryableError("发布页已关闭"), second_frame]),
             ),
             patch(
                 "uploader.jd_video_uploader.main._choose_jd_video_file",
@@ -1547,12 +1546,7 @@ class PublishRequestValidationTests(unittest.TestCase):
             patch.object(
                 uploader,
                 "_wait_for_video_uploaded",
-                new=AsyncMock(
-                    side_effect=[
-                        JdVideoUploadRetryableError("发布页已关闭"),
-                        second_frame,
-                    ]
-                ),
+                new=AsyncMock(return_value=second_frame),
             ),
         ):
             page, frame = asyncio.run(uploader._open_page_and_upload_video(context))
@@ -1589,8 +1583,8 @@ class PublishRequestValidationTests(unittest.TestCase):
             with self.assertRaises(JdVideoProcessingStalledError):
                 asyncio.run(uploader._open_page_and_upload_video(context))
 
-        self.assertEqual(context.new_page.await_count, 2)
-        self.assertEqual(page.close.await_count, 2)
+        self.assertEqual(context.new_page.await_count, 1)
+        self.assertEqual(page.close.await_count, 1)
 
     def test_jd_set_custom_cover_recovers_from_iframe_reload(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -3583,9 +3577,10 @@ class ApiEndpointTests(unittest.TestCase):
                 user_id=TEST_USER_ID,
                 paths=AppDataPaths.create(root / "data").for_user(TEST_USER_ID),
             )
+            manager.connect_agent(agent_id="b"*32, device_name="test", system="test", version="test")
             queued_jobs = [
                 manager.submit_account_task(
-                    kind="check", platform="tmall", account=f"shop{index}", headed=False
+                    kind="check", platform="tmall", account=f"shop{index}", headed=False, target_agent_id="b"*32
                 )
                 for index in range(2)
             ]
@@ -3636,7 +3631,7 @@ class ApiEndpointTests(unittest.TestCase):
                 kind="publish",
                 platform="jd",
                 account="shop1",
-                payload={"content_type": "video", "video_path": "C:/video.mp4"},
+                payload={"content_type": "video", "video_path": "C:/video.mp4", "target_agent_id":"b"*32, "target_binding_id":"b"*32},
                 batch_id="batch-old",
                 source_row=3,
             )
@@ -3651,6 +3646,7 @@ class ApiEndpointTests(unittest.TestCase):
             store.update_job(failed["id"], status="failed", error="封面解析超时")
             store.update_job(succeeded["id"], status="succeeded")
             manager = AgentTaskManager(store, user_id=TEST_USER_ID, paths=paths)
+            manager.connect_agent(agent_id="b"*32, device_name="test", system="test", version="test")
             app = create_app(
                 WebSettings(data_dir=root / "app-data", frontend_dist_dir=root / "missing"),
                 manager,
@@ -3661,7 +3657,12 @@ class ApiEndpointTests(unittest.TestCase):
                 if route.path == "/api/batches/{batch_id}/retry-failed"
             )
             try:
-                result = endpoint("batch-old", workspace=app.state.test_workspace)
+                from webapp.execution_context import verified_agent_id
+                marker = verified_agent_id.set("b"*32)
+                try:
+                    result = endpoint("batch-old", workspace=app.state.test_workspace)
+                finally:
+                    verified_agent_id.reset(marker)
                 self.assertEqual(result["created_count"], 1)
                 retried = store.get_job(result["jobs"][0]["id"])
                 self.assertEqual(retried["source_row"], 3)

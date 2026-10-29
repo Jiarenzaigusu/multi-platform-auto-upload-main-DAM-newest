@@ -1,12 +1,12 @@
 // Local-only persistence for the AI copy studio. API keys are intentionally excluded.
-function draftKey(userId = '') {
-  return `mpau_ai_copy_draft_v1:${userId || 'anonymous'}`
+export function draftKey(userId = '', brandId = '') {
+  return `mpau_ai_copy_draft_v3:${userId || 'anonymous'}:brand:${brandId || 'unbound'}`
 }
 const DATABASE_NAME = 'mpau_ai_copy_drafts'
 const DATABASE_VERSION = 1
 const WORKBOOK_STORE = 'selling_point_workbook'
-function workbookKey(userId = '') {
-  return `current:${userId || 'anonymous'}`
+export function workbookKey(userId = '', brandId = '') {
+  return `copy-brand-v1:${userId || 'anonymous'}:brand:${brandId || 'unbound'}`
 }
 
 function openDatabase() {
@@ -21,9 +21,9 @@ function openDatabase() {
   })
 }
 
-export function readAiCopyDraft(userId = '') {
+export function readAiCopyDraft(userId = '', brandId = '') {
   try {
-    const raw = localStorage.getItem(draftKey(userId))
+    const raw = localStorage.getItem(draftKey(userId, brandId))
     const draft = raw ? JSON.parse(raw) : null
     return draft && typeof draft === 'object' ? draft : null
   } catch {
@@ -31,19 +31,19 @@ export function readAiCopyDraft(userId = '') {
   }
 }
 
-export function saveAiCopyDraft(draft, userId = '') {
+export function saveAiCopyDraft(draft, userId = '', brandId = '') {
   try {
-    localStorage.setItem(draftKey(userId), JSON.stringify(draft))
+    localStorage.setItem(draftKey(userId, brandId), JSON.stringify(draft))
   } catch (error) {
     console.warn('保存 AI 文案草稿失败：', error)
   }
 }
 
-export function clearAiCopyDraft(userId = '') {
-  try { localStorage.removeItem(draftKey(userId)) } catch { /* Browser storage is unavailable. */ }
+export function clearAiCopyDraft(userId = '', brandId = '') {
+  try { localStorage.removeItem(draftKey(userId, brandId)) } catch { /* Browser storage is unavailable. */ }
 }
 
-export async function saveSellingPointWorkbook(file, userId = '') {
+export async function saveSellingPointWorkbook(file, userId = '', brandId = '') {
   const db = await openDatabase()
   try {
     await new Promise((resolve, reject) => {
@@ -53,7 +53,7 @@ export async function saveSellingPointWorkbook(file, userId = '') {
         name: file.name,
         type: file.type || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         lastModified: file.lastModified || Date.now(),
-      }, workbookKey(userId))
+      }, workbookKey(userId, brandId))
       transaction.oncomplete = resolve
       transaction.onerror = () => reject(transaction.error)
     })
@@ -62,12 +62,12 @@ export async function saveSellingPointWorkbook(file, userId = '') {
   }
 }
 
-export async function loadSellingPointWorkbook(userId = '') {
+export async function loadSellingPointWorkbook(userId = '', brandId = '') {
   const db = await openDatabase()
   try {
     const stored = await new Promise((resolve, reject) => {
       const transaction = db.transaction(WORKBOOK_STORE, 'readonly')
-      const request = transaction.objectStore(WORKBOOK_STORE).get(workbookKey(userId))
+      const request = transaction.objectStore(WORKBOOK_STORE).get(workbookKey(userId, brandId))
       request.onsuccess = () => resolve(request.result || null)
       request.onerror = () => reject(request.error)
     })
@@ -81,12 +81,12 @@ export async function loadSellingPointWorkbook(userId = '') {
   }
 }
 
-export async function clearSellingPointWorkbook(userId = '') {
+export async function clearSellingPointWorkbook(userId = '', brandId = '') {
   const db = await openDatabase()
   try {
     await new Promise((resolve, reject) => {
       const transaction = db.transaction(WORKBOOK_STORE, 'readwrite')
-      transaction.objectStore(WORKBOOK_STORE).delete(workbookKey(userId))
+      transaction.objectStore(WORKBOOK_STORE).delete(workbookKey(userId, brandId))
       transaction.oncomplete = resolve
       transaction.onerror = () => reject(transaction.error)
     })

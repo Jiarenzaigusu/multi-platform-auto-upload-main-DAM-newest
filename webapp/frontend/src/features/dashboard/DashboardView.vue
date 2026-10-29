@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { apiRequest } from '../../api-client.js'
 import TagAnalysisPanel from './TagAnalysisPanel.vue'
 import AssistantRichText from './AssistantRichText.vue'
+import BrandMemoryPanel from './BrandMemoryPanel.vue'
 import { analyzeContent } from './content-analysis.js'
 
 const period = ref('')
@@ -37,6 +38,7 @@ const aiResult = ref(null)
 const aiLoading = ref(false)
 const aiError = ref('')
 const assistantOpen = ref(false)
+const assistantTab = ref('chat')
 const assistantDraft = ref('')
 const assistantMessages = ref([])
 const assistantConversationId = ref(null)
@@ -198,7 +200,7 @@ async function sendAssistantQuestion() {
       body: JSON.stringify({ question, conversation_id: assistantConversationId.value, period: period.value, content_type: assistantScope.value.type, tag_id: assistantScope.value.tagId }),
     })
     if (requestId === assistantRequest) {
-      assistantMessages.value.push({ role: 'user', content: question, evidence: [] }, { role: 'assistant', content: reply.answer, evidence: reply.evidence })
+      assistantMessages.value.push({ id: reply.user_message_id, role: 'user', content: question, evidence: [] }, { id: reply.assistant_message_id, role: 'assistant', content: reply.answer, evidence: reply.evidence, memory_used: reply.memory_used })
       assistantDraft.value = ''
     }
   } catch (requestError) {
@@ -283,20 +285,27 @@ onUnmounted(() => { clearInterval(categoryInsightTimer); categoryInsightRequest 
     <div v-if="assistantOpen" class="assistant-backdrop" @click="assistantOpen = false"></div>
     <aside id="dashboard-assistant" class="assistant-drawer" :class="{ open: assistantOpen }" :aria-hidden="!assistantOpen" aria-label="问数据助手" :inert="!assistantOpen">
       <header class="assistant-drawer-header"><div class="assistant-header-row"><div><small>DATA ASSISTANT · LIVE</small><h3>问数据助手</h3></div><button type="button" aria-label="关闭数据助手" @click="assistantOpen = false">×</button></div><div class="assistant-scope"><span>当前分析范围</span><strong>{{ data?.brand?.name || '当前品牌' }} · {{ dateLabel || '未选择周期' }} · {{ assistantScope.label }}</strong><small>切换看板周期或标签后，范围会同步更新。</small></div></header>
-      <details class="assistant-suggestion-panel" open>
+      <nav class="assistant-tabs" aria-label="数据助手面板"><button type="button" :aria-pressed="assistantTab === 'chat'" @click="assistantTab = 'chat'">对话</button><button type="button" :aria-pressed="assistantTab === 'memory'" @click="assistantTab = 'memory'">品牌记忆</button></nav>
+      <BrandMemoryPanel v-if="assistantOpen && assistantTab === 'memory' && data?.brand?.id" :key="data.brand.id" />
+      <details v-show="assistantTab === 'chat'" class="assistant-suggestion-panel" open>
         <summary><strong>常用问题</strong><span>{{ assistantSuggestions.length }} 个选项 <i aria-hidden="true">⌄</i></span></summary>
         <div class="assistant-suggestions"><button v-for="question in assistantSuggestions" :key="question" type="button" @click="assistantDraft = question">{{ question }}</button></div>
       </details>
-      <div class="assistant-conversation">
+      <div v-show="assistantTab === 'chat'" class="assistant-conversation">
         <div v-for="(message, index) in assistantMessages" :key="index" class="assistant-message" :class="message.role"><details v-if="message.role === 'assistant' && message.content.length > 500" class="assistant-long-answer"><summary><span class="assistant-answer-preview">{{ assistantPreview(message.content) }}… 展开完整回答</span><span class="assistant-answer-collapse">收起回答</span></summary><AssistantRichText :text="message.content" :evidence="message.evidence" :content-type="assistantScope.type" /></details><AssistantRichText v-else-if="message.role === 'assistant'" :text="message.content" :evidence="message.evidence" :content-type="assistantScope.type" /><p v-else>{{ message.content }}</p><details v-if="message.evidence?.length"><summary>查看数据依据</summary><pre v-for="(item, evidenceIndex) in message.evidence" :key="evidenceIndex">{{ item.tool }}：{{ JSON.stringify(item.result, null, 2) }}</pre></details></div>
         <div v-if="aiResult && !assistantMessages.length" class="assistant-current-analysis"><strong>本周期已有分析</strong><p>{{ aiResult.summary }}</p><small>来源：当前看板的 AI 内容分析</small></div>
       </div>
-      <form class="assistant-compose" @submit.prevent="sendAssistantQuestion"><label for="assistant-question">向数据助手提问</label><textarea id="assistant-question" v-model="assistantDraft" rows="3" placeholder="例如：这个分类为什么点击高？" /><div><small>{{ assistantError || (assistantBusy ? '正在查询数据并生成回答…' : '按当前品牌、周期和标签范围查询') }}</small><button type="submit" :disabled="assistantBusy || !assistantDraft.trim() || !assistantConversationId">{{ assistantBusy ? '处理中' : '发送' }}</button></div></form>
+      <div v-if="assistantTab === 'chat' && assistantMessages.at(-1)?.memory_used?.length" class="assistant-used-memory"><details><summary>本轮参考的品牌记忆</summary><p v-for="entry in assistantMessages.at(-1).memory_used" :key="entry.id">{{ entry.value }}</p></details></div>
+      <form v-show="assistantTab === 'chat'" class="assistant-compose" @submit.prevent="sendAssistantQuestion"><label for="assistant-question">向数据助手提问</label><textarea id="assistant-question" v-model="assistantDraft" rows="3" placeholder="例如：这个分类为什么点击高？" /><div><small>{{ assistantError || (assistantBusy ? '正在查询数据并生成回答…' : '按当前品牌、周期和标签范围查询') }}</small><button type="submit" :disabled="assistantBusy || !assistantDraft.trim() || !assistantConversationId">{{ assistantBusy ? '处理中' : '发送' }}</button></div></form>
     </aside>
   </section>
 </template>
 
 <style scoped>
+.assistant-tabs { display: flex; gap: 8px; padding: 10px 16px; border-bottom: 1px solid #e1e9da; }
+.assistant-tabs button { flex: 1; padding: 8px; border: 1px solid #d2dfc4; border-radius: 7px; background: white; color: #365a3e; cursor: pointer; }
+.assistant-tabs button[aria-pressed="true"] { background: #e6efbf; font-weight: 700; }
+.assistant-used-memory { padding: 8px 16px; max-height: 120px; overflow: auto; font-size: 11px; color: #61765c; }
 .assistant-open-button, .assistant-inline-button { border: 1px solid #cbdca0; border-radius: 9px; padding: 9px 13px; color: #365a3e; background: #e6efbf; font-weight: 750; cursor: pointer; }
 .assistant-inline-button { margin-left: auto; background: #fff; }
 .assistant-backdrop { display: none; }

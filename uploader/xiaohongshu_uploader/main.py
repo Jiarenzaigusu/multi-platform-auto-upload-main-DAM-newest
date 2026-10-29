@@ -12,6 +12,7 @@ from patchright.async_api import Page
 
 from utils.config import DEBUG_MODE, LOCAL_EDGE_HEADLESS
 from uploader.base_video import BaseVideoUploader
+from uploader.publish_guard import publish_once, save_confirmed_state
 from utils.log import xiaohongshu_logger
 
 XHS_LOGIN_URL = "https://creator.xiaohongshu.com/login"
@@ -488,23 +489,10 @@ class XiaoHongShuVideo(XiaoHongShuBaseUploader):
             xiaohongshu_logger.info(_msg("📸", f"截图已保存: {screenshot_path}"))
             return
 
-        while True:
-            try:
-                if self.publish_strategy == XIAOHONGSHU_PUBLISH_STRATEGY_SCHEDULED:
-                    await page.locator('button:has-text("定时发布")').click()
-                else:
-                    await page.locator('button:has-text("发布")').click()
-                await page.wait_for_url(
-                    "https://creator.xiaohongshu.com/publish/success?**",
-                    timeout=3000
-                )
-                xiaohongshu_logger.success(_msg("🥳", "视频发布成功，小人开心收工"))
-                break
-            except Exception:
-                xiaohongshu_logger.info(_msg("🏃", "小人正在冲刺发布视频"))
-                if self.debug:
-                    await page.screenshot(full_page=True)
-                await asyncio.sleep(0.5)
+        name = "定时发布" if self.publish_strategy == XIAOHONGSHU_PUBLISH_STRATEGY_SCHEDULED else "发布"
+        await publish_once(page, page.get_by_role("button", name=name, exact=True),
+                           XHS_PUBLISH_SUCCESS_URL_PATTERN, logger=xiaohongshu_logger)
+        xiaohongshu_logger.success(_msg("🥳", "视频发布已取得平台确认"))
 
     async def upload_in_session(self, session) -> dict:
         xiaohongshu_logger.info(_msg("🧍", "小人先检查 cookie、视频文件、封面和发布时间"))
@@ -516,9 +504,10 @@ class XiaoHongShuVideo(XiaoHongShuBaseUploader):
         try:
             page = await context.new_page()
             await self.upload_video_content(page)
-            await context.storage_state(path=self.account_file)
-            session.mark_authenticated(True)
-            xiaohongshu_logger.success(_msg("🥳", "cookie 更新完毕"))
+            saved = await save_confirmed_state(context, self.account_file, xiaohongshu_logger)
+            session.mark_authenticated(saved)
+            if saved:
+                xiaohongshu_logger.success(_msg("🥳", "cookie 更新完毕"))
             return {"mode": "dry_run" if self.dry_run else "publish", "final_url": page.url}
         except Exception:
             session.mark_authenticated(False)
@@ -608,23 +597,10 @@ class XiaoHongShuNote(XiaoHongShuBaseUploader):
             xiaohongshu_logger.info(_msg("📸", f"截图已保存: {screenshot_path}"))
             return
 
-        while True:
-            try:
-                if self.publish_strategy == XIAOHONGSHU_PUBLISH_STRATEGY_SCHEDULED:
-                    await page.locator('button:has-text("定时发布")').click()
-                else:
-                    await page.locator('button:has-text("发布")').click()
-                await page.wait_for_url(
-                    XHS_PUBLISH_SUCCESS_URL_PATTERN,
-                    timeout=3000
-                )
-                xiaohongshu_logger.success(_msg("🥳", "图文发布成功，小人开心收工"))
-                break
-            except Exception:
-                xiaohongshu_logger.info(_msg("🏃", "小人正在冲刺发布图文"))
-                if self.debug:
-                    await page.screenshot(full_page=True)
-                await asyncio.sleep(0.5)
+        name = "定时发布" if self.publish_strategy == XIAOHONGSHU_PUBLISH_STRATEGY_SCHEDULED else "发布"
+        await publish_once(page, page.get_by_role("button", name=name, exact=True),
+                           XHS_PUBLISH_SUCCESS_URL_PATTERN, logger=xiaohongshu_logger)
+        xiaohongshu_logger.success(_msg("🥳", "图文发布已取得平台确认"))
 
     async def upload_in_session(self, session) -> dict:
         xiaohongshu_logger.info(_msg("🧍", "小人先检查 cookie、图片和发布时间"))
@@ -636,9 +612,10 @@ class XiaoHongShuNote(XiaoHongShuBaseUploader):
         try:
             page = await context.new_page()
             await self.upload_note_content(page)
-            await context.storage_state(path=self.account_file)
-            session.mark_authenticated(True)
-            xiaohongshu_logger.success(_msg("🥳", "cookie 更新完毕"))
+            saved = await save_confirmed_state(context, self.account_file, xiaohongshu_logger)
+            session.mark_authenticated(saved)
+            if saved:
+                xiaohongshu_logger.success(_msg("🥳", "cookie 更新完毕"))
             return {"mode": "dry_run" if self.dry_run else "publish", "final_url": page.url}
         except Exception:
             session.mark_authenticated(False)

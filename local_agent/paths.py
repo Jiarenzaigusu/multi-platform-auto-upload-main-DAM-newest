@@ -40,6 +40,13 @@ def load_or_create_agent_id(root: Path) -> str:
     except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
         pass
 
+    return regenerate_agent_id(root)
+
+
+def regenerate_agent_id(root: Path) -> str:
+    """Explicit repair for a cloned installation; never reuse another user's ID."""
+    secure_directory(root)
+    path = root / "device.json"
     agent_id = uuid.uuid4().hex
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=".device.", suffix=".tmp", dir=root

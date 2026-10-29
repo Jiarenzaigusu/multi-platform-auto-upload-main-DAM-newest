@@ -1002,7 +1002,16 @@ class LocalAgentApiTests(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def csrf_headers(self) -> dict[str, str]:
-        return {"X-CSRF-Token": self.client.cookies["mpau_csrf_v2"]}
+        headers = {"X-CSRF-Token": self.client.cookies["mpau_csrf_v2"], "Origin": "http://testserver"}
+        if getattr(self, "agent_token", ""):
+            challenge = self.client.post("/api/agent/local-identity/challenge", headers=headers)
+            if challenge.status_code == 200:
+                confirmed = self.agent_post_json("/api/agent/local-identity/confirm", {
+                    "ticket": challenge.json()["ticket"], "origin": "http://testserver",
+                })
+                if confirmed.status_code == 200:
+                    headers["X-MPAU-Agent-Proof"] = confirmed.json()["proof"]
+        return headers
 
     def post_json(self, path: str, payload: dict) -> _AsgiResponse:
         return self.client.post(path, headers=self.csrf_headers(), json=payload)
@@ -1048,6 +1057,89 @@ class LocalAgentApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()
+
+    def test_local_job_requires_a_proof_from_the_paired_helper(self):
+        self.connect_agent()
+        base = {"X-CSRF-Token": self.client.cookies["mpau_csrf_v2"], "Origin": "http://testserver"}
+        rejected = self.client.post("/api/accounts/jd/shop1/login", headers=base)
+        self.assertEqual(rejected.status_code, 409)
+        accepted = self.client.post("/api/accounts/jd/shop1/login", headers=self.csrf_headers())
+        self.assertEqual(accepted.status_code, 202, accepted.text)
+        stored = self.registry.get(self.user["id"]).store.get_job(accepted.json()["job"]["id"])
+        self.assertEqual(stored["payload"]["target_agent_id"], "b"*32)
+
+    def test_identity_confirmation_cannot_change_origin_or_be_reused(self):
+        self.connect_agent()
+        base = {"X-CSRF-Token": self.client.cookies["mpau_csrf_v2"], "Origin": "http://testserver"}
+        challenge = self.client.post("/api/agent/local-identity/challenge", headers=base).json()
+        wrong = self.agent_post_json("/api/agent/local-identity/confirm", {
+            "ticket": challenge["ticket"], "origin": "https://wrong.example",
+        })
+        self.assertEqual(wrong.status_code, 403)
+        correct = self.agent_post_json("/api/agent/local-identity/confirm", {
+            "ticket": challenge["ticket"], "origin": "http://testserver",
+        })
+        self.assertEqual(correct.status_code, 200, correct.text)
+        repeated = self.agent_post_json("/api/agent/local-identity/confirm", {
+            "ticket": challenge["ticket"], "origin": "http://testserver",
+        })
+        self.assertEqual(repeated.status_code, 409)
+
+    def test_repairing_a_device_invalidates_previous_browser_proofs(self):
+        self.connect_agent()
+        old_headers = self.csrf_headers()
+        manager = self.registry.get(self.user["id"]).task_manager
+        manager.disconnect_all_agents()
+        self.connect_agent()
+        result = self.client.post("/api/accounts/jd/shop1/login", headers=old_headers)
+        self.assertEqual(result.status_code, 409)
+
+    def test_running_task_renewal_restores_server_verified_pairing_after_presence_loss(self):
+        self.connect_agent()
+        created = self.client.post("/api/accounts/jd/shop1/check", headers=self.csrf_headers())
+        self.assertEqual(created.status_code, 202, created.text)
+        job_id = created.json()["job"]["id"]
+        self.agent_post_json("/api/agent/claim", {"agent_id":"b"*32})
+        manager = self.registry.get(self.user["id"]).task_manager
+        manager._agents.clear()
+        manager._dropped_agents.clear()
+        manager._known_device_bindings.clear()
+        renewed = self.agent_post_json(f"/api/agent/jobs/{job_id}/heartbeat", {"agent_id":"b"*32})
+        self.assertEqual(renewed.status_code, 200, renewed.text)
+        self.assertEqual(manager._agents["b"*32]["binding_id"], manager.store.get_job(job_id)["payload"]["target_binding_id"])
+
+    def test_cross_tab_cookie_switch_rejects_old_expected_user(self):
+        first_user_id = self.user["id"]
+        service = self.app.state.auth_service
+        second = service.create_user(actor_user_id=first_user_id, username="second_tab", display_name="second",
+                                     password="second-password-123", role="operator", ip_address="test")
+        logged_in = self.client.post("/api/auth/login", json={"username":"second_tab","password":"second-password-123"})
+        self.assertEqual(logged_in.status_code, 200, logged_in.text)
+        response = self.client.post("/api/accounts/jd/shop1/login", headers={
+            "X-CSRF-Token":self.client.cookies["mpau_csrf_v2"], "X-MPAU-User-ID":first_user_id,
+        })
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(self.registry.get(second.id).store.list_jobs(), [])
+
+    def test_rate_limited_completion_pauses_and_explicit_resume_restores_queue(self):
+        self.connect_agent()
+        workspace = self.registry.get(self.user["id"])
+        first = workspace.store.create_job(kind="publish", platform="jd", account="shop1",
+            payload={"target_agent_id":"b"*32,"managed_upload":False,
+                     "target_binding_id":workspace.task_manager._agents["b"*32]["binding_id"]})
+        second = workspace.store.create_job(kind="publish", platform="jd", account="shop1",
+            payload={"target_agent_id":"b"*32,"managed_upload":False,
+                     "target_binding_id":workspace.task_manager._agents["b"*32]["binding_id"]})
+        self.agent_post_json("/api/agent/claim", {"agent_id":"b"*32})
+        done = self.agent_post_json(f"/api/agent/jobs/{first['id']}/complete", {
+            "agent_id":"b"*32,"status":"failed","result":{"pause_account":True,"pause_reason":"rate_limited"},
+        })
+        self.assertEqual(done.status_code, 200, done.text)
+        self.assertIsNone(workspace.task_manager.claim_next_job("b"*32))
+        self.assertEqual(len(self.client.get("/api/agent/status").json()["paused_accounts"]), 1)
+        resumed = self.client.post("/api/accounts/jd/shop1/resume", headers=self.csrf_headers())
+        self.assertEqual(resumed.status_code, 200, resumed.text)
+        self.assertEqual(workspace.task_manager.claim_next_job("b"*32)["id"], second["id"])
 
     def test_local_agent_claim_complete_and_cookie_deletion_workflow(self):
         workspace = self.registry.get(self.user["id"])
@@ -1139,7 +1231,8 @@ class LocalAgentApiTests(unittest.TestCase):
             title="自定义封面传输测试",
             managed_upload=True,
         )
-        job = workspace.task_manager.submit_publish_task(request)
+        self.connect_agent()
+        job = workspace.task_manager.submit_publish_task(request, target_agent_id="b" * 32)
 
         self.connect_agent()
         claimed = self.agent_post_json(

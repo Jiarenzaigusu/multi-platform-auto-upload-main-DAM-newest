@@ -1,6 +1,6 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { apiRequest as request, apiUrl, configureApiClient } from './api-client.js'
+import { apiRequest as request, apiUrl, configureApiClient, captureApiContext, isApiContextCurrent, setApiSession, sessionFetch } from './api-client.js'
 import AgentSetupDialog from './components/AgentSetupDialog.vue'
 import AuthGate from './components/AuthGate.vue'
 import DamAssetPicker from './components/DamAssetPicker.vue'
@@ -14,6 +14,7 @@ import UserUsageView from './features/users/UserUsageView.vue'
 
 const apiBase = import.meta.env.VITE_API_BASE_URL || ''
 const currentUser = ref(null)
+const sessionEpoch = ref(0)
 const pendingCopyImport = ref(null)
 const copyImportSaving = ref(false)
 const brandAccess = ref({ loaded: false, configured: false, brand: null, error: false })
@@ -27,6 +28,7 @@ const agentStatus = reactive({
   unavailable: false,
   agentVersion: '',
   latestVersion: '',
+  pausedAccounts: [],
 })
 configureApiClient({ baseUrl: apiBase, onUnauthorized: endAuthenticatedSession })
 
@@ -313,6 +315,7 @@ function applySavedFormDraft(saved) {
 }
 
 async function restorePublishDraft() {
+  const requestContext = captureApiContext()
   isRestoringDraft.value = true
   draftRestoredVideoName.value = ''
   draftRestoredAt.value = ''
@@ -321,6 +324,7 @@ async function restorePublishDraft() {
     const currentKey = workspaceKey(form.platform, form.contentType)
     const media = workspaceMedia[currentKey]
     const videoDraft = await restoreDraftVideo(draftVideoKey(form.platform, form.contentType))
+    if (!isApiContextCurrent(requestContext)) return
     if (videoDraft?.file && isVideo.value) {
       media.video = videoDraft.file
       media.restoredVideoName = videoDraft.file.name
@@ -335,12 +339,16 @@ async function restorePublishDraft() {
       }
     }
   } finally {
-    await nextTick()
-    isRestoringDraft.value = false
+    if (isApiContextCurrent(requestContext)) {
+      await nextTick()
+      if (!isApiContextCurrent(requestContext)) return
+      isRestoringDraft.value = false
+    }
   }
 }
 
 async function clearPublishDraft() {
+  const requestContext = captureApiContext()
   const target = `${platformLabel(form.platform)}${form.contentType === 'article' ? '图文' : '视频'}发布台`
   if (!window.confirm(`确定清空“${target}”的发布草稿和已选素材吗？其他三个发布台不会受影响。`)) {
     return
@@ -348,6 +356,7 @@ async function clearPublishDraft() {
   clearPublishContent()
   persistFormDraft()
   await deleteDraftVideo(draftVideoKey(form.platform, form.contentType))
+  if (!isApiContextCurrent(requestContext)) return
   form.dryRun = true
   form.headed = true
   form.original = false
@@ -742,11 +751,13 @@ function importAiCopyToWorkbench(draft) {
 }
 
 async function saveCopyImportSample(event) {
+  const requestContext = captureApiContext()
   if (!event || event.userId !== currentUser.value?.id) return
   copyImportSaving.value = true
   const api = createAiCopyApi(event.payload.expected_brand_id)
   try {
     const sample = await api.recordImport(event.generationId, event.payload)
+    if (!isApiContextCurrent(requestContext)) return
     if (currentUser.value?.id !== event.userId || pendingCopyImport.value !== event) return
     pendingCopyImport.value = null
     showNotice(sample.enabled
@@ -756,11 +767,14 @@ async function saveCopyImportSample(event) {
       api.analyze(sample.id).catch(() => { /* Sample persists; analysis can be retried in the profile. */ })
     }
   } catch (exc) {
+    if (!isApiContextCurrent(requestContext)) return
     if (currentUser.value?.id === event.userId && pendingCopyImport.value === event) {
       showNotice(`文案已导入发布台，但品牌样本未保存：${exc.message}。可点击重试保存样本。`, 'error')
     }
   } finally {
-    if (currentUser.value?.id === event.userId && (!pendingCopyImport.value || pendingCopyImport.value === event)) copyImportSaving.value = false
+    if (isApiContextCurrent(requestContext)) {
+      if (currentUser.value?.id === event.userId && (!pendingCopyImport.value || pendingCopyImport.value === event)) copyImportSaving.value = false
+    }
   }
 }
 
@@ -786,15 +800,19 @@ function applyAgentStatus(result) {
   agentStatus.system = agent?.system || ''
   agentStatus.agentVersion = agent?.version || ''
   agentStatus.latestVersion = result?.installer?.windows?.version || ''
+  agentStatus.pausedAccounts = result?.paused_accounts || []
 }
 
 async function refreshAgentStatus() {
+  const requestContext = captureApiContext()
   agentStatus.checking = true
   try {
     const result = await request('/api/agent/status', { skipUnauthorizedHandler: true })
+    if (!isApiContextCurrent(requestContext)) return
     applyAgentStatus(result)
     return agentStatus.online
   } catch {
+    if (!isApiContextCurrent(requestContext)) return
     agentStatus.checked = true
     agentStatus.checking = false
     agentStatus.online = false
@@ -808,7 +826,9 @@ async function refreshAgentStatus() {
 }
 
 async function requireOnlineAgent(targetError = null) {
+  const requestContext = captureApiContext()
   const online = await refreshAgentStatus()
+  if (!isApiContextCurrent(requestContext)) return
   if (online) return true
   const message = agentStatus.unavailable
     ? '无法确认本地执行助手状态，请刷新页面后重试。'
@@ -819,6 +839,7 @@ async function requireOnlineAgent(targetError = null) {
 }
 
 async function refreshDashboard() {
+  const requestContext = captureApiContext()
   const userId = currentUser.value?.id
   if (!userId) return
   if (dashboardRefreshPromise) return dashboardRefreshPromise
@@ -830,6 +851,7 @@ async function refreshDashboard() {
           request('/api/accounts'),
           request('/api/agent/status', { skipUnauthorizedHandler: true }).catch(() => null),
         ])
+        if (!isApiContextCurrent(requestContext)) return
         if (currentUser.value?.id !== userId) return
         if (jobsResult.total > 0 && jobsOffset.value >= jobsResult.total) {
           jobsOffset.value = Math.floor((jobsResult.total - 1) / jobsPageSize) * jobsPageSize
@@ -859,26 +881,34 @@ async function refreshDashboard() {
           ) || null
         }
         if (selectedJob.value) await loadJob(selectedJob.value.id, false)
+        if (!isApiContextCurrent(requestContext)) return
         break
       }
     } catch (error) {
+      if (!isApiContextCurrent(requestContext)) return
       if (!notice.value) showNotice(`无法连接发布服务：${error.message}`, 'error')
     }
   })()
   try {
     return await dashboardRefreshPromise
   } finally {
-    dashboardRefreshPromise = null
+    if (isApiContextCurrent(requestContext)) {
+      dashboardRefreshPromise = null
+    }
   }
 }
 
 async function changeJobsPage(direction) {
+  const requestContext = captureApiContext()
   jobsOffset.value = Math.max(0, jobsOffset.value + direction * jobsPageSize)
   await refreshDashboard()
+  if (!isApiContextCurrent(requestContext)) return
 }
 
 async function loadJob(jobId, openPanel = true) {
+  const requestContext = captureApiContext()
   const result = await request(`/api/jobs/${jobId}`)
+  if (!isApiContextCurrent(requestContext)) return
   selectedBatch.value = null
   selectedJob.value = result.job
   jobLogs.value = result.logs
@@ -904,18 +934,22 @@ function selectBatch(group) {
 }
 
 async function deleteJob(job) {
+  const requestContext = captureApiContext()
   if (!canDeleteJob(job)) return
   if (!window.confirm(`确定删除“${jobLabel(job.kind)} · ${job.account}”任务记录及其独立日志吗？此操作不会删除 Cookie 或平台总日志。`)) return
 
   try {
     await request(`/api/jobs/${job.id}`, { method: 'DELETE' })
+    if (!isApiContextCurrent(requestContext)) return
     if (selectedJob.value?.id === job.id) {
       selectedJob.value = null
       jobLogs.value = []
     }
     showNotice('任务记录已删除', 'success')
     await refreshDashboard()
+    if (!isApiContextCurrent(requestContext)) return
   } catch (error) {
+    if (!isApiContextCurrent(requestContext)) return
     showNotice(error.message, 'error')
   }
 }
@@ -963,6 +997,7 @@ function removeDeletedJobsFromView(deletedIds) {
 }
 
 async function batchDeleteJobs() {
+  const requestContext = captureApiContext()
   const targets = selectedDeletableJobs.value
   if (!targets.length || batchDeleting.value) return
   if (!window.confirm(`确定删除已选中的 ${targets.length} 条任务记录及其独立日志吗？此操作不会删除 Cookie 或平台总日志。`)) return
@@ -973,6 +1008,7 @@ async function batchDeleteJobs() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ job_ids: targets.map((job) => job.id) }),
     })
+    if (!isApiContextCurrent(requestContext)) return
     const deletedIds = new Set(result.deleted || [])
     removeDeletedJobsFromView(deletedIds)
     selectedJobIds.value = selectedJobIds.value.filter((id) => !deletedIds.has(id))
@@ -981,9 +1017,12 @@ async function batchDeleteJobs() {
     else if (deletedIds.size) showNotice(`已删除 ${deletedIds.size} 条任务记录`, 'success')
     else if (skipped.length) showNotice('所选任务均不能删除（仅已完成或失败的任务可删除）', 'error')
     await refreshDashboard()
+    if (!isApiContextCurrent(requestContext)) return
   } catch (error) {
+    if (!isApiContextCurrent(requestContext)) return
     try {
       await refreshDashboard()
+      if (!isApiContextCurrent(requestContext)) return
       const remainingIds = new Set(jobs.value.map((job) => job.id))
       const deletedAfterRetry = targets.filter((job) => !remainingIds.has(job.id))
       if (deletedAfterRetry.length) {
@@ -993,30 +1032,38 @@ async function batchDeleteJobs() {
         return
       }
     } catch {
+      if (!isApiContextCurrent(requestContext)) return
       // Keep the original mutation error if the recovery refresh also fails.
     }
     showNotice(error.message, 'error')
   } finally {
-    batchDeleting.value = false
+    if (isApiContextCurrent(requestContext)) {
+      batchDeleting.value = false
+    }
   }
 }
 
 async function cancelJob(job) {
+  const requestContext = captureApiContext()
   if (!canCancelJob(job)) return
   if (!window.confirm(`确定中断“${jobLabel(job.kind)} · ${job.account}”任务吗？店铺账号、Cookie、历史任务和平台日志都会保留。`)) return
 
   try {
     const result = await request(`/api/jobs/${job.id}/cancel`, { method: 'POST' })
+    if (!isApiContextCurrent(requestContext)) return
     if (selectedJob.value?.id === job.id) selectedJob.value = result.job
     selectedJobIds.value = selectedJobIds.value.filter((id) => id !== job.id)
     showNotice(result.job.status === 'cancelled' ? '任务已中断，账号和 Cookie 已保留' : '正在中断浏览器任务，账号和 Cookie 将保留', 'success')
     await refreshDashboard()
+    if (!isApiContextCurrent(requestContext)) return
   } catch (error) {
+    if (!isApiContextCurrent(requestContext)) return
     showNotice(error.message, 'error')
   }
 }
 
 async function batchCancelJobs() {
+  const requestContext = captureApiContext()
   const targets = selectedCancelableJobs.value
   if (!targets.length || batchCancelling.value) return
   if (!window.confirm(`确定中断已选中的 ${targets.length} 条任务吗？店铺账号、Cookie、历史任务和平台日志都会保留。`)) return
@@ -1027,6 +1074,7 @@ async function batchCancelJobs() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ job_ids: targets.map((job) => job.id) }),
     })
+    if (!isApiContextCurrent(requestContext)) return
     const cancelledIds = new Set(result.cancelled || [])
     selectedJobIds.value = selectedJobIds.value.filter((id) => !cancelledIds.has(id))
     const skipped = result.skipped || []
@@ -1034,28 +1082,38 @@ async function batchCancelJobs() {
     else if (cancelledIds.size) showNotice(`已中断 ${cancelledIds.size} 条任务，账号和 Cookie 已保留`, 'success')
     else showNotice('所选任务均无法中断', 'error')
     await refreshDashboard()
+    if (!isApiContextCurrent(requestContext)) return
   } catch (error) {
+    if (!isApiContextCurrent(requestContext)) return
     showNotice(error.message, 'error')
     await refreshDashboard()
+    if (!isApiContextCurrent(requestContext)) return
   } finally {
-    batchCancelling.value = false
+    if (isApiContextCurrent(requestContext)) {
+      batchCancelling.value = false
+    }
   }
 }
 
 async function retryFailedBatch(batchId) {
+  const requestContext = captureApiContext()
   if (!batchId) return
   const failedCount = jobs.value.filter((job) => job.batch_id === batchId && job.status === 'failed').length
   if (!failedCount || !window.confirm(`确定重新执行该批次的 ${failedCount} 条失败任务吗？已完成任务不会重复执行。`)) return
   try {
     const result = await request(`/api/batches/${encodeURIComponent(batchId)}/retry-failed`, { method: 'POST' })
+    if (!isApiContextCurrent(requestContext)) return
     showNotice(`已重新创建 ${result.created_count} 条失败任务`, 'success')
     await refreshDashboard()
+    if (!isApiContextCurrent(requestContext)) return
   } catch (error) {
+    if (!isApiContextCurrent(requestContext)) return
     showNotice(error.message, 'error')
   }
 }
 
 async function deleteAccount(platform = form.platform, account = form.account) {
+  const requestContext = captureApiContext()
   if (!account.trim()) {
     showNotice('请先填写店铺账号标识', 'error')
     return
@@ -1065,16 +1123,20 @@ async function deleteAccount(platform = form.platform, account = form.account) {
 
   try {
     const result = await request(`/api/accounts/${platform}/${encodeURIComponent(account)}`, { method: 'DELETE' })
+    if (!isApiContextCurrent(requestContext)) return
     if (form.platform === platform && form.account === account) form.account = ''
     if (batchForm.platform === platform && batchForm.account === account) batchForm.account = ''
     showNotice(result.deletion_pending ? '删除任务已发送到当前电脑，本地代理处理后会移除 Cookie' : result.cookie_deleted ? 'Cookie 和店铺账号建议已删除' : '店铺账号建议已删除；未发现本地 Cookie 文件', 'success')
     await refreshDashboard()
+    if (!isApiContextCurrent(requestContext)) return
   } catch (error) {
+    if (!isApiContextCurrent(requestContext)) return
     showNotice(error.message, 'error')
   }
 }
 
 async function onFileChange(event) {
+  const requestContext = captureApiContext()
   const file = event.target.files?.[0] || null
   form.video = file
   snapshotWorkspaceMedia()
@@ -1082,25 +1144,31 @@ async function onFileChange(event) {
   if (file) {
     if (file.size <= DRAFT_VIDEO_MAX_BYTES) {
       await persistDraftVideo(file)
+      if (!isApiContextCurrent(requestContext)) return
     } else {
       await deleteDraftVideo()
+      if (!isApiContextCurrent(requestContext)) return
       showNotice('视频超过 100 MiB，仅保留文字配置，不复制到浏览器草稿库', 'info')
     }
   } else {
     await deleteDraftVideo()
+    if (!isApiContextCurrent(requestContext)) return
   }
   draftRestoredVideoName.value = ''
 }
 
 async function onDamVideoSelected(file) {
+  const requestContext = captureApiContext()
   form.video = file
   snapshotWorkspaceMedia()
   publishError.value = ''
   draftRestoredVideoName.value = ''
   if (file.size <= DRAFT_VIDEO_MAX_BYTES) {
     await persistDraftVideo(file)
+    if (!isApiContextCurrent(requestContext)) return
   } else {
     await deleteDraftVideo()
+    if (!isApiContextCurrent(requestContext)) return
     showNotice('DAM 视频超过 100 MiB，仅保留文字配置，不复制到浏览器草稿库', 'info')
   }
 }
@@ -1237,12 +1305,14 @@ function openSchedulePicker() {
 }
 
 async function submitPublish() {
+  const requestContext = captureApiContext()
   publishError.value = ''
   if (!form.account.trim()) {
     publishError.value = '请先选择或填写店铺账号标识'
     return
   }
   if (!await requireOnlineAgent(publishError)) return
+  if (!isApiContextCurrent(requestContext)) return
   if (isVideo.value && !form.video) {
     publishError.value = '请先重新选择一个视频文件'
     return
@@ -1327,48 +1397,60 @@ async function submitPublish() {
           ? uploadFileToAgent(form.coverImage, 'cover')
           : Promise.resolve(null),
       ])
+      if (!isApiContextCurrent(requestContext)) return
       data.append('video_asset_id', videoAsset.asset_id)
       if (coverAsset) data.append('cover_asset_id', coverAsset.asset_id)
     } else {
       const imageAssets = await Promise.all(
         form.images.map((image) => uploadFileToAgent(image, 'article-image')),
       )
+      if (!isApiContextCurrent(requestContext)) return
       data.append('image_asset_ids', JSON.stringify(imageAssets.map((asset) => asset.asset_id)))
     }
     localUploadStatus.value = '素材已到达 Windows 助手，正在创建任务…'
     const result = await request('/api/jobs/publish', { method: 'POST', body: data })
+    if (!isApiContextCurrent(requestContext)) return
     showNotice(`${platformLabel(form.platform)}${form.dryRun ? '流程验证' : '发布'}任务已创建，配置已保留可继续修改后再次发布`, 'success')
     await refreshDashboard()
+    if (!isApiContextCurrent(requestContext)) return
     await loadJob(result.job.id)
+    if (!isApiContextCurrent(requestContext)) return
   } catch (error) {
+    if (!isApiContextCurrent(requestContext)) return
     publishError.value = error.message
     showNotice(error.message, 'error')
   } finally {
-    submitting.value = false
-    localUploadStatus.value = ''
+    if (isApiContextCurrent(requestContext)) {
+      submitting.value = false
+      localUploadStatus.value = ''
+    }
   }
 }
 
 async function uploadFileToAgent(file, kind) {
+  const requestContext = captureApiContext()
   const ticket = await request('/api/agent/local-upload-ticket', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ filename: file.name, size: file.size, kind }),
   })
+  if (!isApiContextCurrent(requestContext)) return
   const separator = ticket.upload_url.includes('?') ? '&' : '?'
   const uploadUrl = `${ticket.upload_url}${separator}ticket=${encodeURIComponent(ticket.ticket)}`
   let response
   for (let attempt = 0; ; attempt++) {
     try {
-      response = await fetch(uploadUrl, {
+      response = await sessionFetch(uploadUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
         body: file,
         mode: 'cors',
         cache: 'no-store',
       })
+      if (!isApiContextCurrent(requestContext)) return
       break
     } catch {
+      if (!isApiContextCurrent(requestContext)) return
       // fetch only throws when the request never completed: the agent process
       // is gone or the port is unreachable. Business failures arrive as an HTTP
       // status below and must surface their own message instead of retrying.
@@ -1378,9 +1460,11 @@ async function uploadFileToAgent(file, kind) {
         )
       }
       await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)))
+      if (!isApiContextCurrent(requestContext)) return
     }
   }
   const body = await response.json().catch(() => ({}))
+  if (!isApiContextCurrent(requestContext)) return
   if (!response.ok || !body.asset) {
     throw new Error(body.detail || `Windows 助手接收素材失败（HTTP ${response.status}）`)
   }
@@ -1388,6 +1472,7 @@ async function uploadFileToAgent(file, kind) {
 }
 
 async function submitBatch() {
+  const requestContext = captureApiContext()
   batchSubmitError.value = ''
   if (!batchForm.account.trim()) {
     batchSubmitError.value = `请先选择或填写${batchPlatformLabel.value}店铺账号标识`
@@ -1398,6 +1483,7 @@ async function submitBatch() {
     return
   }
   if (!await requireOnlineAgent(batchSubmitError)) return
+  if (!isApiContextCurrent(requestContext)) return
 
   batchSubmitting.value = true
   batchErrors.value = []
@@ -1411,32 +1497,60 @@ async function submitBatch() {
 
   try {
     const result = await request(`/api/jobs/batch/${batchForm.platform}`, { method: 'POST', body: data })
+    if (!isApiContextCurrent(requestContext)) return
     clearBatchWorkbook()
     batchResult.value = result
     showNotice(`已创建 ${result.created_count} 条${batchPlatformLabel.value}${batchForm.dryRun ? '流程验证' : '发布'}任务`, 'success')
     await refreshDashboard()
+    if (!isApiContextCurrent(requestContext)) return
   } catch (error) {
+    if (!isApiContextCurrent(requestContext)) return
     batchSubmitError.value = error.message
     batchErrors.value = error.details?.errors || []
     showNotice(error.message, 'error')
   } finally {
-    batchSubmitting.value = false
+    if (isApiContextCurrent(requestContext)) {
+      batchSubmitting.value = false
+    }
+  }
+}
+
+function accountPaused(platform, account) {
+  return agentStatus.pausedAccounts.some(item => item.platform === platform && item.account === String(account || '').trim())
+}
+
+async function resumeAccount(platform, account) {
+  const requestContext = captureApiContext()
+  if (!window.confirm('请先在平台后台核对频控和发布结果。确认已经完成核对，恢复此店铺的排队发布？')) return
+  try {
+    await request(`/api/accounts/${platform}/${encodeURIComponent(account)}/resume`, { method: 'POST' })
+    if (!isApiContextCurrent(requestContext)) return
+    showNotice('已恢复此店铺排队发布；若平台再次限流，将再次暂停', 'success')
+    await refreshDashboard()
+  } catch (error) {
+    if (isApiContextCurrent(requestContext)) showNotice(error.message, 'error')
   }
 }
 
 async function accountAction(action, platform = form.platform, account = form.account) {
+  const requestContext = captureApiContext()
   if (!account.trim()) {
     showNotice('请先填写店铺账号标识', 'error')
     return
   }
   if (!await requireOnlineAgent()) return
+  if (!isApiContextCurrent(requestContext)) return
   try {
     const query = action === 'login' ? '?headed=true' : ''
     const result = await request(`/api/accounts/${platform}/${encodeURIComponent(account)}/${action}${query}`, { method: 'POST' })
+    if (!isApiContextCurrent(requestContext)) return
     showNotice(action === 'login' ? '登录任务已发送到当前电脑，请在本机 Edge 完成登录' : '账号校验任务已发送到当前电脑', 'success')
     await refreshDashboard()
+    if (!isApiContextCurrent(requestContext)) return
     await loadJob(result.job.id)
+    if (!isApiContextCurrent(requestContext)) return
   } catch (error) {
+    if (!isApiContextCurrent(requestContext)) return
     showNotice(error.message, 'error')
   }
 }
@@ -1471,6 +1585,11 @@ function resetUserInterface() {
   for (const key of Object.keys(workspaceDrafts)) {
     Object.assign(workspaceDrafts[key], createEmptyWorkspaceDraft())
   }
+  for (const media of Object.values(workspaceMedia)) {
+    Object.assign(media, {
+      video: null, images: [], coverImage: null, restoredVideoName: '', restoredAt: '',
+    })
+  }
   Object.assign(batchForm, {
     platform: 'tmall',
     contentType: 'video',
@@ -1485,6 +1604,17 @@ function resetUserInterface() {
   jobsOffset.value = 0
   selectedJob.value = null
   jobLogs.value = []
+  selectedJobIds.value = []
+  selectedBatch.value = null
+  expandedBatchIds.value = new Set()
+  submitting.value = false
+  batchSubmitting.value = false
+  batchCancelling.value = false
+  batchDeleting.value = false
+  localUploadStatus.value = ''
+  publishError.value = ''
+  batchSubmitError.value = ''
+  notice.value = ''
   batchErrors.value = []
   batchResult.value = null
   agentStatus.checked = false
@@ -1493,6 +1623,9 @@ function resetUserInterface() {
   agentStatus.deviceName = ''
   agentStatus.system = ''
   agentStatus.unavailable = false
+  agentStatus.agentVersion = ''
+  agentStatus.latestVersion = ''
+  agentStatus.pausedAccounts = []
   draftRestoredVideoName.value = ''
   draftRestoredAt.value = ''
   dashboardRefreshPromise = null
@@ -1500,9 +1633,13 @@ function resetUserInterface() {
 }
 
 /** Stop polling and hide all prior-user state immediately after logout or HTTP 401. */
-function endAuthenticatedSession() {
+function endAuthenticatedSession({ broadcast = true } = {}) {
+  setApiSession(null, { broadcast })
+  sessionEpoch.value += 1
   window.clearInterval(refreshTimer)
   refreshTimer = null
+  window.clearTimeout(noticeTimer)
+  noticeTimer = null
   currentUser.value = null
   pendingCopyImport.value = null
   copyImportSaving.value = false
@@ -1512,38 +1649,50 @@ function endAuthenticatedSession() {
 }
 
 async function refreshBrandAccess(updatedUser) {
+  const requestContext = captureApiContext()
   const userId = currentUser.value?.id
   if (!userId) return
   if (updatedUser?.id === userId) Object.assign(currentUser.value, updatedUser)
   try {
     const result = await request('/api/brand-access/me')
+    if (!isApiContextCurrent(requestContext)) return
     if (currentUser.value?.id === userId) brandAccess.value = { ...result, loaded: true, error: false }
   } catch {
+    if (!isApiContextCurrent(requestContext)) return
     if (currentUser.value?.id === userId) brandAccess.value = { loaded: true, configured: false, brand: null, error: true }
   }
 }
 
 /** Initialize only the authenticated user's drafts, data, and refresh loop. */
 async function beginAuthenticatedSession(user) {
-  endAuthenticatedSession()
+  endAuthenticatedSession({ broadcast: false })
   currentUser.value = user
+  setApiSession(user.id)
+  const requestContext = captureApiContext()
   refreshBrandAccess()
   activeView.value = 'publish'
   scheduleMinimum.value = formatLocalDateTime(minimumScheduleDate())
   await restorePublishDraft()
+  if (!isApiContextCurrent(requestContext)) return
   await refreshDashboard()
+  if (!isApiContextCurrent(requestContext)) return
   window.clearInterval(refreshTimer)
   refreshTimer = window.setInterval(refreshDashboard, 4000)
 }
 
 /** Revoke the server session; running background jobs intentionally continue. */
 async function logout() {
+  const requestContext = captureApiContext()
   try {
     await request('/api/auth/logout', { method: 'POST' })
+    if (!isApiContextCurrent(requestContext)) return
   } catch (requestError) {
+    if (!isApiContextCurrent(requestContext)) return
     if (requestError.status !== 401) showNotice(requestError.message, 'error')
   } finally {
-    endAuthenticatedSession()
+    if (isApiContextCurrent(requestContext)) {
+      endAuthenticatedSession()
+    }
   }
 }
 
@@ -1559,7 +1708,7 @@ onBeforeUnmount(() => {
 
 <template>
   <AuthGate v-if="!currentUser" @authenticated="beginAuthenticatedSession" />
-  <main v-else class="shell">
+  <main v-else :key="sessionEpoch" class="shell">
     <AgentSetupDialog
       v-if="agentSetupOpen"
       :agent-version="agentStatus.agentVersion"
@@ -1688,7 +1837,7 @@ onBeforeUnmount(() => {
 
           <div class="field-row account-row">
             <label class="field"><span>选择店铺</span><input v-model="form.account" list="account-list" required placeholder="例如 shop1" /><datalist id="account-list"><option v-for="item in visibleAccounts" :key="`${item.platform}-${item.account}`" :value="item.account" /></datalist></label>
-            <div class="account-actions"><span>账号状态</span><div><button type="button" class="quiet" @click="accountAction('check')">校验 Cookie</button><button type="button" class="quiet" @click="accountAction('login')">登录 / 重新登录</button><button type="button" class="quiet" @click="deleteAccount()">删除账号</button></div></div>
+            <div class="account-actions"><span>账号状态</span><div><button type="button" class="quiet" @click="accountAction('check')">校验 Cookie</button><button type="button" class="quiet" @click="accountAction('login')">登录 / 重新登录</button><button type="button" class="quiet" @click="deleteAccount()">删除账号</button><button v-if="accountPaused(form.platform, form.account)" type="button" class="quiet" @click="resumeAccount(form.platform, form.account)">核对后恢复发布</button></div></div>
           </div>
 
           <div class="section-heading section-heading-with-action">
@@ -1818,7 +1967,7 @@ onBeforeUnmount(() => {
           </div>
           <div class="field-row account-row">
             <label class="field"><span>选择店铺</span><input v-model="batchForm.account" aria-label="店铺账号标识" list="batch-account-list" required placeholder="例如 shop1" /><datalist id="batch-account-list"><option v-for="item in batchAccounts" :key="`${batchForm.platform}-batch-${item.account}`" :value="item.account" /></datalist></label>
-            <div class="account-actions"><span>账号状态</span><div><button type="button" class="quiet" @click="accountAction('check', batchForm.platform, batchForm.account)">校验 Cookie</button><button type="button" class="quiet" @click="accountAction('login', batchForm.platform, batchForm.account)">登录 / 重新登录</button><button type="button" class="quiet" @click="deleteAccount(batchForm.platform, batchForm.account)">删除账号</button></div></div>
+            <div class="account-actions"><span>账号状态</span><div><button type="button" class="quiet" @click="accountAction('check', batchForm.platform, batchForm.account)">校验 Cookie</button><button type="button" class="quiet" @click="accountAction('login', batchForm.platform, batchForm.account)">登录 / 重新登录</button><button type="button" class="quiet" @click="deleteAccount(batchForm.platform, batchForm.account)">删除账号</button><button v-if="accountPaused(batchForm.platform, batchForm.account)" type="button" class="quiet" @click="resumeAccount(batchForm.platform, batchForm.account)">核对后恢复发布</button></div></div>
           </div>
 
           <div class="section-heading section-heading-with-action batch-import-heading">

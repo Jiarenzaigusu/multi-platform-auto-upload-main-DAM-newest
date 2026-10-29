@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 from patchright.async_api import BrowserContext, Frame
 
 from uploader.errors import PublishResultUncertainError
+from uploader.jd_diagnostics import track_jd_page, check_jd_rate_limit
 from uploader.jd_session import JdBrowserSession
 from utils.log import jd_logger
 from utils.clipboard import dispatch_paste
@@ -119,6 +120,7 @@ class JDArticle:
         await chooser.set_files(list(self.image_paths))
         for _ in range(300):
             text = await frame.locator("body").inner_text(timeout=3000)
+            check_jd_rate_limit(text, getattr(page, "context", None))
             if "上传失败" in text or "处理失败" in text:
                 raise RuntimeError(f"京东图文图片上传失败: {text[-300:]}")
             # 实页初始状态已有一张平台占位图，不能以 img 数量判断。图片完成后
@@ -180,6 +182,7 @@ class JDArticle:
         for _ in range(30):
             await asyncio.sleep(1)
             result_text = await panel.inner_text()
+            check_jd_rate_limit(result_text, getattr(page, "context", None))
             if any(hint in result_text for hint in invalid_hints) and await cards.count() < len(ids):
                 raise ValueError(f"京东链接导入商品不可用：{result_text.strip()[-300:]}")
             if await cards.count() >= len(ids):
@@ -484,11 +487,15 @@ class JDArticle:
         raise RuntimeError("等待京东图文验证码超时（10 分钟），请检查浏览器后重试")
 
     async def _upload_in_context(self, context: BrowserContext) -> dict:
+        diagnostics = getattr(context, "_jd_business_diagnostics", None)
+        if diagnostics is not None:
+            diagnostics.rate_limited = False
         await self.validate_upload_args()
         page = None
         submitted = False
         try:
             page = await context.new_page()
+            track_jd_page(context, page)
             await page.goto(JD_GRAPHIC_URL, wait_until="domcontentloaded")
             if _host(page.url) in JD_AUTH_HOSTS:
                 raise JdArticleAuthenticationError("京东 Cookie 已失效，请重新登录")
@@ -568,16 +575,23 @@ class JDArticle:
         try:
             await session.save_storage_state()
             result = await self._upload_in_context(await session.ensure_open())
-        except PublishResultUncertainError:
+        except PublishResultUncertainError as exc:
             session.mark_authenticated(False)
+            try:
+                check_jd_rate_limit(context=getattr(session, "context", None))
+            except Exception as rate_error:
+                if getattr(rate_error, "status", "") == "rate_limited":
+                    exc.rate_limited = True
             jd_logger.warning("🔎 京东图文发布结果不确定，保留页面供人工核对")
             raise
-        except BaseException:
+        except BaseException as exc:
             # A single Excel row must not close the shared context and the
             # completed pages from earlier rows. The next row opens a fresh
             # Page; the pool can rebuild the browser lazily if it disconnected.
             session.mark_authenticated(False)
             jd_logger.warning("📌 京东图文任务失败，保留浏览器会话和已有窗口供复核")
+            if isinstance(exc, Exception):
+                check_jd_rate_limit(context=getattr(session, "context", None))
             raise
 
         session.mark_authenticated(False)

@@ -36,6 +36,7 @@ from patchright.async_api import (
 
 from uploader.errors import PublishResultUncertainError
 from uploader.jd_auth import JdAuthProbe, JdAuthVerificationError
+from uploader.jd_diagnostics import track_jd_page, check_jd_rate_limit
 from utils.config import DEBUG_MODE
 from uploader.base_video import BaseVideoUploader
 from uploader.jd_session import JdBrowserSession
@@ -84,6 +85,10 @@ class JdAuthenticationError(RuntimeError):
     当发布或校验流程中发现页面被重定向到鉴权页时抛出，
     上层会捕获此异常并将会话标记为未认证。
     """
+
+
+class JdFileDeliveryUncertainError(RuntimeError):
+    """The browser may have accepted the file; retrying could upload it twice."""
     pass
 
 
@@ -96,7 +101,7 @@ class JdVideoProcessingStalledError(RuntimeError):
         elif preview_url:
             uploaded_state = f"已生成 OSS 视频预览 {preview_url}"
         else:
-            uploaded_state = "视频文件已上传"
+            uploaded_state = "视频文件已交给浏览器，尚未确认上传完成"
         super().__init__(f"京东{uploaded_state}，但视频/封面解析在限定时间内未完成：{detail}")
         self.video_id = video_id
         self.preview_url = preview_url
@@ -369,6 +374,7 @@ async def _cookie_auth_in_context(context: BrowserContext) -> bool:
     """Verify natural account requests; do not send upload or publish requests."""
     async with JdAuthProbe(context) as probe:
         page = await context.new_page()
+        track_jd_page(context, page)
         try:
             await page.goto(JD_POST_CENTER_URL, wait_until="domcontentloaded")
             for _ in range(8):
@@ -420,6 +426,7 @@ async def jd_setup(
     *,
     session: JdBrowserSession,
     auth_cache_seconds: float = 0,
+    force_relogin: bool = False,
 ):
     """检查 cookie；失效且 handle=True 时打开浏览器让用户手动登录。
 
@@ -428,8 +435,23 @@ async def jd_setup(
     :param return_detail: True 返回完整结果 dict，False 返回布尔
     :param session: 浏览器会话
     :param auth_cache_seconds: 保留调用兼容；京东每次都实际复核账号接口
+    :param force_relogin: 手动重新登录时使用空白会话，不校验或复用旧登录状态
     :returns: 取决于 return_detail，返回 dict 或布尔
     """
+    if force_relogin:
+        if not handle:
+            raise ValueError("强制重新登录必须由手动登录流程调用")
+        try:
+            async with session.fresh_login() as login_session:
+                result = await jd_cookie_gen(account_file, session=login_session)
+        except Exception:
+            # Browser/filesystem exceptions may include tokens or account paths.
+            session.mark_authenticated(False)
+            message = "京东重新登录未完成，原登录状态已保留；请检查浏览器或本机文件权限后重试"
+            jd_logger.error(_msg("😢", message))
+            result = _build_login_result(False, "relogin_failed", message, account_file)
+        return result if return_detail else result["success"]
+
     try:
         authenticated = os.path.exists(account_file) and await cookie_auth(
             account_file,
@@ -485,6 +507,7 @@ async def jd_cookie_gen(
     try:
         await probe.__aenter__()
         page = await context.new_page()
+        track_jd_page(context, page)
         await page.goto(JD_POST_CENTER_URL, wait_until="domcontentloaded")
         jd_logger.info(_msg("🧍", "已打开京东京麦发布中心入口，请在浏览器中完成登录"))
 
@@ -526,8 +549,8 @@ async def jd_cookie_gen(
     except JdAuthVerificationError as exc:
         result = _build_login_result(False, exc.status, str(exc), account_file,
                                      current_url=page.url if page else "")
-    except Exception as exc:
-        result = _build_login_result(False, "failed", str(exc), account_file,
+    except Exception:
+        result = _build_login_result(False, "failed", "京东京麦登录或登录状态保存未完成，请检查浏览器连接和本机文件权限", account_file,
                                      current_url=page.url if page else "")
     finally:
         await probe.__aexit__()
@@ -655,11 +678,14 @@ async def _jd_file_input_has_file(file_input) -> bool | None:
 
 
 async def _set_jd_video_file_and_verify(file_input, file_path: str) -> None:
-    """Set the video input and verify that the browser accepted a FileList."""
-    await file_input.set_input_files(file_path)
+    """Deliver once; a reset FileList is not evidence that delivery failed."""
+    try:
+        await file_input.set_input_files(file_path)
+    except PlaywrightError as exc:
+        raise JdFileDeliveryUncertainError("京东文件交付结果未确认，已停止自动重传，请人工核对上传状态") from exc
     selected = await _jd_file_input_has_file(file_input)
     if selected is False:
-        raise RuntimeError("京东视频 input 未接收到所选文件")
+        jd_logger.info(_msg("🔎", "文件已交给浏览器，input 已重置；等待实际上传状态确认"))
 
 
 async def _choose_jd_video_file(page: Page, frame: Frame, file_path: str) -> None:
@@ -716,7 +742,10 @@ async def _choose_jd_video_file(page: Page, frame: Frame, file_path: str) -> Non
             async with page.expect_file_chooser(timeout=5000) as chooser_info:
                 await upload_surface.click(force=True, timeout=5000)
             chooser = await chooser_info.value
-            await chooser.set_files(file_path)
+            try:
+                await chooser.set_files(file_path)
+            except PlaywrightError as exc:
+                raise JdFileDeliveryUncertainError("京东文件交付结果未确认，已停止自动重传，请人工核对上传状态") from exc
             selected = await _jd_file_input_has_file(file_input)
             if selected is False:
                 # 京麦开始上传后会立刻用一个空 input 替换已选择文件的节点，
@@ -928,6 +957,7 @@ class JDVideo(JDBaseUploader):
         while loop.time() < deadline:
             try:
                 body_text = await _visible_text(current_frame)
+                check_jd_rate_limit(body_text, getattr(page, "context", None) if page else None)
                 last_body_text = body_text[-300:].strip()
                 if any(
                     hint in body_text
@@ -1725,8 +1755,13 @@ class JDVideo(JDBaseUploader):
         context: BrowserContext,
     ) -> tuple[Page, Frame]:
         """Open a clean JD form and recover once from its half-finished upload state."""
+        business_diagnostics = getattr(context, "_jd_business_diagnostics", None)
+        if business_diagnostics is not None:
+            business_diagnostics.rate_limited = False
         for attempt in range(1, JD_VIDEO_UPLOAD_MAX_ATTEMPTS + 1):
+            file_delivered = False
             page = await context.new_page()
+            track_jd_page(context, page)
             diagnostics = JdUploadDiagnostics()
             _attach_upload_diagnostics(page, diagnostics)
             try:
@@ -1744,6 +1779,7 @@ class JDVideo(JDBaseUploader):
                 # upload card that does not yet dispatch its file chooser.
                 for mount_attempt in range(1, 3):
                     frame = await _wait_for_video_upload_surface(page)
+                    check_jd_rate_limit(context=context)
                     try:
                         jd_logger.info(
                             _msg(
@@ -1753,7 +1789,10 @@ class JDVideo(JDBaseUploader):
                             )
                         )
                         await _choose_jd_video_file(page, frame, self.file_path)
+                        file_delivered = True
                         break
+                    except JdFileDeliveryUncertainError:
+                        raise
                     except RuntimeError:
                         if mount_attempt >= 2:
                             raise
@@ -1770,7 +1809,7 @@ class JDVideo(JDBaseUploader):
                 )
                 return page, frame
             except (JdVideoProcessingStalledError, JdVideoUploadRetryableError) as exc:
-                should_retry = attempt < JD_VIDEO_UPLOAD_MAX_ATTEMPTS
+                should_retry = not file_delivered and attempt < JD_VIDEO_UPLOAD_MAX_ATTEMPTS
                 if not page.is_closed():
                     await page.close()
                 if not should_retry:
@@ -1796,7 +1835,7 @@ class JDVideo(JDBaseUploader):
                 if _is_target_closed_error(exc):
                     if not page.is_closed():
                         await page.close()
-                    if attempt >= JD_VIDEO_UPLOAD_MAX_ATTEMPTS:
+                    if file_delivered or attempt >= JD_VIDEO_UPLOAD_MAX_ATTEMPTS:
                         raise JdVideoUploadRetryableError(
                             "京东视频发布页在上传过程中被关闭，重试次数已用尽"
                         ) from exc
@@ -1966,21 +2005,28 @@ class JDVideo(JDBaseUploader):
             context = await session.ensure_open()
             await session.save_storage_state()
             result = await self._upload_in_context(context)
-        except PublishResultUncertainError:
+        except PublishResultUncertainError as exc:
             # The publish button was already clicked. Keep the visible page and
             # browser context so an operator can inspect Jingmai manually; the
             # task layer marks this terminal state as uncertain and must not
             # silently create a second publish attempt.
             session.mark_authenticated(False)
+            try:
+                check_jd_rate_limit(context=session.context)
+            except Exception as rate_error:
+                if getattr(rate_error, "status", "") == "rate_limited":
+                    exc.rate_limited = True
             jd_logger.warning(_msg("🔎", "京东发布结果不确定，保留页面供人工核对"))
             raise
-        except BaseException:
+        except BaseException as exc:
             # Keep the account BrowserContext alive. A single batch row must
             # not close the previously completed pages or pages being reviewed
             # by the operator. The next row gets a fresh Page; if the browser
             # itself is disconnected, the session pool will rebuild it lazily.
             session.mark_authenticated(False)
             jd_logger.warning(_msg("📌", "京东视频任务失败，保留浏览器会话和已有窗口供复核"))
+            if isinstance(exc, Exception):
+                check_jd_rate_limit(context=getattr(session, "context", None))
             raise
 
         # Do not persist upload-scoped credentials. Invalidating only the auth

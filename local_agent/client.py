@@ -28,6 +28,7 @@ class AgentApiClient:
         self.agent_token = agent_token
         self.opener = build_opener()
         self.user: dict[str, Any] | None = None
+        self.binding_id: str | None = None
 
     def _url(self, path: str) -> str:
         return f"{self.server_url}/{path.lstrip('/')}"
@@ -72,7 +73,10 @@ class AgentApiClient:
             raise AgentApiError(f"无法连接发布服务：{exc}") from exc
 
     def connect(self, hello: dict[str, Any]) -> dict[str, Any]:
-        return self.request_json("/api/agent/connect", method="POST", payload=hello)
+        response = self.request_json("/api/agent/connect", method="POST", payload=hello)
+        self.user = response.get("user")
+        self.binding_id = (response.get("agent") or {}).get("binding_id")
+        return response
 
     def pair(self, hello: dict[str, Any], pairing_code: str) -> dict[str, Any]:
         response = self.request_json(
@@ -97,7 +101,14 @@ class AgentApiClient:
             method="POST",
             payload={"agent_id": agent_id},
         )
-        return response.get("job")
+        job = response.get("job")
+        if job is not None and (
+            not self.user or job.get("user_id") != self.user.get("id")
+            or job.get("payload", {}).get("target_agent_id") != agent_id
+            or not self.binding_id or job.get("payload", {}).get("target_binding_id") != self.binding_id
+        ):
+            raise AgentApiError("任务用户或目标设备不匹配，已阻止执行；请确认服务端与助手均已升级", 403)
+        return job
 
     def heartbeat(self, job_id: str, agent_id: str) -> dict[str, Any]:
         return self.request_json(
@@ -115,6 +126,10 @@ class AgentApiClient:
             method="POST",
             payload={"ticket": ticket, "origin": origin, "reserve": reserve},
         )
+
+    def confirm_local_identity(self, ticket: str, origin: str) -> dict[str, Any]:
+        return self.request_json("/api/agent/local-identity/confirm", method="POST",
+                                 payload={"ticket": ticket, "origin": origin})
 
     def complete_local_upload(
         self,

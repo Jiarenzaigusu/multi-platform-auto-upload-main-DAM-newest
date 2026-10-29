@@ -19,6 +19,7 @@ from webapp.api.models import PublishRequest
 from webapp.api.store import TERMINAL_STATUSES, JobStore, job_queue_order, utc_now
 from webapp.api.tasks import RuntimeInstanceLock
 from webapp.workspaces.paths import UserDataPaths
+from webapp.execution_context import AgentTargetError, verified_agent_id, verified_agent_binding
 
 _UPLOAD_DIRECTORY_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 _ASSET_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
@@ -58,6 +59,9 @@ class AgentTaskManager:
         self._dropped_agents: dict[str, dict[str, Any]] = {}
         self._local_upload_tickets: dict[str, dict[str, Any]] = {}
         self._local_assets: dict[str, dict[str, Any]] = {}
+        self._identity_challenges: dict[str, dict[str, Any]] = {}
+        self._identity_proofs: dict[str, dict[str, Any]] = {}
+        self._known_device_bindings: dict[str, dict[str, Any]] = {}
         self._maintenance_errors: list[str] = []
         self._started = False
         self._closed = False
@@ -122,17 +126,90 @@ class AgentTaskManager:
                 raise
         self.reap_expired_jobs()
 
+    def require_target(self, agent_id: str | None = None) -> str:
+        selected = agent_id or verified_agent_id.get()
+        with self._guard:
+            self._drop_offline_agents_locked(time.monotonic())
+            if not selected or selected not in self._agents:
+                raise AgentTargetError("无法确认目标本机助手，请更新并启动助手，在当前电脑重新验证连接")
+            binding = verified_agent_binding.get()
+            if binding and self._agents[selected].get("binding_id") != binding:
+                raise AgentTargetError("助手配对已变化，请在当前电脑重新验证后提交")
+        return selected
+
+    def note_authenticated_device(self, device) -> None:
+        """Use server-validated device metadata when renewing after a restart."""
+        with self._guard:
+            self._known_device_bindings[device.agent_id] = {
+                "binding_id": device.created_at, "device_name": device.device_name,
+                "system": device.system, "version": device.version,
+            }
+
+    def _target_binding(self, agent_id: str) -> str:
+        return verified_agent_binding.get() or self._agents[agent_id]["binding_id"]
+
+    def issue_identity_challenge(self, *, origin: str) -> dict:
+        status = self.agent_status()
+        agents = status["agents"]
+        if len(agents) != 1:
+            raise AgentTargetError("无法确定目标助手，请先连接当前电脑的助手")
+        with self._guard:
+            now = time.time()
+            self._identity_challenges = {key: value for key, value in self._identity_challenges.items() if value["expires_at"] > now}
+            self._identity_proofs = {key: value for key, value in self._identity_proofs.items() if value["expires_at"] > now}
+            if len(self._identity_challenges) >= 128:
+                raise AgentTargetError("本机验证请求过多，请稍后重试")
+            ticket = secrets.token_urlsafe(32)
+            self._identity_challenges[ticket] = {
+                "agent_id": agents[0]["agent_id"], "origin": origin.rstrip("/"), "expires_at": now + 60,
+                "binding_id": agents[0]["binding_id"],
+            }
+        return {"ticket": ticket, "verify_url": "http://127.0.0.1:48765/v1/identity"}
+
+    def confirm_identity_challenge(self, *, ticket: str, agent_id: str, origin: str) -> dict:
+        with self._guard:
+            record = self._identity_challenges.get(ticket)
+            if not record or record["expires_at"] <= time.time():
+                raise AgentTargetError("本机验证票据不存在或已过期")
+            if record["agent_id"] != agent_id or record["origin"] != origin.rstrip("/"):
+                raise PermissionError("本机助手与网页当前用户、服务或目标设备不匹配")
+            self.require_target(agent_id)
+            if self._agents[agent_id]["binding_id"] != record["binding_id"]:
+                raise AgentTargetError("助手配对已变化，请重新验证")
+            self._identity_challenges.pop(ticket)
+            proof = secrets.token_urlsafe(32)
+            self._identity_proofs[proof] = {**record, "expires_at": time.time() + 60}
+            return {"agent_id": agent_id, "proof": proof}
+
+    def verify_identity_proof(self, proof: str, *, origin: str, include_binding: bool = False):
+        with self._guard:
+            record = self._identity_proofs.get(proof)
+            if not record or record["expires_at"] <= time.time() or record["origin"] != origin.rstrip("/"):
+                raise AgentTargetError("本机助手验证已失效，请重新验证后再提交")
+            selected = self.require_target(record["agent_id"])
+            if self._agents[selected]["binding_id"] != record["binding_id"]:
+                raise AgentTargetError("助手配对已变化，请重新验证")
+            return (selected, record["binding_id"]) if include_binding else selected
+
+    def resume_account(self, platform: str, account: str) -> None:
+        self.require_target()
+        self.store.resume_account(platform, account)
+        self._notify_job_available()
+
     def submit_account_task(
-        self, *, kind: str, platform: str, account: str, headed: bool = True
+        self, *, kind: str, platform: str, account: str, headed: bool = True,
+        target_agent_id: str | None = None,
     ) -> dict[str, Any]:
         if kind not in {"login", "check", "delete_account"}:
             raise ValueError(f"本地代理不支持账号任务：{kind}")
         self.start()
+        target_agent_id = self.require_target(target_agent_id)
         job = self.store.create_job(
             kind=kind,
             platform=platform,
             account=account,
-            payload={"headed": headed},
+            payload={"headed": headed, "target_agent_id": target_agent_id,
+                     "target_binding_id": self._target_binding(target_agent_id)},
             message="任务正在等待用户电脑上的本地执行代理领取",
         )
         self._notify_job_available()
@@ -145,9 +222,11 @@ class AgentTaskManager:
         batch_id: str | None = None,
         source_row: int | None = None,
         local_assets: dict[str, Any] | None = None,
+        target_agent_id: str | None = None,
     ) -> dict[str, Any]:
         return self.submit_publish_tasks(
-            [(request, source_row)], batch_id=batch_id, local_assets=local_assets
+            [(request, source_row)], batch_id=batch_id, local_assets=local_assets,
+            target_agent_id=target_agent_id,
         )[0]
 
     def submit_publish_tasks(
@@ -156,13 +235,16 @@ class AgentTaskManager:
         *,
         batch_id: str | None = None,
         local_assets: dict[str, Any] | None = None,
+        target_agent_id: str | None = None,
     ) -> list[dict[str, Any]]:
         if not requests:
             return []
         self.start()
-        target_agent_id = (
-            self._local_asset_agent_id(local_assets) if local_assets else None
-        )
+        asset_target = self._local_asset_agent_id(local_assets) if local_assets else None
+        requested_target = target_agent_id or verified_agent_id.get()
+        if asset_target and requested_target and asset_target != requested_target:
+            raise AgentTargetError("本机素材与目标助手不匹配，请在同一台电脑重新选择素材")
+        target_agent_id = self.require_target(requested_target or asset_target)
         definitions: list[dict[str, Any]] = []
         ordered_requests = (
             sorted(
@@ -180,6 +262,8 @@ class AgentTaskManager:
                 (*item, None) if len(item) == 2 else item
             )
             payload = asdict(request)
+            payload["target_agent_id"] = target_agent_id
+            payload["target_binding_id"] = self._target_binding(target_agent_id)
             payload["video_path"] = str(request.video_path) if request.video_path else None
             payload["image_paths"] = [str(path) for path in request.image_paths]
             payload["image_folder_path"] = (
@@ -253,6 +337,10 @@ class AgentTaskManager:
         )
         if not failed:
             return []
+        selected = self.require_target()
+        if any(job["payload"].get("target_agent_id") != selected or
+               job["payload"].get("target_binding_id") != self._target_binding(selected) for job in failed):
+            raise AgentTargetError("失败任务与本机助手不匹配，不能转移到其他电脑重试")
         jobs = self.store.create_jobs(
             [
                 {
@@ -319,6 +407,7 @@ class AgentTaskManager:
                 "expires_at": now + 10 * 60,
                 "reserved": False,
                 "completed": False,
+                "binding_id": agent["binding_id"],
             }
             self._local_upload_tickets[ticket] = record
         return {
@@ -352,6 +441,8 @@ class AgentTaskManager:
                 raise KeyError("上传票据不存在或已过期")
             if record["agent_id"] != agent_id:
                 raise PermissionError("上传票据与设备不匹配")
+            if self._agents.get(agent_id, {}).get("binding_id") != record.get("binding_id"):
+                raise PermissionError("上传票据所属配对已变化，请重新上传")
             if record["origin"] != origin.rstrip("/"):
                 raise PermissionError("上传来源不匹配")
             if record["completed"] or (reserve and record["reserved"]):
@@ -390,6 +481,8 @@ class AgentTaskManager:
         with self._guard:
             self._drop_expired_local_uploads_locked(time.time())
             record = self._local_assets.get(asset_id)
+            if record and record.get("binding_id") != self._agents.get(agent_id, {}).get("binding_id"):
+                raise PermissionError("本机素材所属配对已变化，请重新上传素材")
             if not record or not record.get("completed"):
                 raise KeyError("本机素材不存在或已过期")
             if record["agent_id"] != agent_id:
@@ -407,7 +500,8 @@ class AgentTaskManager:
             kind="inspect_product",
             platform="tmall",
             account="product-lookup",
-            payload={"product_url": product_url, "headed": False},
+            payload={"product_url": product_url, "headed": False, "target_agent_id": self.require_target(),
+                     "target_binding_id": self._target_binding(self.require_target())},
             message="正在等待本地执行助手读取天猫商品",
             remember_account=False,
         )
@@ -457,6 +551,7 @@ class AgentTaskManager:
         system: str,
         version: str,
         capabilities: list[str] | tuple[str, ...] = (),
+        binding_id: str | None = None,
     ) -> dict[str, Any]:
         self.start()
         now = time.monotonic()
@@ -474,6 +569,7 @@ class AgentTaskManager:
             )
             self._agents[agent_id] = {
                 "agent_id": agent_id,
+                "binding_id": binding_id or agent_id,
                 "device_name": device_name,
                 "system": system,
                 "version": version,
@@ -536,6 +632,7 @@ class AgentTaskManager:
             "agents": agents,
             "lease_seconds": self.lease_seconds,
             "offline_after_seconds": self._offline_after_seconds(),
+            "paused_accounts": list(self.store.paused_accounts().values()),
         }
 
     @staticmethod
@@ -568,9 +665,11 @@ class AgentTaskManager:
         if agent_id in self._agents:
             return
         previous = self._dropped_agents.pop(agent_id, None) or {}
+        previous = {**previous, **self._known_device_bindings.get(agent_id, {})}
         now_iso = datetime.now(timezone.utc).isoformat()
         self._agents[agent_id] = {
             "agent_id": agent_id,
+            "binding_id": previous.get("binding_id") or agent_id,
             "device_name": previous.get("device_name") or "本地代理",
             "system": previous.get("system") or "",
             "version": previous.get("version") or "",
@@ -596,10 +695,15 @@ class AgentTaskManager:
         """Forget a disconnected device without changing claimed job leases."""
         with self._guard:
             self._agents.pop(agent_id, None)
+            self._identity_challenges = {key: value for key, value in self._identity_challenges.items() if value["agent_id"] != agent_id}
+            self._identity_proofs = {key: value for key, value in self._identity_proofs.items() if value["agent_id"] != agent_id}
 
     def disconnect_all_agents(self) -> None:
         with self._guard:
             self._agents.clear()
+            self._identity_challenges.clear()
+            self._identity_proofs.clear()
+            self._known_device_bindings.clear()
 
     def claim_next_job(self, agent_id: str) -> dict[str, Any] | None:
         self.start()
@@ -625,7 +729,10 @@ class AgentTaskManager:
                 ),
             )
             job = None
+            paused = self.store.paused_accounts()
             for item in queued:
+                if item["kind"] == "publish" and f"{item['platform']}:{item['account']}" in paused:
+                    continue
                 payload = item["payload"]
                 target_agent_id = payload.get("target_agent_id")
                 if payload.get("local_assets") and not target_agent_id:
@@ -643,8 +750,27 @@ class AgentTaskManager:
                         )
                         continue
                     payload = {**payload, "target_agent_id": target_agent_id}
+                    if not payload.get("target_binding_id"):
+                        assets = [payload.get("local_assets", {}).get("video"), payload.get("local_assets", {}).get("cover")]
+                        assets.extend(payload.get("local_assets", {}).get("images") or [])
+                        records = [self._local_assets.get(asset.get("asset_id"), {}) for asset in assets if asset]
+                        bindings = {record.get("binding_id") for record in records}
+                        if len(bindings) == 1 and None not in bindings:
+                            payload["target_binding_id"] = next(iter(bindings))
                     item = self.store.update_job(item["id"], payload=payload)
+                if not target_agent_id:
+                    self.store.update_job(item["id"], status="failed",
+                        message="旧任务缺少可验证的目标设备，请在原电脑重新创建任务",
+                        error="任务归属无法确认，已阻止自动分配", finished_at=utc_now())
+                    continue
                 if target_agent_id and target_agent_id != agent_id:
+                    continue
+                if not payload.get("target_binding_id"):
+                    self.store.update_job(item["id"], status="failed",
+                        message="旧任务缺少可验证的设备配对，请在原电脑重新创建任务",
+                        error="任务配对归属无法确认", finished_at=utc_now())
+                    continue
+                if payload.get("target_binding_id") != self._agents[agent_id]["binding_id"]:
                     continue
                 if (item["platform"], item["account"]) not in active_accounts:
                     job = item
@@ -690,6 +816,23 @@ class AgentTaskManager:
             raise PermissionError("任务不属于当前本地代理")
         if job["status"] not in {"running", "cancelling"}:
             raise ValueError("任务已经结束")
+        if not job.get("payload", {}).get("target_agent_id"):
+            # A persisted claim is historical ownership evidence. This is only
+            # for an already running task, never for an unbound queued task.
+            job = self.store.update_job(job_id, payload={**job["payload"], "target_agent_id": agent_id})
+        if job.get("payload", {}).get("target_agent_id") != agent_id:
+            raise PermissionError("任务目标设备与执行设备不匹配")
+        binding = job["payload"].get("target_binding_id")
+        current_binding = self._agents.get(agent_id, {}).get("binding_id")
+        if not binding:
+            # For pre-upgrade running jobs, a pairing created after the claim
+            # cannot be the original claimant even if its device ID is equal.
+            claimed_at = job.get("claimed_at") or job.get("started_at") or ""
+            if current_binding and current_binding[:4].isdigit() and current_binding > claimed_at:
+                raise PermissionError("运行任务早于当前配对，请人工核对原设备")
+            job = self.store.update_job(job_id, payload={**job["payload"], "target_binding_id": current_binding})
+        elif binding != current_binding:
+            raise PermissionError("任务绑定的配对与当前助手不匹配")
         return job
 
     def complete_agent_job(
@@ -708,6 +851,13 @@ class AgentTaskManager:
         with self._guard:
             existing = self.store.get_job(job_id)
             if existing and existing["status"] in TERMINAL_STATUSES:
+                target = existing.get("payload", {}).get("target_agent_id")
+                if target and target != agent_id:
+                    raise PermissionError("任务目标设备与执行设备不匹配")
+                expected_binding = existing.get("payload", {}).get("target_binding_id")
+                current_binding = (self._agents.get(agent_id) or self._known_device_bindings.get(agent_id) or {}).get("binding_id")
+                if expected_binding and expected_binding != current_binding:
+                    raise PermissionError("任务绑定的配对与当前助手不匹配")
                 if (
                     existing.get("agent_id") == agent_id
                     and existing["status"] == status
@@ -717,6 +867,8 @@ class AgentTaskManager:
             self._touch_agent_locked(agent_id)
             job = self._owned_active_job(job_id, agent_id)
             self._write_agent_logs(job_id, logs)
+            if result.get("pause_account") is True and result.get("pause_reason") == "rate_limited":
+                self.store.pause_account(job["platform"], job["account"], "平台请求受限，请人工核对后恢复")
             completed = self.store.update_job(
                 job_id,
                 status=status,

@@ -86,6 +86,7 @@ from webapp.api.tasks import TaskManager
 from webapp.auth import AuthService, AuthStore, create_auth_router
 from webapp.auth.dependencies import require_admin, require_operator, require_session, require_user
 from webapp.auth.middleware import AuthenticationMiddleware
+from webapp.execution_context import AgentTargetError
 from webapp.dashboard import DashboardRepository
 from webapp.dashboard_agent import ChatRequest, ConversationStore, DashboardTools, answer_question
 from webapp.dashboard_memory import memory_enabled
@@ -364,14 +365,24 @@ def create_app(
         TrustedHostMiddleware,
         allowed_hosts=list(settings.allowed_hosts),
     )
+    def resolve_browser_agent(request, session):
+        manager = workspace_registry.get(session.user.id).task_manager
+        origin = request.headers.get("origin") or f"{request.url.scheme}://{request.url.netloc}"
+        return manager.verify_identity_proof(request.headers["x-mpau-agent-proof"], origin=origin, include_binding=True)
+
+    app.add_middleware(AuthenticationMiddleware, service=auth_service, target_resolver=resolve_browser_agent)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(settings.allowed_origins),
         allow_methods=["*"],
         allow_headers=["*"],
         allow_credentials=True,
+        expose_headers=["X-MPAU-User-ID", "X-MPAU-Session-Changed"],
     )
-    app.add_middleware(AuthenticationMiddleware, service=auth_service)
+
+    @app.exception_handler(AgentTargetError)
+    async def invalid_agent_target(_request, exc):
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
 
     @app.middleware("http")
     async def reject_oversized_upload_requests(request: Request, call_next):
@@ -1533,6 +1544,15 @@ def create_app(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {"job": _job_response(job)}
 
+    @app.post("/api/accounts/{platform}/{account}/resume")
+    def resume_account(platform: str, account: str, workspace: UserWorkspace = Depends(operator_workspace)):
+        try:
+            selected_platform, selected_account = validate_platform(platform), validate_account_name(account)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        workspace.task_manager.resume_account(selected_platform, selected_account)
+        return {"resumed": True}
+
     @app.get("/api/jobs")
     def list_jobs(
         limit: int = Query(500, ge=1, le=1000),
@@ -1813,7 +1833,7 @@ def create_app(
             agents = status.get("agents") or []
             if not agents:
                 raise ValidationError("本地执行助手未在线")
-            selected_agent_id = agents[0]["agent_id"]
+            selected_agent_id = manager.require_target()
             video_asset = (
                 manager.get_local_asset(video_asset_id, agent_id=selected_agent_id)
                 if video_asset_id

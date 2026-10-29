@@ -108,6 +108,13 @@ def require(ok, message):
         raise UpgradeError(message)
 
 
+def verify_mounts(current, original):
+    """Ignore inspect list order, while comparing every mount field strictly."""
+    require(sorted(current, key=lambda mount: mount["Destination"])
+            == sorted(original, key=lambda mount: mount["Destination"]),
+            "切换后挂载变化")
+
+
 def run(args, *, capture=False, data=None):
     # 不回显 inspect/config 的原文；它们含生产密码。
     p = subprocess.run([str(a) for a in args], input=data,
@@ -433,7 +440,7 @@ class Upgrade:
         run(["docker", "exec", "mpau-web", "python", "-c", DATA_CHECK, "/var/lib/mpau/data"], capture=True)
         print("构建与预检完成。现在暂停 Web，备份完整数据卷和 MySQL，再切换。", flush=True)
         self.stopped = True
-        run(["docker", "stop", "--time", "60", "mpau-web"])
+        run(["docker", "stop", "--timeout", "60", "mpau-web"])
         before = json.loads(self.helper(DATA_CHECK, "/snapshot"))
         self.write_json("accounts-before.json", before)
         command = ["docker", "run", "--rm", "--network", "none", "--user", "0:0",
@@ -456,7 +463,7 @@ class Upgrade:
         current = self.inspect("inspect", "mpau-web")
         require(current["Image"] == self.new_image, "运行镜像与本次构建的镜像不一致")
         require(current["State"].get("Health", {}).get("Status") == "healthy", "新容器不健康")
-        require(current["Mounts"] == self.original["Mounts"], "切换后挂载变化")
+        verify_mounts(current["Mounts"], self.original["Mounts"])
         # 只执行 SELECT；不登录、不触发品牌自动绑定等业务写入。
         run(["docker", "exec", "mpau-web", "python", "-c", MYSQL_CHECK], capture=True)
         self.write_json("success.json", {"image": self.new_image, "source_directory": str(self.apps)})
@@ -468,7 +475,7 @@ class Upgrade:
             return
         print("升级失败，正在恢复原源码和旧镜像；不会自动覆盖数据库或用户数据。", file=sys.stderr, flush=True)
         if self.switch_attempted and run(["docker", "ps", "-q", "--filter", "name=^/mpau-web$"], capture=True).strip():
-            run(["docker", "stop", "--time", "60", "mpau-web"], capture=True)
+            run(["docker", "stop", "--timeout", "60", "mpau-web"], capture=True)
         # 依据实际目录恢复，也涵盖 rename 刚完成便收到中断信号的情况。
         if (self.backup / "source-before").exists():
             if self.apps.exists():

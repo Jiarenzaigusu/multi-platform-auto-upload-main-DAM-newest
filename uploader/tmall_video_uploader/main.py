@@ -2069,11 +2069,14 @@ class TmallVideo(TmallBaseUploader):
         finally:
             # 成功后保存 storage_state（更新 Cookie）
             if success:
-                if session is not None:
-                    await session.save_storage_state()
-                else:
-                    await context.storage_state(path=self.account_file)
-                tmall_logger.success(_msg("🥳", "cookie 更新完毕"))
+                try:
+                    if session is not None:
+                        await session.save_storage_state()
+                    else:
+                        await context.storage_state(path=self.account_file)
+                    tmall_logger.success(_msg("🥳", "cookie 更新完毕"))
+                except (Exception, asyncio.CancelledError):
+                    tmall_logger.warning("平台结果已确认，但登录状态保存失败；不会将发布成功改为失败")
             # 页面保留供人工复核
             if page:
                 try:

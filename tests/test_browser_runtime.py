@@ -58,6 +58,13 @@ class FakeContext:
         self.storage_paths: list[str] = []
         self.storage_options: list[dict] = []
         self.init_scripts: list[str] = []
+        self.listeners: dict[str, list] = {}
+
+    def on(self, event, callback) -> None:
+        self.listeners.setdefault(event, []).append(callback)
+
+    def remove_listener(self, event, callback) -> None:
+        self.listeners[event].remove(callback)
 
     async def add_init_script(self, *, path: str) -> None:
         self.init_scripts.append(path)

@@ -389,15 +389,18 @@ class AuthService:
         expires_at = datetime.now(timezone.utc) + timedelta(
             seconds=self.agent_token_seconds
         )
-        paired = self.store.consume_agent_pairing_code(
-            code_hash=self._hash_token(normalized_code),
-            agent_id=agent_id,
-            token_hash=self._hash_token(token),
-            device_name=device_name,
-            system=system,
-            version=version,
-            expires_at=expires_at.isoformat(),
-        )
+        try:
+            paired = self.store.consume_agent_pairing_code(
+                code_hash=self._hash_token(normalized_code),
+                agent_id=agent_id,
+                token_hash=self._hash_token(token),
+                device_name=device_name,
+                system=system,
+                version=version,
+                expires_at=expires_at.isoformat(),
+            )
+        except ValueError as exc:
+            raise AuthenticationError(str(exc)) from exc
         if paired is None:
             raise AuthenticationError("配对码无效或已经过期")
         self.store.record_audit(

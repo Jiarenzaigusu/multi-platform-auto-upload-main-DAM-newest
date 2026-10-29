@@ -634,6 +634,12 @@ class AuthStore:
                 connection.rollback()
                 return None
             user = self._user(row)
+            owner = connection.execute(
+                "SELECT user_id FROM agent_devices WHERE agent_id = ?", (agent_id,)
+            ).fetchone()
+            if owner is not None and owner["user_id"] != user.id:
+                connection.rollback()
+                raise ValueError("设备 ID 已归属其他用户，请在助手中重建本机设备标识后重新配对")
             updated = connection.execute(
                 "UPDATE agent_pairing_codes SET used_at = ? "
                 "WHERE id = ? AND used_at IS NULL",

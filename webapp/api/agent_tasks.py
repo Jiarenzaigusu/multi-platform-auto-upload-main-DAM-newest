@@ -160,6 +160,9 @@ class AgentTaskManager:
         if not requests:
             return []
         self.start()
+        target_agent_id = (
+            self._local_asset_agent_id(local_assets) if local_assets else None
+        )
         definitions: list[dict[str, Any]] = []
         ordered_requests = (
             sorted(
@@ -196,6 +199,7 @@ class AgentTaskManager:
                 payload["image_paths"] = []
                 payload["cover_image_path"] = None
                 payload["local_assets"] = dict(local_assets)
+                payload["target_agent_id"] = target_agent_id
                 payload["managed_upload"] = False
             definitions.append(
                 {
@@ -211,6 +215,28 @@ class AgentTaskManager:
         jobs = self.store.create_jobs(definitions)
         self._notify_job_available()
         return jobs
+
+    def _local_asset_agent_id(self, local_assets: dict[str, Any]) -> str:
+        """Derive ownership from verified server records, never caller metadata."""
+        assets = [local_assets.get("video"), local_assets.get("cover")]
+        assets.extend(local_assets.get("images") or [])
+        agent_ids: set[str] = set()
+        with self._guard:
+            self._drop_expired_local_uploads_locked(time.time())
+            for asset in assets:
+                if asset is None:
+                    continue
+                if not isinstance(asset, dict):
+                    raise ValueError("本机素材信息无效")
+                record = self._local_assets.get(asset.get("asset_id"))
+                if not record or not record.get("completed"):
+                    raise ValueError("本机素材不存在或已过期，请重新上传")
+                if record["user_id"] != self.user_id:
+                    raise ValueError("本机素材不属于当前用户")
+                agent_ids.add(record["agent_id"])
+        if len(agent_ids) != 1:
+            raise ValueError("本机素材必须属于同一台本地执行助手")
+        return next(iter(agent_ids))
 
     def retry_failed_batch(self, batch_id: str, *, new_batch_id: str) -> list[dict[str, Any]]:
         """Clone failed workbook rows while retaining their local PC paths."""
@@ -598,14 +624,31 @@ class AgentTaskManager:
                     item["id"],
                 ),
             )
-            job = next(
-                (
-                    item
-                    for item in queued
-                    if (item["platform"], item["account"]) not in active_accounts
-                ),
-                None,
-            )
+            job = None
+            for item in queued:
+                payload = item["payload"]
+                target_agent_id = payload.get("target_agent_id")
+                if payload.get("local_assets") and not target_agent_id:
+                    # Legacy queued jobs omitted ownership. Recover only from
+                    # verified records; the currently online PC is not evidence.
+                    try:
+                        target_agent_id = self._local_asset_agent_id(payload["local_assets"])
+                    except ValueError:
+                        self.store.update_job(
+                            item["id"],
+                            status="failed",
+                            message="无法确认本机素材所属设备，请重新上传素材并创建任务",
+                            error="旧任务缺少目标助手 ID，且素材归属记录不可恢复",
+                            finished_at=utc_now(),
+                        )
+                        continue
+                    payload = {**payload, "target_agent_id": target_agent_id}
+                    item = self.store.update_job(item["id"], payload=payload)
+                if target_agent_id and target_agent_id != agent_id:
+                    continue
+                if (item["platform"], item["account"]) not in active_accounts:
+                    job = item
+                    break
             if job is None:
                 return None
             now = datetime.now(timezone.utc)

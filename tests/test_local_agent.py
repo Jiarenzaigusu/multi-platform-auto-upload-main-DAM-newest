@@ -565,7 +565,121 @@ class AgentTaskManagerTests(unittest.TestCase):
         self.assertEqual(payload["image_paths"], [])
         self.assertIsNone(payload["cover_image_path"])
         self.assertEqual(payload["local_assets"]["video"]["asset_id"], authorized["asset_id"])
+        self.assertEqual(payload["target_agent_id"], AGENT_ID)
         self.assertNotIn(ticket["ticket"], str(payload))
+
+    def _submit_direct_asset_job(self, agent_id=AGENT_ID):
+        ticket = self.manager.issue_local_upload_ticket(
+            agent_id=agent_id, origin="https://console.example",
+            filename="demo.mp4", size=5, kind="video", max_size=100,
+        )
+        self.manager.authorize_local_upload(
+            ticket=ticket["ticket"], agent_id=agent_id,
+            origin="https://console.example", reserve=True,
+        )
+        completed = self.manager.complete_local_upload(
+            ticket=ticket["ticket"], agent_id=agent_id,
+            origin="https://console.example", sha256="a" * 64, size=5,
+        )
+        fixture = self.paths.runtime / "validation.mp4"
+        fixture.write_bytes(b"video")
+        request = validate_publish_request(
+            platform="tmall", account="shop1", video_path=fixture,
+            original_filename="demo.mp4", title="设备归属测试",
+        )
+        asset = {key: completed[key] for key in (
+            "asset_id", "filename", "size", "kind", "sha256",
+        )}
+        return self.manager.submit_publish_task(request, local_assets={"video": asset})
+
+    def test_other_device_skips_local_asset_job_without_blocking_its_queue(self):
+        self.connect()
+        local_job = self._submit_direct_asset_job()
+        self.manager.disconnect_agent(AGENT_ID)
+        other_id = "c" * 32
+        self.manager.connect_agent(
+            agent_id=other_id, device_name="Other-PC", system="Windows", version="test",
+        )
+        other_job = self.manager.submit_account_task(
+            kind="check", platform="tmall", account="shop2",
+        )
+
+        claimed = self.manager.claim_next_job(other_id)
+
+        self.assertEqual(claimed["id"], other_job["id"])
+        self.assertEqual(self.store.get_job(local_job["id"])["status"], "queued")
+        self.manager.disconnect_agent(other_id)
+        self.connect()
+        self.assertEqual(self.manager.claim_next_job(AGENT_ID)["id"], local_job["id"])
+
+    def test_local_asset_target_survives_manager_and_store_restart(self):
+        self.connect()
+        job = self._submit_direct_asset_job()
+        self.manager.shutdown()
+        self.store = JobStore(self.paths.runtime)
+        self.manager = AgentTaskManager(self.store, user_id=USER_ID, paths=self.paths)
+        other_id = "c" * 32
+        self.manager.connect_agent(
+            agent_id=other_id, device_name="Other-PC", system="Windows", version="test",
+        )
+        self.assertIsNone(self.manager.claim_next_job(other_id))
+        self.manager.disconnect_agent(other_id)
+        self.connect()
+        self.assertEqual(self.manager.claim_next_job(AGENT_ID)["id"], job["id"])
+
+    def test_legacy_local_asset_target_is_recovered_from_server_records(self):
+        self.connect()
+        job = self._submit_direct_asset_job()
+        payload = dict(job["payload"])
+        payload.pop("target_agent_id")
+        self.store.update_job(job["id"], payload=payload)
+
+        claimed = self.manager.claim_next_job(AGENT_ID)
+
+        self.assertEqual(claimed["id"], job["id"])
+        self.assertEqual(claimed["payload"]["target_agent_id"], AGENT_ID)
+
+    def test_legacy_local_asset_without_ownership_fails_without_blocking_queue(self):
+        self.connect()
+        job = self._submit_direct_asset_job()
+        payload = dict(job["payload"])
+        payload.pop("target_agent_id")
+        self.store.update_job(job["id"], payload=payload)
+        self.manager._local_assets.clear()
+        next_job = self.manager.submit_account_task(
+            kind="check", platform="tmall", account="shop2",
+        )
+
+        self.assertEqual(self.manager.claim_next_job(AGENT_ID)["id"], next_job["id"])
+        failed = self.store.get_job(job["id"])
+        self.assertEqual(failed["status"], "failed")
+        self.assertIn("重新上传", failed["message"])
+
+    def test_local_asset_owner_comes_from_server_records_not_supplied_device_id(self):
+        self.connect()
+        job = self._submit_direct_asset_job()
+        assets = job["payload"]["local_assets"]
+        assets["video"]["agent_id"] = "c" * 32
+        self.assertEqual(self.manager._local_asset_agent_id(assets), AGENT_ID)
+
+        self.manager._local_assets[assets["video"]["asset_id"]]["user_id"] = "d" * 32
+        with self.assertRaisesRegex(ValueError, "不属于当前用户"):
+            self.manager._local_asset_agent_id(assets)
+
+    def test_mixed_device_assets_are_rejected(self):
+        self.connect()
+        first = self._submit_direct_asset_job()
+        self.manager.disconnect_agent(AGENT_ID)
+        other_id = "c" * 32
+        self.manager.connect_agent(
+            agent_id=other_id, device_name="Other-PC", system="Windows", version="test",
+        )
+        second = self._submit_direct_asset_job(other_id)
+        with self.assertRaisesRegex(ValueError, "同一台"):
+            self.manager._local_asset_agent_id({"images": [
+                first["payload"]["local_assets"]["video"],
+                second["payload"]["local_assets"]["video"],
+            ]})
 
     def test_tmall_product_lookup_round_trips_through_agent_job(self):
         self.connect()

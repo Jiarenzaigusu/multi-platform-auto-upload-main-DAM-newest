@@ -5,15 +5,14 @@ uploader.jd_video_uploader.main 模块
 京东京麦平台（dr.jd.com）视频发布器核心实现。
 
 主要功能：
-1. Cookie 校验：访问发布中心判断是否仍处于登录态
+1. 登录校验：访问发布中心，等待账号接口确认有效身份
 2. 手动登录：打开可见浏览器，等待用户完成扫码/密码/短信等验证后保存 storage_state
 3. 视频发布：上传视频 → 填写标题 → 关联商品（可选）→ 选择创作者声明 →
             开启自主原创（可选）→ 设置定时（可选）→ 点击发布按钮 →
             处理验证码（人工介入）→ 等待确认
 
 注意事项：
-- 京麦页面对 document.body.innerText 做了限制，登录后 innerText 只返回 '👋'，
-  所以通过 HTML 体量间接判断登录状态
+- 登录成功必须取得账号接口的明确确认，不能根据后台页面体量判断
 - 京麦发布页是微前端，真实表单在 iframe.micro-iframe 中
 - 验证码需人工完成，本模块会暂停并等待
 - 发布结果可能"不确定"，会抛出 PublishResultUncertainError
@@ -36,6 +35,7 @@ from patchright.async_api import (
 )
 
 from uploader.errors import PublishResultUncertainError
+from uploader.jd_auth import JdAuthProbe, JdAuthVerificationError
 from utils.config import DEBUG_MODE
 from uploader.base_video import BaseVideoUploader
 from uploader.jd_session import JdBrowserSession
@@ -357,49 +357,32 @@ def _is_known_publish_success_url(url: str) -> bool:
     return any(marker in route for marker in ("post-center.html", "publish-success"))
 
 
-async def _is_logged_in(page) -> bool:
-    """判断当前 page 是否已登录京麦后台。
-
-    判定规则（实测可靠）：
-    1. URL host 是 dr.jd.com 且 path 以 /jm 开头
-    2. 浏览器标题严格为「京麦」（未登录被踢到 passport 时 title 是「京麦工作台-京东商家一站式工作台」）
-    3. body outerHTML 体量 ≥ 50KB（登录页 ~9KB；登录后 ~600KB）
-
-    ⚠️ 京麦页面对 document.body.innerText 做了限制，登录后 innerText 只返回 '👋'
-       一个 emoji，不能用来判定。所以才用 HTML 体量这个间接信号。
-    """
-    if _url_host(page.url) in JD_AUTH_HOSTS:
-        return False
+async def _is_logged_in(page, probe: JdAuthProbe) -> bool:
+    """Require a JD account API confirmation as well as the expected page."""
     parsed = urlparse(page.url)
     if _url_host(page.url) != JD_LOGIN_SUCCESS_HOST or not parsed.path.startswith("/jm"):
         return False
-    try:
-        title = await page.title()
-        body_html_len = await page.evaluate(
-            "() => document.body ? document.body.outerHTML.length : 0"
-        )
-    except Exception:
-        return False
-    return title.strip() == "京麦" and body_html_len >= 50_000
+    return probe.authenticated
 
 
 async def _cookie_auth_in_context(context: BrowserContext) -> bool:
-    """在指定 BrowserContext 中校验京东 Cookie 是否有效。
-
-    访问发布中心，最多等待 8 轮（每轮 2 秒）观察是否进入登录态。
-    """
-    page = await context.new_page()
-    try:
-        await page.goto(JD_POST_CENTER_URL, wait_until="domcontentloaded")
-        for _ in range(8):
-            await asyncio.sleep(2)
-            if _url_host(page.url) in JD_AUTH_HOSTS:
-                return False
-            if await _is_logged_in(page):
-                return True
-        return False
-    finally:
-        await page.close()
+    """Verify natural account requests; do not send upload or publish requests."""
+    async with JdAuthProbe(context) as probe:
+        page = await context.new_page()
+        try:
+            await page.goto(JD_POST_CENTER_URL, wait_until="domcontentloaded")
+            for _ in range(8):
+                await asyncio.sleep(2)
+                if _url_host(page.url) in JD_AUTH_HOSTS:
+                    return False
+                probe.require_no_denial()
+                if await _is_logged_in(page, probe):
+                    return True
+                if probe.error is not None and probe.error.status == "login_required":
+                    return False
+            raise probe.failure()
+        finally:
+            await page.close()
 
 
 async def cookie_auth(
@@ -412,18 +395,20 @@ async def cookie_auth(
 
     :param account_file: 账号 Cookie 文件路径
     :param session: 浏览器会话
-    :param max_age_seconds: 鉴权缓存有效期，<=0 不使用缓存
+    :param max_age_seconds: 保留调用兼容；京东每次都实际复核账号接口
     :returns: True 有效，False 失效
     """
-    # 优先复用鉴权缓存
-    if session.auth_is_fresh(max_age_seconds):
-        return True
     context = await session.ensure_open()
     try:
         authenticated = await _cookie_auth_in_context(context)
+    except JdAuthVerificationError as exc:
+        session.mark_authenticated(False)
+        jd_logger.warning(_msg("🔎", str(exc)))
+        raise
     except Exception as exc:
-        jd_logger.warning(_msg("😵", f"cookie 校验出错，按失效处理: {exc}"))
-        authenticated = False
+        session.mark_authenticated(False)
+        # Browser errors can include signed request URLs. Keep diagnostics fixed.
+        raise JdAuthVerificationError("京东认证检查未能完成，请检查浏览器连接后重新验证") from exc
     session.mark_authenticated(authenticated)
     return authenticated
 
@@ -442,14 +427,23 @@ async def jd_setup(
     :param handle: True 时若 Cookie 失效则打开可见浏览器引导用户登录
     :param return_detail: True 返回完整结果 dict，False 返回布尔
     :param session: 浏览器会话
-    :param auth_cache_seconds: 鉴权缓存有效期
+    :param auth_cache_seconds: 保留调用兼容；京东每次都实际复核账号接口
     :returns: 取决于 return_detail，返回 dict 或布尔
     """
-    if not os.path.exists(account_file) or not await cookie_auth(
-        account_file,
-        session=session,
-        max_age_seconds=auth_cache_seconds,
-    ):
+    try:
+        authenticated = os.path.exists(account_file) and await cookie_auth(
+            account_file,
+            session=session,
+            max_age_seconds=auth_cache_seconds,
+        )
+    except JdAuthVerificationError as exc:
+        if not handle or exc.status not in {"auth_unverified", "login_required"}:
+            if return_detail:
+                return _build_login_result(False, exc.status, str(exc), account_file)
+            raise
+        authenticated = False
+
+    if not authenticated:
         if not handle:
             result = _build_login_result(False, "cookie_invalid", "cookie文件不存在或已失效", account_file)
             return result if return_detail else False
@@ -460,7 +454,7 @@ async def jd_setup(
         )
         return result if return_detail else result["success"]
 
-    result = _build_login_result(True, "cookie_valid", "cookie有效", account_file)
+    result = _build_login_result(True, "cookie_valid", "京东账号接口已确认登录身份", account_file)
     return result if return_detail else True
 
 
@@ -482,12 +476,14 @@ async def jd_cookie_gen(
     注意：京东可能在新的 tab 中完成认证，因此需要遍历 context.pages 检测登录态。
     """
     context = await session.ensure_open()
+    probe = JdAuthProbe(context)
     # 记录本次登录前已有的 page，登录流程结束后只清理新建的 page
     existing_page_ids = {id(open_page) for open_page in context.pages}
     result = _build_login_result(False, "failed", "京东京麦登录失败", account_file)
     page = None
 
     try:
+        await probe.__aenter__()
         page = await context.new_page()
         await page.goto(JD_POST_CENTER_URL, wait_until="domcontentloaded")
         jd_logger.info(_msg("🧍", "已打开京东京麦发布中心入口，请在浏览器中完成登录"))
@@ -497,36 +493,46 @@ async def jd_cookie_gen(
 
         # 轮询等待用户完成登录
         for tick in range(max_checks):
+            probe.require_no_denial()
             # 京东可能在新 tab 中完成认证，遍历所有 page
             hit = None
             for candidate in context.pages:
-                if await _is_logged_in(candidate):
+                if await _is_logged_in(candidate, probe):
                     hit = candidate
                     break
             if hit is not None:
                 page = hit
-                jd_logger.info(_msg("🥳", f"检测到已进入京东京麦: {page.url}"))
+                jd_logger.info(_msg("🥳", "京东账号接口已确认登录身份"))
                 break
 
             if tick % 10 == 0:
-                jd_logger.info(_msg("⏳", f"等待用户完成登录: {[p.url for p in context.pages]}"))
+                jd_logger.info(_msg("⏳", "等待用户完成登录及账号接口认证确认"))
             await asyncio.sleep(poll_interval)
         else:
             # for...else：循环正常结束（未 break）表示超时
-            return _build_login_result(False, "timeout", "等待京东京麦登录超时", account_file, page.url)
+            result = _build_login_result(False, "timeout", f"等待京东京麦登录超时：{probe.failure()}", account_file, page.url)
+            return result
 
         await asyncio.sleep(3)
+        probe.require_no_denial()
+        if not probe.authenticated:
+            raise probe.failure()
         await session.save_storage_state()
         jd_logger.info(_msg("💾", f"cookie 已保存: {account_file}"))
 
-        jd_logger.success(_msg("🥳", "京东京麦登录成功，cookie 验证通过"))
-        result = _build_login_result(True, "success", "京东京麦登录成功", account_file, page.url)
+        jd_logger.success(_msg("🥳", "京东京麦登录成功，账号接口认证通过"))
+        result = _build_login_result(True, "success", "京东京麦登录成功，账号接口认证通过", account_file, page.url)
         session.mark_authenticated(True)
+    except JdAuthVerificationError as exc:
+        result = _build_login_result(False, exc.status, str(exc), account_file,
+                                     current_url=page.url if page else "")
     except Exception as exc:
         result = _build_login_result(False, "failed", str(exc), account_file,
                                      current_url=page.url if page else "")
     finally:
+        await probe.__aexit__()
         if not result["success"]:
+            session.mark_authenticated(False)
             jd_logger.error(_msg("😢", f"登录失败: {result['message']}"))
         # 只清理本次登录流程新建的页面，保留之前累积的发布页供人工复核
         for open_page in [

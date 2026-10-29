@@ -56,5 +56,4 @@ include-package-data = true
 include = ["local_agent*", "uploader*", "utils*", "webapp*"]
 
 [tool.setuptools.package-data]
-utils = ["stealth.min.js"]
 webapp = ["frontend/dist/**", "templates/*.xlsx"]

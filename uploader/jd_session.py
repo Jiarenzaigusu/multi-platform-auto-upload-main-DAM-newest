@@ -13,6 +13,10 @@ from utils.log import jd_logger
 class JdBrowserSession(BrowserSession):
     """Browser context for one authenticated JD account."""
 
+    def storage_state_options(self) -> dict[str, object]:
+        # Preserve authentication tokens if JD stores them in IndexedDB.
+        return {"indexed_db": True}
+
 
 class JdSessionPool(BrowserSessionPool):
     """Pool shared by current and future JD content publishers."""
